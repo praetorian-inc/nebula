@@ -8,6 +8,7 @@ import (
 	analyze "github.com/praetorian-inc/nebula/modules/analyze/aws"
 	o "github.com/praetorian-inc/nebula/modules/options"
 	reconaws "github.com/praetorian-inc/nebula/modules/recon/aws"
+	recongcp "github.com/praetorian-inc/nebula/modules/recon/gcp"
 	"github.com/spf13/cobra"
 )
 
@@ -29,7 +30,9 @@ func init() {
 	//RegisterModule(azureReconCmd, reconaz.AzureSummaryMetadata, reconaz.AzureSummaryOptions, azureCommonOptions, reconaz.NewAzureSummary)
 
 	// GCP Recon
-	//RegisterModule(gcpReconCmd, recongcp.GetProjectsMetadata, recongcp.GetProjectsOptions, noCommon, recongcp.NewGetProjects)
+	RegisterModule(gcpReconCmd, recongcp.GetProjectsMetadata, recongcp.GetProjectsOptions, noCommon, recongcp.NewGetProjects)
+	RegisterModule(gcpReconCmd, recongcp.GetServiceAccountsMetadata, recongcp.GetServiceAccountsOptions, noCommon, recongcp.NewGetServiceAccounts)
+	RegisterModule(gcpReconCmd, recongcp.GetIAMPolicyMetadata, recongcp.GetIAMPolicyOptions, noCommon, recongcp.NewGetIAMPolicy)
 }
 
 var noCommon = []*o.Option{}

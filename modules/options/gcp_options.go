@@ -13,7 +13,6 @@ var GcpProjectIdOpt = Option{
 
 var GcpFolderIdOpt = Option{
 	Name:        "folder-id",
-	Short:       "f",
 	Description: "GCP folder ID",
 	Required:    true,
 	Type:        String,

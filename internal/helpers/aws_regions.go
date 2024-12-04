@@ -20,6 +20,7 @@ var Regions = []string{
 	"ap-south-2",
 	"ap-southeast-3",
 	"ap-southeast-4",
+	"ap-southeast-5",
 	"ap-south-1",
 	"ap-northeast-3",
 	"ap-northeast-2",
@@ -42,6 +43,8 @@ var Regions = []string{
 	"sa-east-1",
 	"us-gov-east-1",
 	"us-gov-west-1",
+	"cn-north-1",
+	"cn-northwest-1",
 }
 
 func EnabledRegions(profile string) ([]string, error) {

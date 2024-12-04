@@ -2,6 +2,7 @@ package recon
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -184,61 +185,61 @@ func listAllResourcesStage(ctx context.Context, opts []*types.Option, in <-chan 
 
 // Markdown formatting to create a summary table
 func ProcessResourcesForMarkdown(resources []types.EnrichedResourceDescription) types.MarkdownTable {
-	// Map to store summaries
-	summaries := make(map[string]*ResourceSummary)
+	summaries := make(map[string]map[string]int)
+	activeRegions := make(map[string]bool)
+	uniqueTypes := make(map[string]bool)
+	var accountId string
 
 	// Process each resource
 	for _, res := range resources {
-		if summary, exists := summaries[res.TypeName]; exists {
-			summary.Count++
-			// Add region if not already present
-			found := false
-			for _, r := range summary.Regions {
-				if r == res.Region {
-					found = true
-					break
-				}
-			}
-			if !found {
-				summary.Regions = append(summary.Regions, res.Region)
-			}
-		} else {
-			summaries[res.TypeName] = &ResourceSummary{
-				ResourceType: res.TypeName,
-				Count:        1,
-				Regions:      []string{res.Region},
-			}
+		accountId = res.AccountId
+		uniqueTypes[res.TypeName] = true
+
+		if _, exists := summaries[res.TypeName]; !exists {
+			summaries[res.TypeName] = make(map[string]int)
+		}
+		summaries[res.TypeName][res.Region]++
+		if summaries[res.TypeName][res.Region] > 0 {
+			activeRegions[res.Region] = true
 		}
 	}
 
-	// Convert map to slice for sorting
-	var summarySlice []ResourceSummary
-	for _, v := range summaries {
-		// Sort regions for consistent output
-		sort.Strings(v.Regions)
-		summarySlice = append(summarySlice, *v)
+	var regions []string
+	for region := range activeRegions {
+		regions = append(regions, region)
 	}
 
-	// Sort by resource type
-	sort.Slice(summarySlice, func(i, j int) bool {
-		return summarySlice[i].ResourceType < summarySlice[j].ResourceType
+	// Sort in reverse order
+	sort.Slice(regions, func(i, j int) bool {
+		return regions[i] > regions[j] // Changed from < to >
 	})
 
-	// Create markdown table data
-	headers := []string{"Resource Type", "Count", "Regions"}
-	rows := make([][]string, len(summarySlice))
+	var resourceTypes []string
+	for resType := range uniqueTypes {
+		resourceTypes = append(resourceTypes, resType)
+	}
+	sort.Strings(resourceTypes)
 
-	for i, summary := range summarySlice {
-		rows[i] = []string{
-			summary.ResourceType,
-			strconv.Itoa(summary.Count),
-			strings.Join(summary.Regions, ", "),
+	headers := []string{"Type"}
+	headers = append(headers, regions...)
+
+	rows := make([][]string, len(resourceTypes))
+	for i, resType := range resourceTypes {
+		row := make([]string, len(headers))
+		row[0] = resType
+		for j, region := range regions {
+			count := summaries[resType][region]
+			if count == 0 {
+				row[j+1] = "" // Empty string instead of "0"
+			} else {
+				row[j+1] = strconv.Itoa(count)
+			}
 		}
+		rows[i] = row
 	}
 
-	// Create markdown table
 	return types.MarkdownTable{
-		TableHeading: "AWS Resource Summary",
+		TableHeading: fmt.Sprintf("AWS Resource Summary [%s]", accountId),
 		Headers:      headers,
 		Rows:         rows,
 	}

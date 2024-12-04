@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi"
@@ -105,13 +106,15 @@ func NewAwsListAllResources(opts []*types.Option) (<-chan string, stages.Stage[s
 			out <- resources                              // For JSON
 			out <- ProcessResourcesForMarkdown(resources) // For Markdown
 		}()
-
 		return out
 	}
 
 	return stages.Generator([]string{"all"}), pipeline, nil
 }
 
+// This stage differs from the CloudControlListResources recon stage as it uses tag editor
+// Tag editor uses far fewer API calls and can provide a high-level overview of all the resources on the account
+// Tag editor serves the purpose of this module which is to provide a glimpse into the services running on the account
 func listAllResourcesStage(ctx context.Context, opts []*types.Option, in <-chan string) <-chan types.EnrichedResourceDescription {
 	out := make(chan types.EnrichedResourceDescription)
 
@@ -122,7 +125,7 @@ func listAllResourcesStage(ctx context.Context, opts []*types.Option, in <-chan 
 		regionsOpt := types.GetOptionByName(options.AwsRegionsOpt.Name, opts).Value
 
 		var regions []string
-		if regionsOpt == "ALL" {
+		if strings.EqualFold(regionsOpt, "ALL") {
 			regions = AllAwsRegions
 			logs.ConsoleLogger().Info("Using all AWS regions")
 		} else {
@@ -134,74 +137,89 @@ func listAllResourcesStage(ctx context.Context, opts []*types.Option, in <-chan 
 			}
 		}
 
+		var wg sync.WaitGroup
+
+		// Process each region
 		for _, region := range regions {
-			cfg, err := helpers.GetAWSCfg(region, profile)
-			if err != nil {
-				logs.ConsoleLogger().Error("Error getting AWS config for region " + region + ": " + err.Error())
-				continue
-			}
+			// Adding concurrency as we aren't actually creating a lot of API calls and this should not hit the AWS rate limit
+			// We can revisit this if we are finding that we are hitting the limit
+			wg.Add(1)
+			go func(region string) {
+				defer wg.Done()
 
-			// Get account ID for enrichment
-			accountId, err := helpers.GetAccountId(cfg)
-			if err != nil {
-				// Skip regions where we get InvalidClientTokenId error, this indicates that the region is not activated
-				// There is probably a cleaner solution to check the regions activated per service but it would add significant overhead and recursion
-				// Decided on just ignoring the specific error
-				if strings.Contains(err.Error(), "InvalidClientTokenId") {
-					logs.ConsoleLogger().Debug("Skipping disabled region: " + region)
-					continue
-				}
-				logs.ConsoleLogger().Error("Error getting account ID: " + err.Error())
-				continue
-			}
-
-			client := resourcegroupstaggingapi.NewFromConfig(cfg)
-			input := &resourcegroupstaggingapi.GetResourcesInput{}
-
-			for {
-				resp, err := client.GetResources(ctx, input)
+				logs.ConsoleLogger().Info("Processing region: " + region)
+				cfg, err := helpers.GetAWSCfg(region, profile)
 				if err != nil {
-					// Also skip resource listing for InvalidClientTokenId errors
+					logs.ConsoleLogger().Error("Error getting AWS config for region " + region + ": " + err.Error())
+					return
+				}
+
+				// Get account ID for enrichment
+				accountId, err := helpers.GetAccountId(cfg)
+				if err != nil {
 					if strings.Contains(err.Error(), "InvalidClientTokenId") {
-						logs.ConsoleLogger().Debug("Skipping resource listing for disabled region: " + region)
+						logs.ConsoleLogger().Info("Skipping disabled region: " + region)
+						return
+					}
+					logs.ConsoleLogger().Error("Error getting account ID: " + err.Error())
+					return
+				}
+
+				client := resourcegroupstaggingapi.NewFromConfig(cfg)
+				input := &resourcegroupstaggingapi.GetResourcesInput{}
+
+				for {
+					resp, err := client.GetResources(ctx, input)
+					if err != nil {
+						// Instead of trying to handle disabled regions which might lead to false positives if EC2 is disabled for a region
+						// We will just handle the invalid region error and return
+						// With concurrency, this does not add any additional time and is actually faster than preparing the valid regions ahead of time
+						if strings.Contains(err.Error(), "InvalidClientTokenId") {
+							logs.ConsoleLogger().Debug("Skipping resource listing for disabled region: " + region)
+							return
+						}
+						logs.ConsoleLogger().Error("Error getting resources for region " + region + ": " + err.Error())
+						return
+					}
+
+					for _, resource := range resp.ResourceTagMappingList {
+						resourceArn, err := helpers.NewArn(*resource.ResourceARN)
+						if err != nil {
+							logs.ConsoleLogger().Error("Error parsing ARN: " + err.Error())
+							continue
+						}
+
+						enrichedResource := types.EnrichedResourceDescription{
+							Identifier: *resource.ResourceARN,
+							TypeName:   resourceArn.Service,
+							Region:     region,
+							AccountId:  accountId,
+							Properties: resource.Tags,
+						}
+
+						select {
+						case <-ctx.Done():
+							return
+						case out <- enrichedResource:
+						}
+					}
+
+					if resp.PaginationToken == nil || *resp.PaginationToken == "" {
 						break
 					}
-					logs.ConsoleLogger().Error("Error getting resources for region " + region + ": " + err.Error())
-					break
+					input.PaginationToken = resp.PaginationToken
 				}
-
-				for _, resource := range resp.ResourceTagMappingList {
-					// Extract the resource type and ID from the ARN
-					resourceArn, err := helpers.NewArn(*resource.ResourceARN)
-					if err != nil {
-						logs.ConsoleLogger().Error("Error parsing ARN: " + err.Error())
-						continue
-					}
-
-					// Create enriched resource description
-					enrichedResource := types.EnrichedResourceDescription{
-						Identifier: *resource.ResourceARN,
-						TypeName:   resourceArn.Service,
-						Region:     region,
-						AccountId:  accountId,
-						Properties: resource.Tags,
-					}
-
-					out <- enrichedResource
-				}
-
-				// Handle pagination
-				if resp.PaginationToken == nil || *resp.PaginationToken == "" {
-					break
-				}
-				input.PaginationToken = resp.PaginationToken
-			}
+			}(region)
 		}
+
+		// Wait for all regions to complete
+		wg.Wait()
 	}()
 
 	return out
 }
 
+// Markdown formatting to create a summary table
 func ProcessResourcesForMarkdown(resources []types.EnrichedResourceDescription) types.MarkdownTable {
 	// Map to store summaries
 	summaries := make(map[string]*ResourceSummary)

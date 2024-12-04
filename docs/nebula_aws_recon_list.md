@@ -9,7 +9,7 @@ nebula aws recon list [flags]
 ### Options
 
 ```
-  -f, --file string            File name (default "list-1733275182.json")
+  -f, --file string            File name (default "list-1733275528.json")
   -h, --help                   help for list
       --profile string         AWS shared credentials profile
   -r, --regions string         Comma separated list of AWS regions

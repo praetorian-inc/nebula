@@ -9,7 +9,7 @@ nebula aws recon public-resources [flags]
 ### Options
 
 ```
-  -f, --file string            File name (default "public-resources-1733275182.json")
+  -f, --file string            File name (default "public-resources-1733275528.json")
   -h, --help                   help for public-resources
       --profile string         AWS shared credentials profile
   -r, --regions string         Comma separated list of AWS regions

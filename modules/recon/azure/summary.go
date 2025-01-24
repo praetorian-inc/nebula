@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/praetorian-inc/nebula/internal/helpers"
+	"github.com/praetorian-inc/nebula/internal/message"
 	op "github.com/praetorian-inc/nebula/internal/output_providers"
 	"github.com/praetorian-inc/nebula/modules"
 	"github.com/praetorian-inc/nebula/modules/options"
@@ -68,8 +69,16 @@ func NewAzureSummary(opts []*types.Option) (<-chan string, stages.Stage[string, 
 	subscriptionOpt := options.GetOptionByName("subscription", opts).Value
 
 	if strings.EqualFold(subscriptionOpt, "all") {
-		subscriptions, err := helpers.ListSubscriptions(context.Background(), opts)
+		ctx := context.WithValue(context.Background(), "metadata", AzureSummaryMetadata)
+		subscriptions, err := helpers.ListSubscriptions(ctx, opts)
+
 		if err != nil {
+
+			if helpers.IsAuthenticationError(err) {
+				message.Error(helpers.GetAuthenticationHelp())
+				return nil, nil, fmt.Errorf("authentication failed")
+			}
+
 			slog.Error("Failed to list subscriptions", slog.String("error", err.Error()))
 			return nil, nil, err
 		}

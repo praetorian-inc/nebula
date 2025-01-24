@@ -856,3 +856,27 @@ func GetSubscriptionRoleAssignments(ctx context.Context, client *armauthorizatio
 
 	return assignments, nil
 }
+
+func IsAuthenticationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "failed to acquire a token") ||
+		strings.Contains(errStr, "authentication failed") ||
+		strings.Contains(errStr, "AZURE_TENANT_ID") ||
+		strings.Contains(errStr, "DefaultAzureCredential")
+}
+
+func GetAuthenticationHelp() string {
+	return `Authentication failed. Please ensure one of the following:
+1. Environment variables are set:
+   - AZURE_TENANT_ID
+   - AZURE_CLIENT_ID
+   - AZURE_CLIENT_SECRET
+2. Azure CLI is installed and you are logged in ('az login')
+3. Azure Developer CLI is installed and configured
+4. Running in an Azure environment with managed identity
+
+For more information see: https://aka.ms/azsdk/go/identity/troubleshoot`
+}

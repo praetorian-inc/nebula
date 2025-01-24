@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/praetorian-inc/nebula/internal/helpers"
+	"github.com/praetorian-inc/nebula/internal/message"
 	op "github.com/praetorian-inc/nebula/internal/output_providers"
 	"github.com/praetorian-inc/nebula/modules"
 	"github.com/praetorian-inc/nebula/modules/options"
@@ -80,12 +81,26 @@ func NewAzureRoleAssignments(opts []*types.Option) (<-chan string, stages.Stage[
 	subscriptionOpt := options.GetOptionByName("subscription", opts).Value
 
 	if strings.EqualFold(subscriptionOpt, "all") {
-		// Added context with timeout for subscription listing
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		// Added metadata to context
+		baseCtx := context.WithValue(context.Background(), "metadata", AzureRoleAssignmentsMetadata)
+
+		// Add timeout to the context with metadata
+		timeoutSeconds, err := strconv.Atoi(options.GetOptionByName("timeout", opts).Value)
+
+		if err != nil {
+			timeoutSeconds = 300 // Default 5 minute timeout
+		}
+
+		ctx, cancel := context.WithTimeout(baseCtx, time.Duration(timeoutSeconds)*time.Second)
 		defer cancel()
 
 		subscriptions, err := helpers.ListSubscriptions(ctx, opts)
+
 		if err != nil {
+			if helpers.IsAuthenticationError(err) {
+				message.Error(helpers.GetAuthenticationHelp())
+				return nil, nil, fmt.Errorf("authentication failed")
+			}
 			return nil, nil, err
 		}
 

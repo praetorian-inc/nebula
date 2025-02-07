@@ -19,98 +19,119 @@ import (
 // This should be the primary method of listing resources in AWS.
 func AwsCloudControlListResources(ctx context.Context, opts []*types.Option, rtype <-chan string) <-chan types.EnrichedResourceDescription {
 	logger := logs.NewStageLogger(ctx, opts, "CloudControlListResources")
-
 	out := make(chan types.EnrichedResourceDescription)
-	logger.Info("Listing resources")
 
-	profile := options.GetOptionByName("profile", opts).Value
-	regions, err := helpers.ParseRegionsOption(options.GetOptionByName(options.AwsRegionsOpt.Name, opts).Value, profile, opts)
-	if err != nil {
-		logger.Error(err.Error())
-		return nil
-	}
+	// Start a goroutine to process resources
+	go func() {
+		// Ensure channel is closed when we're done
+		defer close(out)
 
-	config, err := helpers.GetAWSCfg(regions[0], profile, opts)
-	if err != nil {
-		logger.Error(err.Error())
-		return nil
-	}
-	acctId, err := helpers.GetAccountId(config)
-	if err != nil {
-		logger.Error(err.Error())
-		return nil
-	}
+		logger.Info("Listing resources")
 
-	var wg sync.WaitGroup
+		// Get profile and validate regions
+		profile := options.GetOptionByName("profile", opts).Value
+		regions, err := helpers.ParseRegionsOption(options.GetOptionByName(options.AwsRegionsOpt.Name, opts).Value, profile, opts)
+		if err != nil {
+			logger.Error("Failed to parse regions: " + err.Error())
+			return
+		}
 
-	// Create semaphores for each region to limit concurrent resource processing
-	regionSemaphores := make(map[string]chan struct{})
-	for _, region := range regions {
-		regionSemaphores[region] = make(chan struct{}, 5)
-	}
+		// Set up AWS config and validate credentials
+		config, err := helpers.GetAWSCfg(regions[0], profile, opts)
+		if err != nil {
+			logger.Error("Failed to get AWS config: " + err.Error())
+			return
+		}
 
-	for rtype := range rtype {
-		for _, region := range regions {
-			// Skip non us-east-1 regions for global services
-			if helpers.IsGlobalService(rtype) && region != "us-east-1" {
-				continue
-			}
+		// Validate AWS credentials
+		acctId, err := helpers.GetAccountId(config)
+		if err != nil {
+			logger.Error("Failed to get AWS account ID - check credentials and connectivity: " + err.Error())
+			return
+		}
 
-			logger.Info("Listing resources of type " + rtype + " in region: " + region)
-			wg.Add(1)
-			go func(region string, rtype string) {
-				defer wg.Done()
-				config, _ := helpers.GetAWSCfg(region, profile, opts)
-				cc := cloudcontrol.NewFromConfig(config)
-				params := &cloudcontrol.ListResourcesInput{
-					TypeName: &rtype,
+		var wg sync.WaitGroup
+
+		// Process each resource type
+		for resourceType := range rtype {
+			// Process each region
+			for _, region := range regions {
+				// Skip non us-east-1 regions for global services
+				if helpers.IsGlobalService(resourceType) && region != "us-east-1" {
+					continue
 				}
 
-				for {
-					res, err := cc.ListResources(ctx, params)
+				logger.Info("Listing resources of type " + resourceType + " in region: " + region)
+
+				wg.Add(1)
+				go func(region string, resourceType string) {
+					defer wg.Done()
+
+					// Get region-specific config
+					regionConfig, err := helpers.GetAWSCfg(region, profile, opts)
 					if err != nil {
-						if strings.Contains(err.Error(), "TypeNotFoundException") {
-							logger.Info("The type %s is not available in region %s", rtype, region)
-							return
-						}
-						logger.Debug(err.Error())
+						logger.Error("Failed to get region config for " + region + ": " + err.Error())
 						return
 					}
 
-					var resourceWg sync.WaitGroup
-					for _, resource := range res.ResourceDescriptions {
-						resourceWg.Add(1)
-						go func(resource *cctypes.ResourceDescription) {
-							defer resourceWg.Done()
-							regionSemaphores[region] <- struct{}{}
-							defer func() { <-regionSemaphores[region] }()
+					cc := cloudcontrol.NewFromConfig(regionConfig)
+					params := &cloudcontrol.ListResourcesInput{
+						TypeName: &resourceType,
+					}
 
-							erd := types.EnrichedResourceDescription{
-								Identifier: *resource.Identifier,
-								TypeName:   rtype,
-								Region:     region,
-								Properties: *resource.Properties,
-								AccountId:  acctId,
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						default:
+							res, err := cc.ListResources(ctx, params)
+							if err != nil {
+								if strings.Contains(err.Error(), "TypeNotFoundException") {
+									logger.Info("Resource type " + resourceType + " is not available in region " + region)
+									return
+								}
+								logger.Debug(err.Error())
+								return
 							}
-							erd.Arn = erd.ToArn()
-							out <- erd
-						}(&resource)
-					}
-					resourceWg.Wait()
 
-					if res.NextToken == nil {
-						break
+							var resourceWg sync.WaitGroup
+							for _, resource := range res.ResourceDescriptions {
+								resourceWg.Add(1)
+								go func(resource *cctypes.ResourceDescription) {
+									defer resourceWg.Done()
+
+									erd := types.EnrichedResourceDescription{
+										Identifier: *resource.Identifier,
+										TypeName:   resourceType,
+										Region:     region,
+										Properties: *resource.Properties,
+										AccountId:  acctId,
+									}
+									erd.Arn = erd.ToArn()
+
+									select {
+									case out <- erd:
+									case <-ctx.Done():
+										return
+									}
+								}(&resource)
+							}
+							resourceWg.Wait()
+
+							if res.NextToken == nil {
+								break
+							}
+							params.NextToken = res.NextToken
+						}
 					}
-					params.NextToken = res.NextToken
-				}
-				logger.Info("Completed collecting resource type " + rtype + " in region: " + region)
-			}(region, rtype)
+
+					logger.Info("Completed collecting resource type " + resourceType + " in region: " + region)
+				}(region, resourceType)
+			}
 		}
-	}
 
-	go func() {
+		// Wait for all goroutines to complete
 		wg.Wait()
-		close(out)
 	}()
 
 	return out

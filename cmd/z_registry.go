@@ -6,6 +6,7 @@ import (
 
 	"github.com/praetorian-inc/nebula/modules"
 	analyze "github.com/praetorian-inc/nebula/modules/analyze/aws"
+	awslogin "github.com/praetorian-inc/nebula/modules/login/aws"
 	augment "github.com/praetorian-inc/nebula/modules/misc/augment"
 	recon "github.com/praetorian-inc/nebula/modules/recon/aws"
 	reconaz "github.com/praetorian-inc/nebula/modules/recon/azure"
@@ -16,6 +17,10 @@ import (
 )
 
 func init() {
+	// ---- AWS Modules
+	// AWS Login
+	RegisterModule(awsLoginCmd, awslogin.AwsSSOIamICMetadata, awslogin.AwsSSOIamICOptions, noCommon, awslogin.AwsSSOIamICOutputProviders, awslogin.NewAwsSSOIamIC)
+
 	// AWS Analyze
 	RegisterModule(awsAnalyzeCmd, analyze.AccessKeyIdToAccountIdMetadata, analyze.AwsAccessKeyIdToAccountIdOptions, noCommon, analyze.AwsAccessKeyIdToAccountIdOutputProviders, analyze.NewAccessKeyIdToAccountId)
 	RegisterModule(awsAnalyzeCmd, analyze.KnownAccountIDMetadata, analyze.KnownAccountIDOptions, noCommon, analyze.KnownAccountIDOutputProviders, analyze.NewKnownAccountID)
@@ -34,6 +39,8 @@ func init() {
 	RegisterModule(awsReconCmd, recon.AwsListAllResourcesMetadata, recon.AwsListAllResourcesOptions, awsCommonOptions, recon.AwsListAllResourcesOutputProviders, recon.NewAwsListAllResources)
 	RegisterModule(awsReconCmd, recon.AwsEcrDumpMetadata, recon.AwsEcrDumpOptions, awsCommonOptions, recon.AwsEcrDumpOutputProviders, recon.NewAwsEcrDump)
 
+	// ---- Azure Modules
+
 	// Azure Recon
 	RegisterModule(azureReconCmd, reconaz.AzureSummaryMetadata, reconaz.AzureSummaryOptions, azureCommonOptions, reconaz.AzureSummaryOutputProviders, reconaz.NewAzureSummary)
 	RegisterModule(azureReconCmd, reconaz.AzureRoleAssignmentsMetadata, reconaz.AzureRoleAssignmentsOptions, azureCommonOptions, reconaz.AzureRoleAssignmentsOutputProviders, reconaz.NewAzureRoleAssignments)
@@ -42,13 +49,15 @@ func init() {
 	RegisterModule(azureReconCmd, reconaz.AzureDevOpsSecretsMetadata, reconaz.AzureDevOpsSecretsOptions, []*types.Option{}, reconaz.AzureDevOpsSecretsOutputProviders, reconaz.NewAzureDevOpsSecrets)
 	RegisterModule(azureReconCmd, reconaz.AzureARGReconMetadata, reconaz.AzureARGReconOptions, azureCommonOptions, reconaz.AzureARGReconOutputProviders, reconaz.NewAzureARGRecon)
 
+	// ---- GCP Modules
+
 	// GCP Recon
 	//RegisterModule(gcpReconCmd, recongcp.GetProjectsMetadata, recongcp.GetProjectsOptions, noCommon, recongcp.NewGetProjects)
 
-	// Saas Modules
+	// ---- Saas Modules
 	RegisterModule(saasReconCmd, reconsaas.SaasDockerDumpMetadata, reconsaas.SaasDockerDumpOptions, noCommon, reconsaas.SaasDockerDumpOutputProviders, reconsaas.NewSaasDockerDump)
 
-	// Misc Modules
+	// ---- Miscellaneous Modules
 	RegisterModule(miscAugmentCmd, augment.MiscProwlerToMDTableMetadata, augment.MiscProwlerToMDTableOptions, miscCommonOptions, augment.MiscProwlerToMDTableOutputProviders, augment.NewMiscProwlerToMDTable)
 }
 

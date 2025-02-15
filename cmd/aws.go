@@ -37,9 +37,19 @@ var awsReconCmd = &cobra.Command{
 	},
 }
 
+var awsLoginCmd = &cobra.Command{
+	Use:   "login",
+	Short: "AWS login commands",
+	Run: func(cmd *cobra.Command, args []string) {
+		cmd.Help()
+		os.Exit(1)
+	},
+}
+
 func init() {
 	awsCmd.AddCommand(awsAnalyzeCmd)
 	awsCmd.AddCommand(awsReconCmd)
+	awsCmd.AddCommand(awsLoginCmd)
 	rootCmd.AddCommand(awsCmd)
 }
 

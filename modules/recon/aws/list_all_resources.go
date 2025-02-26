@@ -183,6 +183,18 @@ func NewAwsListAllResources(opts []*types.Option) (<-chan string, stages.Stage[s
 }
 
 func ProcessResourcesForMarkdown(resources []types.EnrichedResourceDescription) types.MarkdownTable {
+	// Sort resources first to ensure deterministic processing order
+	sort.Slice(resources, func(i, j int) bool {
+		// Sort by TypeName first, then Region, then Identifier for complete stability
+		if resources[i].TypeName != resources[j].TypeName {
+			return resources[i].TypeName < resources[j].TypeName
+		}
+		if resources[i].Region != resources[j].Region {
+			return resources[i].Region < resources[j].Region
+		}
+		return resources[i].Identifier < resources[j].Identifier
+	})
+
 	summaries := make(map[string]map[string]int)
 	activeRegions := make(map[string]bool)
 	uniqueTypes := make(map[string]bool)
@@ -212,12 +224,12 @@ func ProcessResourcesForMarkdown(resources []types.EnrichedResourceDescription) 
 		}
 	}
 
-	// Get and sort regions/resource types
+	// Get and sort regions consistently (ascending order)
 	var regions []string
 	for region := range activeRegions {
 		regions = append(regions, region)
 	}
-	sort.Slice(regions, func(i, j int) bool { return regions[i] > regions[j] })
+	sort.Strings(regions)
 
 	var resourceTypes []string
 	for resType := range uniqueTypes {

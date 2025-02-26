@@ -158,6 +158,7 @@ func generateCacheKey(arn, service, region string, operation string, params inte
 
 	combined := fmt.Sprintf("%s-%s-%s-%s-%s", arn, region, service, operation, string(data))
 	hash := sha256.Sum256([]byte(combined))
+	logger.Debug("Hash computed", "combined", combined, "hash", hex.EncodeToString(hash[:]))
 	return hex.EncodeToString(hash[:])
 }
 
@@ -278,7 +279,7 @@ var CacheOps = middleware.DeserializeMiddlewareFunc("CacheOps", func(ctx context
 				//return output, metadata, err
 			}
 
-			logger.Debug("Handler processed response", "output", output, "metadata", metadata)
+			logger.Debug("Handler processed response", "output", output, "metadata", metadata, "key", v.CacheKey)
 
 			//Save the response to cache
 			if resp, ok := output.RawResponse.(*smithyhttp.Response); ok {
@@ -291,14 +292,14 @@ var CacheOps = middleware.DeserializeMiddlewareFunc("CacheOps", func(ctx context
 
 				ResponseDump, DumpErr := dumpResponse(standardResp)
 				if DumpErr != nil {
-					logger.Warn("Error dumping response", "error", DumpErr, "response", resp)
+					logger.Warn("Error dumping response", "error", DumpErr, "response", resp, "key", v.CacheKey)
 					return output, metadata, err
 				}
 				v.ResponseDump = ResponseDump
 				SetCacheConfigMeta(&metadata, "cache_config", v)
 
 			} else {
-				logger.Warn("Raw response is not an HTTP response", "rawResponse", output.RawResponse)
+				logger.Warn("Raw response is not an HTTP response", "rawResponse", output.RawResponse, "key", v.CacheKey)
 			}
 
 			return output, metadata, err
@@ -388,12 +389,9 @@ func GetCachePrepWithIdentity(callerIdentity sts.GetCallerIdentityOutput, opts [
 			return handler.HandleInitialize(ctx, input)
 		}
 
-		logger.Debug("Processing request", "service", service, "operation", operation, "region", region)
-
 		// Generate cache key and get cache file path
 		cacheKey := generateCacheKey(*callerIdentity.Arn, service, region, operation, input.Parameters)
-
-		logger.Debug("CacheKey computed", "cacheKey", cacheKey)
+		logger.Debug("Processing request", "service", service, "operation", operation, "region", region, "cacheKey", cacheKey)
 
 		cachePath := getCachePath(cacheDir, cacheKey, cacheExt)
 
@@ -411,47 +409,53 @@ func GetCachePrepWithIdentity(callerIdentity sts.GetCallerIdentityOutput, opts [
 		}
 		ctx = SetCacheConfig(ctx, "cache_config", cacheConfig)
 
-		output, metadata, err := handler.HandleInitialize(ctx, input)
-		if err != nil {
-			logger.Debug("Handler encountered an error", "error", err, "CacheKey", cacheConfig.CacheKey, "region", region, "service", service, "operation", operation)
+		output, metadata, ServerError := handler.HandleInitialize(ctx, input)
+		if ServerError != nil {
+			logger.Debug("Handler encountered an error", "error", ServerError, "CacheKey", cacheConfig.CacheKey, "region", region, "service", service, "operation", operation)
 			if !(cacheConfig.Enabled && cacheConfig.Cacheable && cacheConfig.CacheErrorResp) {
 				logger.Debug("Cache bypassed", "enabled", cacheConfig.Enabled, "cacheable", cacheConfig.Cacheable, "cacheErrorResp", cacheConfig.CacheErrorResp)
-				return output, metadata, err
+				if strings.Contains(ServerError.Error(), "ThrottlingException") || strings.Contains(ServerError.Error(), "Too Many Requests") {
+					recordThrottling(service, operation)
+				}
+				return output, metadata, ServerError
 			}
 		}
 
 		if cacheConfig.Enabled && cacheConfig.Cacheable {
 			v := GetCacheConfigMeta(metadata, "cache_config")
-			if v.Fd != nil {
+			if v.Fd != nil { // We loaded from cache, it's a cache hit
 				if fdErr := v.Fd.Close(); fdErr != nil {
 					logger.Error("Failed to close file", "error", fdErr)
 				} else {
 					logger.Debug("Closed file successfully")
 				}
-			}
-			if err != nil && strings.Contains(err.Error(), "ThrottlingException") {
-				recordThrottling(service, operation)
-			}
-			if v.ResponseDump != nil {
-				if err != nil && !saveAllError && !isErrorRespCacheable(err.Error()) {
-					logger.Debug("Error Response not Cacheable", "err", err)
-					return output, metadata, err
+			} else { // It's a cache missed
+				if v.ResponseDump != nil {
+					if ServerError != nil && !saveAllError && !isErrorRespCacheable(ServerError.Error()) {
+						logger.Debug("Error Response not Cacheable", "err", ServerError, "cacheKey", cacheKey)
+						return output, metadata, ServerError
+					}
+					SaveErr := saveResponseFromDumpToFile(v.ResponseDump, v.CachePath)
+					if SaveErr != nil {
+						logger.Error("Failed to save response from cache", "error", SaveErr, "cacheKey", cacheKey)
+					}
+				} else {
+					logger.Debug("ResponseDump is nil", "service", service, "operation", operation, "region", region, "cacheKey", cacheKey)
 				}
-				SaveErr := saveResponseFromDumpToFile(v.ResponseDump, v.CachePath)
-				if SaveErr != nil {
-					logger.Error("Failed to save response from cache", "error", SaveErr)
-				}
-			} else {
-				logger.Debug("ResponseDump is nil")
 			}
+
 		} else {
-			logger.Debug("Cache bypassed", "enabled", cacheConfig.Enabled, "cacheable", cacheConfig.Cacheable, "cacheErrorResp", cacheConfig.CacheErrorResp)
+			logger.Debug("Cache bypassed", "enabled", cacheConfig.Enabled, "cacheable", cacheConfig.Cacheable, "cacheErrorResp", cacheConfig.CacheErrorResp, "cacheKey", cacheKey)
+		}
+
+		if ServerError != nil && (strings.Contains(ServerError.Error(), "ThrottlingException") || strings.Contains(ServerError.Error(), "Too Many Requests")) {
+			recordThrottling(service, operation)
 		}
 
 		// Optionally log caller identity details
 		// logger.Debug("Caller Identity", "Account", *callerIdentity.Account, "Arn", *callerIdentity.Arn, "UserId", *callerIdentity.UserId)
 
-		return output, metadata, err
+		return output, metadata, ServerError
 	})
 }
 

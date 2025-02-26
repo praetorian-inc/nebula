@@ -54,10 +54,14 @@ func (fp *JsonFileProvider) Write(result types.Result) error {
 		return err
 	}
 	defer file.Close()
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	err = encoder.Encode(result.Data)
+	// Marshal with sorted keys
+	jsonBytes, err := json.MarshalIndent(result.Data, "", "  ")
 	if err != nil {
+		return err
+	}
+
+	// Write the bytes directly to the file
+	if _, err := file.Write(jsonBytes); err != nil {
 		return err
 	}
 

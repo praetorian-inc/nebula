@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	awstypes "github.com/aws/aws-sdk-go-v2/service/cloudcontrol/types"
 	"github.com/cloudflare/backoff"
 
@@ -142,14 +143,32 @@ func AwsCloudControlListResources(ctx context.Context, opts []*types.Option, rty
 
 						go func(resource awstypes.ResourceDescription) {
 							defer resourceWg.Done()
+
+							var erdRegion string
+							if helpers.IsGlobalService(rtype) {
+								erdRegion = ""
+							} else {
+								erdRegion = region
+							}
+
 							erd := types.EnrichedResourceDescription{
 								Identifier: *resource.Identifier,
 								TypeName:   rtype,
-								Region:     region,
+								Region:     erdRegion,
 								Properties: *resource.Properties,
 								AccountId:  acctId,
 							}
-							erd.Arn = erd.ToArn()
+
+							// some resources have a different ARN format than the identifier
+							// so we need to parse the identifier to get the ARN
+							parsed, err := arn.Parse(*resource.Identifier)
+							if err != nil {
+								logger.Debug("Failed to parse ARN: "+*resource.Identifier, slog.String("error", err.Error()))
+								erd.Arn = erd.ToArn()
+							} else {
+								logger.Debug("Parsed ARN: "+*resource.Identifier, slog.String("arn", parsed.String()))
+								erd.Arn = parsed
+							}
 
 							select {
 							case out <- erd:

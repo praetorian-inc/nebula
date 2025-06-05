@@ -22,6 +22,7 @@ nebula aws recon get-console [flags]
   -p, --profile string                 AWS shared credentials profile
   -r, --region string                  AWS region (default "us-east-1")
       --role-arn string                AWS role ARN to assume
+      --role-session-name string       Name for the assumed role session (default "nebula-console-tool")
 ```
 
 ### Options inherited from parent commands

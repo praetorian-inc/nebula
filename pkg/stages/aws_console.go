@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -22,6 +23,8 @@ const (
 	awsFedEndpoint = "https://signin.aws.amazon.com/federation"
 	consoleBase    = "https://console.aws.amazon.com/"
 	defaultIssuer  = "aws-console-tool"
+	minDuration    = 900
+	maxDuration    = 3600
 )
 
 // Policy represents the IAM policy for federation token
@@ -48,12 +51,17 @@ func AwsGetConsoleURL(ctx context.Context, opts []*types.Option, in <-chan strin
 		roleArn := options.GetOptionByName(options.AwsRoleArnOpt.Name, opts).Value
 		durationStr := options.GetOptionByName(options.AwsDurationOpt.Name, opts).Value
 		region := options.GetOptionByName(options.AwsRegionOpt.Name, opts).Value
+		mfaToken := options.GetOptionByName(options.AwsMfaTokenOpt.Name, opts).Value
 
 		// Parse duration
 		duration, err := strconv.Atoi(durationStr)
 		if err != nil {
 			logger.Warn("Failed to parse duration, using default 3600 seconds")
-			duration = 3600
+			duration = maxDuration
+		}
+		if duration < minDuration || duration > maxDuration {
+			logger.Error("Duration must be between " + strconv.Itoa(minDuration) + " and " + strconv.Itoa(maxDuration) + " seconds")
+			return
 		}
 
 		// Get AWS config
@@ -70,11 +78,38 @@ func AwsGetConsoleURL(ctx context.Context, opts []*types.Option, in <-chan strin
 		var credentials *ststypes.Credentials
 		if roleArn != "" {
 			// Assume role
-			result, err := stsClient.AssumeRole(ctx, &sts.AssumeRoleInput{
+			assumeRoleConfig := &sts.AssumeRoleInput{
 				RoleArn:         aws.String(roleArn),
 				RoleSessionName: aws.String("aws-console-tool"),
 				DurationSeconds: aws.Int32(int32(duration)),
-			})
+			}
+
+			// Add MFA if token is provided
+			if mfaToken != "" {
+				// Get the MFA device ARN for the current user
+				identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+				if err != nil {
+					logger.Error("Failed to get caller identity: " + err.Error())
+					return
+				}
+
+				// Extract account ID from ARN
+				arnParts := strings.Split(*identity.Arn, ":")
+				if len(arnParts) < 6 {
+					logger.Error("Invalid ARN format: " + *identity.Arn)
+					return
+				}
+				accountId := arnParts[4]
+				userName := strings.Split(arnParts[5], "/")[1]
+
+				// Construct MFA device ARN
+				mfaDeviceArn := fmt.Sprintf("arn:aws:iam::%s:mfa/%s", accountId, userName)
+
+				assumeRoleConfig.SerialNumber = aws.String(mfaDeviceArn)
+				assumeRoleConfig.TokenCode = aws.String(mfaToken)
+			}
+
+			result, err := stsClient.AssumeRole(ctx, assumeRoleConfig)
 			if err != nil {
 				logger.Error("Failed to assume role: " + err.Error())
 				return

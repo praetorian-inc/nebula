@@ -202,11 +202,20 @@ var AwsRoleArnOpt = types.Option{
 	ValueFormat: regexp.MustCompile("^arn:aws:iam::[0-9]{12}:role/[a-zA-Z0-9+=,.@_-]+$"),
 }
 
+var AwsMfaTokenOpt = types.Option{
+	Name:        "mfa-token",
+	Description: "MFA token code for role assumption",
+	Required:    false,
+	Type:        types.String,
+	Value:       "",
+	ValueFormat: regexp.MustCompile("^[0-9]{6}$"),
+}
+
 var AwsDurationOpt = types.Option{
 	Name:        "duration",
-	Description: "Session duration in seconds (900-43200)",
+	Description: "Session duration in seconds (900-3600)",
 	Required:    false,
 	Type:        types.Int,
 	Value:       "3600",
-	ValueFormat: regexp.MustCompile("^[0-9]{3,5}$"),
+	ValueFormat: regexp.MustCompile("^[0-9]{3,4}$"),
 }

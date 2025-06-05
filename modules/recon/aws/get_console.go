@@ -8,12 +8,6 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/types"
 )
 
-/*
-Add the following to the init() function in cmd/registry.go to register the module:
-
-RegisterModule(awsReconCmd, recon.Awsget-consoleMetadata, recon.Awsget-consoleOptions, awsCommonOptions, recon.Awsget-consoleOutputProviders, recon.NewAwsget-console)
-*/
-
 type AwsGetConsole struct {
 	modules.BaseModule
 }

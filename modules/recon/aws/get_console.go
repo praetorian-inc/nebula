@@ -17,6 +17,7 @@ var AwsGetConsoleOptions = []*types.Option{
 	&options.AwsDurationOpt,
 	&options.AwsRegionOpt,
 	&options.AwsMfaTokenOpt,
+	&options.AwsRoleSessionNameOpt,
 }
 
 var AwsGetConsoleOutputProviders = []func(options []*types.Option) types.OutputProvider{

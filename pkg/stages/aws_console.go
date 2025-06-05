@@ -52,6 +52,7 @@ func AwsGetConsoleURL(ctx context.Context, opts []*types.Option, in <-chan strin
 		durationStr := options.GetOptionByName(options.AwsDurationOpt.Name, opts).Value
 		region := options.GetOptionByName(options.AwsRegionOpt.Name, opts).Value
 		mfaToken := options.GetOptionByName(options.AwsMfaTokenOpt.Name, opts).Value
+		roleSessionName := options.GetOptionByName(options.AwsRoleSessionNameOpt.Name, opts).Value
 
 		// Parse duration
 		duration, err := strconv.Atoi(durationStr)
@@ -80,7 +81,7 @@ func AwsGetConsoleURL(ctx context.Context, opts []*types.Option, in <-chan strin
 			// Assume role
 			assumeRoleConfig := &sts.AssumeRoleInput{
 				RoleArn:         aws.String(roleArn),
-				RoleSessionName: aws.String("aws-console-tool"),
+				RoleSessionName: aws.String(roleSessionName),
 				DurationSeconds: aws.Int32(int32(duration)),
 			}
 

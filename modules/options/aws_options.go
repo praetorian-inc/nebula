@@ -219,3 +219,11 @@ var AwsDurationOpt = types.Option{
 	Value:       "3600",
 	ValueFormat: regexp.MustCompile("^[0-9]{3,4}$"),
 }
+
+var AwsRoleSessionNameOpt = types.Option{
+	Name:        "role-session-name",
+	Description: "Name for the assumed role session",
+	Required:    false,
+	Type:        types.String,
+	Value:       "nebula-console-tool",
+}

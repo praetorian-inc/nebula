@@ -33,6 +33,7 @@ func init() {
 	RegisterModule(awsReconCmd, recon.AwsPublicResourcesMetadata, recon.AwsPublicResourcesOptions, awsCommonOptions, recon.AwsPublicResourcesOutputProviders, recon.NewAwsPublicResources)
 	RegisterModule(awsReconCmd, recon.AwsListAllResourcesMetadata, recon.AwsListAllResourcesOptions, awsCommonOptions, recon.AwsListAllResourcesOutputProviders, recon.NewAwsListAllResources)
 	RegisterModule(awsReconCmd, recon.AwsEcrDumpMetadata, recon.AwsEcrDumpOptions, awsCommonOptions, recon.AwsEcrDumpOutputProviders, recon.NewAwsEcrDump)
+	RegisterModule(awsReconCmd, recon.AwsGetConsoleMetadata, recon.AwsGetConsoleOptions, awsCommonOptions, recon.AwsGetConsoleOutputProviders, recon.NewAwsGetConsole)
 
 	// Azure Recon
 	RegisterModule(azureReconCmd, reconaz.AzureSummaryMetadata, reconaz.AzureSummaryOptions, azureCommonOptions, reconaz.AzureSummaryOutputProviders, reconaz.NewAzureSummary)

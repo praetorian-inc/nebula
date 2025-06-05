@@ -192,3 +192,21 @@ var AwsCacheErrorRespTypesOpt = types.Option{
 	Type:        types.String,
 	Value:       "",
 }
+
+var AwsRoleArnOpt = types.Option{
+	Name:        "role-arn",
+	Description: "AWS role ARN to assume",
+	Required:    false,
+	Type:        types.String,
+	Value:       "",
+	ValueFormat: regexp.MustCompile("^arn:aws:iam::[0-9]{12}:role/[a-zA-Z0-9+=,.@_-]+$"),
+}
+
+var AwsDurationOpt = types.Option{
+	Name:        "duration",
+	Description: "Session duration in seconds (900-43200)",
+	Required:    false,
+	Type:        types.Int,
+	Value:       "3600",
+	ValueFormat: regexp.MustCompile("^[0-9]{3,5}$"),
+}

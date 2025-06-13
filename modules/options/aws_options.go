@@ -222,7 +222,15 @@ var AwsDurationOpt = types.Option{
 
 var AwsRoleSessionNameOpt = types.Option{
 	Name:        "role-session-name",
-	Description: "Name for the assumed role session",
+	Description: "AWS role session name",
+	Required:    false,
+	Type:        types.String,
+	Value:       "nebula-console-tool",
+}
+
+var AwsFederationNameOpt = types.Option{
+	Name:        "federation-name",
+	Description: "AWS federation token name",
 	Required:    false,
 	Type:        types.String,
 	Value:       "nebula-console-tool",

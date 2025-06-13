@@ -53,6 +53,7 @@ func AwsGetConsoleURL(ctx context.Context, opts []*types.Option, in <-chan strin
 		region := options.GetOptionByName(options.AwsRegionOpt.Name, opts).Value
 		mfaToken := options.GetOptionByName(options.AwsMfaTokenOpt.Name, opts).Value
 		roleSessionName := options.GetOptionByName(options.AwsRoleSessionNameOpt.Name, opts).Value
+		federationName := options.GetOptionByName(options.AwsFederationNameOpt.Name, opts).Value
 
 		// Parse duration
 		duration, err := strconv.Atoi(durationStr)
@@ -125,7 +126,7 @@ func AwsGetConsoleURL(ctx context.Context, opts []*types.Option, in <-chan strin
 			}
 
 			result, err := stsClient.GetFederationToken(ctx, &sts.GetFederationTokenInput{
-				Name:            aws.String("aws-console-tool"),
+				Name:            aws.String(federationName),
 				Policy:          aws.String(string(policyBytes)),
 				DurationSeconds: aws.Int32(int32(duration)),
 			})

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -78,7 +79,29 @@ func AwsGetConsoleURL(ctx context.Context, opts []*types.Option, in <-chan strin
 
 		// Get temporary credentials
 		var credentials *ststypes.Credentials
-		if roleArn != "" {
+
+		// Check if we're already using temporary credentials
+		identity, err := helpers.GetCallerIdentity(cfg)
+		if err != nil {
+			logger.Error("Failed to get caller identity: " + err.Error())
+			return
+		}
+
+		// If the identity ARN contains "assumed-role", we're already using temporary credentials
+		if strings.Contains(*identity.Arn, ":assumed-role/") {
+			// Extract the temporary credentials from the current config
+			creds, err := cfg.Credentials.Retrieve(ctx)
+			if err != nil {
+				logger.Error("Failed to retrieve credentials: " + err.Error())
+				return
+			}
+			credentials = &ststypes.Credentials{
+				AccessKeyId:     aws.String(creds.AccessKeyID),
+				SecretAccessKey: aws.String(creds.SecretAccessKey),
+				SessionToken:    aws.String(creds.SessionToken),
+				Expiration:      aws.Time(time.Now().Add(time.Duration(duration) * time.Second)),
+			}
+		} else if roleArn != "" {
 			// Assume role
 			assumeRoleConfig := &sts.AssumeRoleInput{
 				RoleArn:         aws.String(roleArn),

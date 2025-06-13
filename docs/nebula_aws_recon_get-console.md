@@ -17,6 +17,7 @@ nebula aws recon get-console [flags]
       --cache-ttl int                  TTL for cached responses in seconds (default 3600)
       --disable-cache                  Disable API response caching
       --duration int                   Session duration in seconds (900-3600) (default 3600)
+      --federation-name string         AWS federation token name (default "nebula-console-tool")
   -h, --help                           help for get-console
       --mfa-token string               MFA token code for role assumption
   -p, --profile string                 AWS shared credentials profile

@@ -111,13 +111,6 @@ func AwsGetConsoleURL(ctx context.Context, opts []*types.Option, in <-chan strin
 
 			// Add MFA if token is provided
 			if mfaToken != "" {
-				// Get the MFA device ARN for the current user
-				identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-				if err != nil {
-					logger.Error("Failed to get caller identity: " + err.Error())
-					return
-				}
-
 				// Extract account ID from ARN
 				arnParts := strings.Split(*identity.Arn, ":")
 				if len(arnParts) < 6 {

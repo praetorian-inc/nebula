@@ -21,8 +21,14 @@ import (
 type AWSCloudControl struct {
 	*base.AwsReconLink
 	semaphores          map[string]chan struct{}
+	serviceSemaphore    chan struct{}
 	wg                  sync.WaitGroup
+	serviceWg           sync.WaitGroup
 	cloudControlClients map[string]*cloudcontrol.Client
+	maxConcurrentServices int
+	resourceTypeQueue   chan string
+	startOnce           sync.Once
+	workerStarted       bool
 }
 
 func (a *AWSCloudControl) Metadata() *cfg.Metadata {
@@ -33,13 +39,17 @@ func (a *AWSCloudControl) Params() []cfg.Param {
 	params := a.AwsReconLink.Params()
 	params = append(params, options.AwsCommonReconOptions()...)
 	params = append(params, options.AwsRegions(), options.AwsResourceType())
+	params = append(params, cfg.NewParam[int]("max-concurrent-services", "Maximum number of AWS services to process concurrently").
+		WithDefault(5))
 
 	return params
 }
 
 func NewAWSCloudControl(configs ...cfg.Config) chain.Link {
 	cc := &AWSCloudControl{
-		wg: sync.WaitGroup{},
+		wg:                    sync.WaitGroup{},
+		serviceWg:             sync.WaitGroup{},
+		maxConcurrentServices: 5, // Default to 5 concurrent services
 	}
 	cc.AwsReconLink = base.NewAwsReconLink(cc, configs...)
 
@@ -51,8 +61,17 @@ func (a *AWSCloudControl) Initialize() error {
 		return err
 	}
 
+	// Configure max concurrent services from parameters
+	if maxServices, err := cfg.As[int](a.Arg("max-concurrent-services")); err == nil {
+		if maxServices > 0 && maxServices <= 100 { // Reasonable bounds
+			a.maxConcurrentServices = maxServices
+		}
+	}
+
 	a.initializeClients()
 	a.initializeSemaphores()
+	a.initializeServiceSemaphore()
+	a.resourceTypeQueue = make(chan string, 100) // Buffer for queuing resource types
 	return nil
 }
 
@@ -61,6 +80,42 @@ func (a *AWSCloudControl) initializeSemaphores() {
 	for _, region := range a.Regions {
 		a.semaphores[region] = make(chan struct{}, 5)
 	}
+}
+
+func (a *AWSCloudControl) initializeServiceSemaphore() {
+	a.serviceSemaphore = make(chan struct{}, a.maxConcurrentServices)
+}
+
+func (a *AWSCloudControl) startWorkerPool() {
+	// Start worker goroutines to process resource types
+	for i := 0; i < a.maxConcurrentServices; i++ {
+		a.serviceWg.Add(1)
+		go a.serviceWorker()
+	}
+}
+
+func (a *AWSCloudControl) serviceWorker() {
+	defer a.serviceWg.Done()
+
+	for resourceType := range a.resourceTypeQueue {
+		a.processResourceType(resourceType)
+	}
+}
+
+func (a *AWSCloudControl) processResourceType(resourceType string) {
+	slog.Debug("Processing resource type", "type", resourceType)
+
+	for _, region := range a.Regions {
+		if a.isGlobalService(resourceType, region) {
+			slog.Debug("Skipping global service", "type", resourceType, "region", region)
+			continue
+		}
+
+		a.wg.Add(1)
+		go a.listResourcesInRegion(resourceType, region)
+	}
+
+	slog.Debug("cloudcontrol queued for processing", "resourceType", resourceType)
 }
 
 func (a *AWSCloudControl) initializeClients() error {
@@ -79,18 +134,15 @@ func (a *AWSCloudControl) initializeClients() error {
 }
 
 func (a *AWSCloudControl) Process(resourceType string) error {
-	for _, region := range a.Regions {
-		if a.isGlobalService(resourceType, region) {
-			slog.Debug("Skipping global service", "type", resourceType, "region", region)
-			continue
-		}
+	// Start worker pool on first call
+	a.startOnce.Do(func() {
+		a.startWorkerPool()
+		a.workerStarted = true
+	})
 
-		a.wg.Add(1)
-		go a.listResourcesInRegion(resourceType, region)
-	}
+	// Queue the resource type for processing
+	a.resourceTypeQueue <- resourceType
 
-	a.wg.Wait()
-	slog.Debug("cloudcontrol complete")
 	return nil
 }
 
@@ -198,6 +250,13 @@ func (a *AWSCloudControl) sendResource(region string, resource *types.EnrichedRe
 }
 
 func (a *AWSCloudControl) Complete() error {
+	if a.workerStarted {
+		// Close the queue to signal workers to finish
+		close(a.resourceTypeQueue)
+		// Wait for all service workers to complete
+		a.serviceWg.Wait()
+	}
+	// Wait for any remaining region workers
 	a.wg.Wait()
 	return nil
 }

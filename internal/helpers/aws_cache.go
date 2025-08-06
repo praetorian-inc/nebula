@@ -224,6 +224,20 @@ func getThrottlingCount(service, operation string) int64 {
 	return 0
 }
 
+func getAllThrottlingCount() int64 {
+	var sumCount int64 = 0
+	throttlingStats.Range(func(serviceKey, serviceValue interface{}) bool {
+		opMap := serviceValue.(*sync.Map)
+		opMap.Range(func(opKey, countValue interface{}) bool {
+			count := atomic.LoadInt64(countValue.(*int64))
+			sumCount = sumCount + count
+			return true
+		})
+		return true
+	})
+	return sumCount
+}
+
 func PrintAllThrottlingCounts() {
 	throttlingStats.Range(func(serviceKey, serviceValue interface{}) bool {
 		service := serviceKey.(string)
@@ -231,7 +245,7 @@ func PrintAllThrottlingCounts() {
 		opMap.Range(func(opKey, countValue interface{}) bool {
 			operation := opKey.(string)
 			count := atomic.LoadInt64(countValue.(*int64))
-			fmt.Printf("Service: %s, Operation: %s, Throttling Count: %d\n", service, operation, count)
+			fmt.Printf("Service: %s, Operation: %s, Throttling Count: %d,\n", service, operation, count)
 			return true
 		})
 		return true
@@ -543,6 +557,10 @@ func GetCacheBypassedCount() int64 {
 
 func ShowCacheStat() {
 	fmt.Printf("AWS Cache Stat: Hit: %d, Miss: %d Bypassed: %d\n", GetCacheHitCount(), GetCacheMissCount(), GetCacheBypassedCount())
+}
+
+func ShowThrottlingCounts() {
+	fmt.Printf("AWS Total Throtting: %d", getAllThrottlingCount())
 }
 
 func ConfigureAWSCacheLogger(logLevel, logFile string) {

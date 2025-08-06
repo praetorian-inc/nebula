@@ -223,6 +223,7 @@ func runModule(cmd *cobra.Command, module chain.Module, platform string) error {
 	if platform == "aws" {
 		helpers.ShowCacheStat()
 		helpers.PrintAllThrottlingCounts()
+		//helpers.ShowThrottlingCounts()
 	}
 	return module.Error()
 }

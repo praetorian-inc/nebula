@@ -26,9 +26,16 @@ type AWSCloudControl struct {
 	serviceWg           sync.WaitGroup
 	cloudControlClients map[string]*cloudcontrol.Client
 	maxConcurrentServices int
-	resourceTypeQueue   chan string
+	serviceQueue        chan ServiceBatch
 	startOnce           sync.Once
 	workerStarted       bool
+	serviceGroups       map[string][]string // service -> resource types
+	mu                  sync.Mutex           // protects serviceGroups
+}
+
+type ServiceBatch struct {
+	ServiceName   string
+	ResourceTypes []string
 }
 
 func (a *AWSCloudControl) Metadata() *cfg.Metadata {
@@ -40,7 +47,7 @@ func (a *AWSCloudControl) Params() []cfg.Param {
 	params = append(params, options.AwsCommonReconOptions()...)
 	params = append(params, options.AwsRegions(), options.AwsResourceType())
 	params = append(params, cfg.NewParam[int]("max-concurrent-services", "Maximum number of AWS services to process concurrently").
-		WithDefault(5))
+		WithDefault(10))
 
 	return params
 }
@@ -49,7 +56,7 @@ func NewAWSCloudControl(configs ...cfg.Config) chain.Link {
 	cc := &AWSCloudControl{
 		wg:                    sync.WaitGroup{},
 		serviceWg:             sync.WaitGroup{},
-		maxConcurrentServices: 5, // Default to 5 concurrent services
+		maxConcurrentServices: 10, // Default to 10 concurrent services
 	}
 	cc.AwsReconLink = base.NewAwsReconLink(cc, configs...)
 
@@ -71,7 +78,8 @@ func (a *AWSCloudControl) Initialize() error {
 	a.initializeClients()
 	a.initializeSemaphores()
 	a.initializeServiceSemaphore()
-	a.resourceTypeQueue = make(chan string, 100) // Buffer for queuing resource types
+	a.serviceQueue = make(chan ServiceBatch, 20) // Buffer for queuing service batches
+	a.serviceGroups = make(map[string][]string)
 	return nil
 }
 
@@ -86,8 +94,45 @@ func (a *AWSCloudControl) initializeServiceSemaphore() {
 	a.serviceSemaphore = make(chan struct{}, a.maxConcurrentServices)
 }
 
+func (a *AWSCloudControl) extractServiceName(resourceType string) string {
+	// Extract service name from AWS::ServiceName::ResourceType
+	parts := strings.Split(resourceType, ":")
+	if len(parts) >= 3 {
+		return parts[2] // Return the service name part
+	}
+	return "Unknown"
+}
+
+func (a *AWSCloudControl) addResourceTypeToService(serviceName, resourceType string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.serviceGroups[serviceName] = append(a.serviceGroups[serviceName], resourceType)
+}
+
+func (a *AWSCloudControl) sendServiceBatches() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	
+	totalServices := len(a.serviceGroups)
+	totalResourceTypes := 0
+	for _, resourceTypes := range a.serviceGroups {
+		totalResourceTypes += len(resourceTypes)
+	}
+	
+	slog.Info("Sending service batches for parallel processing", "services", totalServices, "totalResourceTypes", totalResourceTypes, "maxConcurrentServices", a.maxConcurrentServices)
+	
+	for serviceName, resourceTypes := range a.serviceGroups {
+		slog.Debug("Queuing service batch", "service", serviceName, "resourceTypes", len(resourceTypes))
+		batch := ServiceBatch{
+			ServiceName:   serviceName,
+			ResourceTypes: resourceTypes,
+		}
+		a.serviceQueue <- batch
+	}
+}
+
 func (a *AWSCloudControl) startWorkerPool() {
-	// Start worker goroutines to process resource types
+	// Start worker goroutines to process services
 	for i := 0; i < a.maxConcurrentServices; i++ {
 		a.serviceWg.Add(1)
 		go a.serviceWorker()
@@ -97,9 +142,20 @@ func (a *AWSCloudControl) startWorkerPool() {
 func (a *AWSCloudControl) serviceWorker() {
 	defer a.serviceWg.Done()
 
-	for resourceType := range a.resourceTypeQueue {
+	for serviceBatch := range a.serviceQueue {
+		a.processServiceBatch(serviceBatch)
+	}
+}
+
+func (a *AWSCloudControl) processServiceBatch(batch ServiceBatch) {
+	slog.Debug("Processing service batch", "service", batch.ServiceName, "resourceTypeCount", len(batch.ResourceTypes))
+	
+	// Process all resource types for this service
+	for _, resourceType := range batch.ResourceTypes {
 		a.processResourceType(resourceType)
 	}
+	
+	slog.Debug("Completed service batch", "service", batch.ServiceName)
 }
 
 func (a *AWSCloudControl) processResourceType(resourceType string) {
@@ -140,8 +196,9 @@ func (a *AWSCloudControl) Process(resourceType string) error {
 		a.workerStarted = true
 	})
 
-	// Queue the resource type for processing
-	a.resourceTypeQueue <- resourceType
+	// Extract service name and group resource types by service
+	serviceName := a.extractServiceName(resourceType)
+	a.addResourceTypeToService(serviceName, resourceType)
 
 	return nil
 }
@@ -251,8 +308,10 @@ func (a *AWSCloudControl) sendResource(region string, resource *types.EnrichedRe
 
 func (a *AWSCloudControl) Complete() error {
 	if a.workerStarted {
+		// Send all service batches to the queue
+		a.sendServiceBatches()
 		// Close the queue to signal workers to finish
-		close(a.resourceTypeQueue)
+		close(a.serviceQueue)
 		// Wait for all service workers to complete
 		a.serviceWg.Wait()
 	}

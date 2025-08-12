@@ -80,6 +80,7 @@ func (a *AwsPublicResources) ResourceMap() map[string]func() chain.Chain {
 		return chain.NewChain(
 			cloudcontrol.NewCloudControlGet(),
 			NewPropertyFilterLink(cfg.WithArg("property", "PublicIp")),
+			NewEC2SecurityEnrichmentLink(),
 		)
 	}
 

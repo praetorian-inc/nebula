@@ -2,7 +2,6 @@ package aws
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -183,26 +182,30 @@ func (e *EC2SecurityEnrichmentLink) getSecurityGroupDetails(client *ec2.Client, 
 			}
 
 			// Add source IP ranges (IPv4)
-			var sourceRanges []string
+			var sourceRanges []map[string]interface{}
 			for _, ipRange := range rule.IpRanges {
-				if ipRange.Description != nil {
-					sourceRanges = append(sourceRanges, fmt.Sprintf("%s (%s)", *ipRange.CidrIp, *ipRange.Description))
-				} else {
-					sourceRanges = append(sourceRanges, *ipRange.CidrIp)
+				rangeInfo := map[string]interface{}{
+					"Range": *ipRange.CidrIp,
 				}
+				if ipRange.Description != nil {
+					rangeInfo["Description"] = *ipRange.Description
+				}
+				sourceRanges = append(sourceRanges, rangeInfo)
 			}
 			if len(sourceRanges) > 0 {
 				ingressRule["SourceRanges"] = sourceRanges
 			}
 
 			// Add source IPv6 ranges
-			var sourceIpv6Ranges []string
+			var sourceIpv6Ranges []map[string]interface{}
 			for _, ipv6Range := range rule.Ipv6Ranges {
-				if ipv6Range.Description != nil {
-					sourceIpv6Ranges = append(sourceIpv6Ranges, fmt.Sprintf("%s (%s)", *ipv6Range.CidrIpv6, *ipv6Range.Description))
-				} else {
-					sourceIpv6Ranges = append(sourceIpv6Ranges, *ipv6Range.CidrIpv6)
+				rangeInfo := map[string]interface{}{
+					"Range": *ipv6Range.CidrIpv6,
 				}
+				if ipv6Range.Description != nil {
+					rangeInfo["Description"] = *ipv6Range.Description
+				}
+				sourceIpv6Ranges = append(sourceIpv6Ranges, rangeInfo)
 			}
 			if len(sourceIpv6Ranges) > 0 {
 				ingressRule["SourceIpv6Ranges"] = sourceIpv6Ranges
@@ -294,26 +297,30 @@ func (e *EC2SecurityEnrichmentLink) getSecurityGroupDetails(client *ec2.Client, 
 			}
 
 			// Add destination IP ranges (IPv4)
-			var destRanges []string
+			var destRanges []map[string]interface{}
 			for _, ipRange := range rule.IpRanges {
-				if ipRange.Description != nil {
-					destRanges = append(destRanges, fmt.Sprintf("%s (%s)", *ipRange.CidrIp, *ipRange.Description))
-				} else {
-					destRanges = append(destRanges, *ipRange.CidrIp)
+				rangeInfo := map[string]interface{}{
+					"Range": *ipRange.CidrIp,
 				}
+				if ipRange.Description != nil {
+					rangeInfo["Description"] = *ipRange.Description
+				}
+				destRanges = append(destRanges, rangeInfo)
 			}
 			if len(destRanges) > 0 {
 				egressRule["DestinationRanges"] = destRanges
 			}
 
 			// Add destination IPv6 ranges
-			var destIpv6Ranges []string
+			var destIpv6Ranges []map[string]interface{}
 			for _, ipv6Range := range rule.Ipv6Ranges {
-				if ipv6Range.Description != nil {
-					destIpv6Ranges = append(destIpv6Ranges, fmt.Sprintf("%s (%s)", *ipv6Range.CidrIpv6, *ipv6Range.Description))
-				} else {
-					destIpv6Ranges = append(destIpv6Ranges, *ipv6Range.CidrIpv6)
+				rangeInfo := map[string]interface{}{
+					"Range": *ipv6Range.CidrIpv6,
 				}
+				if ipv6Range.Description != nil {
+					rangeInfo["Description"] = *ipv6Range.Description
+				}
+				destIpv6Ranges = append(destIpv6Ranges, rangeInfo)
 			}
 			if len(destIpv6Ranges) > 0 {
 				egressRule["DestinationIpv6Ranges"] = destIpv6Ranges

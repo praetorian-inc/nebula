@@ -136,8 +136,8 @@ func (e *EC2SecurityEnrichmentLink) getSecurityGroupDetails(client *ec2.Client, 
 		}
 	}
 
-	// Resolve prefix list names
-	prefixListNames := e.resolvePrefixListNames(client, allPrefixListIds)
+	// Resolve prefix list names and entries
+	prefixListNames, prefixListDetails := e.resolvePrefixListNames(client, allPrefixListIds)
 
 	var securityGroups []map[string]interface{}
 	for _, sg := range output.SecurityGroups {
@@ -238,7 +238,7 @@ func (e *EC2SecurityEnrichmentLink) getSecurityGroupDetails(client *ec2.Client, 
 				ingressRule["SourceGroups"] = sourceGroups
 			}
 
-			// Add source prefix lists with names
+			// Add source prefix lists with names and entries
 			var sourcePrefixLists []map[string]interface{}
 			for _, prefixList := range rule.PrefixListIds {
 				prefixListInfo := map[string]interface{}{
@@ -253,6 +253,19 @@ func (e *EC2SecurityEnrichmentLink) getSecurityGroupDetails(client *ec2.Client, 
 				// Add description if available
 				if prefixList.Description != nil {
 					prefixListInfo["Description"] = *prefixList.Description
+				}
+
+				// Add actual prefix list entries (IP ranges)
+				if details, exists := prefixListDetails[*prefixList.PrefixListId]; exists {
+					if entries, hasEntries := details["Entries"]; hasEntries {
+						prefixListInfo["Entries"] = entries
+					}
+					// Also add other metadata
+					for key, value := range details {
+						if key != "Entries" { // Don't duplicate entries
+							prefixListInfo[key] = value
+						}
+					}
 				}
 
 				sourcePrefixLists = append(sourcePrefixLists, prefixListInfo)
@@ -336,7 +349,7 @@ func (e *EC2SecurityEnrichmentLink) getSecurityGroupDetails(client *ec2.Client, 
 				egressRule["DestinationGroups"] = destGroups
 			}
 
-			// Add destination prefix lists with names
+			// Add destination prefix lists with names and entries
 			var destPrefixLists []map[string]interface{}
 			for _, prefixList := range rule.PrefixListIds {
 				prefixListInfo := map[string]interface{}{
@@ -351,6 +364,19 @@ func (e *EC2SecurityEnrichmentLink) getSecurityGroupDetails(client *ec2.Client, 
 				// Add description if available
 				if prefixList.Description != nil {
 					prefixListInfo["Description"] = *prefixList.Description
+				}
+
+				// Add actual prefix list entries (IP ranges)
+				if details, exists := prefixListDetails[*prefixList.PrefixListId]; exists {
+					if entries, hasEntries := details["Entries"]; hasEntries {
+						prefixListInfo["Entries"] = entries
+					}
+					// Also add other metadata
+					for key, value := range details {
+						if key != "Entries" { // Don't duplicate entries
+							prefixListInfo[key] = value
+						}
+					}
 				}
 
 				destPrefixLists = append(destPrefixLists, prefixListInfo)
@@ -376,10 +402,10 @@ func (e *EC2SecurityEnrichmentLink) getSecurityGroupDetails(client *ec2.Client, 
 	return securityGroups
 }
 
-// resolvePrefixListNames resolves prefix list IDs to their names for better readability
-func (e *EC2SecurityEnrichmentLink) resolvePrefixListNames(client *ec2.Client, prefixListIds []string) map[string]string {
+// resolvePrefixListNames resolves prefix list IDs to their names and entries for better readability
+func (e *EC2SecurityEnrichmentLink) resolvePrefixListNames(client *ec2.Client, prefixListIds []string) (map[string]string, map[string]map[string]interface{}) {
 	if len(prefixListIds) == 0 {
-		return make(map[string]string)
+		return make(map[string]string), make(map[string]map[string]interface{})
 	}
 
 	// Remove duplicates
@@ -392,11 +418,12 @@ func (e *EC2SecurityEnrichmentLink) resolvePrefixListNames(client *ec2.Client, p
 		}
 	}
 
-	slog.Info("Resolving prefix list names", "count", len(uniquePrefixListIds))
+	slog.Info("Resolving prefix list names and entries", "count", len(uniquePrefixListIds))
 
 	// AWS API has a limit on the number of IDs per request, so we might need to batch
 	const maxIdsPerRequest = 200
 	prefixListNames := make(map[string]string)
+	prefixListDetails := make(map[string]map[string]interface{})
 
 	for i := 0; i < len(uniquePrefixListIds); i += maxIdsPerRequest {
 		end := i + maxIdsPerRequest
@@ -418,13 +445,100 @@ func (e *EC2SecurityEnrichmentLink) resolvePrefixListNames(client *ec2.Client, p
 		for _, prefixList := range output.PrefixLists {
 			if prefixList.PrefixListId != nil && prefixList.PrefixListName != nil {
 				prefixListNames[*prefixList.PrefixListId] = *prefixList.PrefixListName
+
+				// Store additional prefix list metadata
+				details := map[string]interface{}{
+					"Name": *prefixList.PrefixListName,
+				}
+
+				if prefixList.PrefixListArn != nil {
+					details["PrefixListArn"] = *prefixList.PrefixListArn
+				}
+				if prefixList.Version != nil {
+					details["Version"] = *prefixList.Version
+				}
+				if prefixList.MaxEntries != nil {
+					details["MaxEntries"] = *prefixList.MaxEntries
+				}
+				details["State"] = prefixList.State
+				if prefixList.StateMessage != nil {
+					details["StateMessage"] = *prefixList.StateMessage
+				}
+				if prefixList.AddressFamily != nil {
+					details["AddressFamily"] = *prefixList.AddressFamily
+				}
+				if prefixList.OwnerId != nil {
+					details["OwnerId"] = *prefixList.OwnerId
+				}
+				if len(prefixList.Tags) > 0 {
+					tags := make(map[string]string)
+					for _, tag := range prefixList.Tags {
+						if tag.Key != nil && tag.Value != nil {
+							tags[*tag.Key] = *tag.Value
+						}
+					}
+					if len(tags) > 0 {
+						details["Tags"] = tags
+					}
+				}
+
+				prefixListDetails[*prefixList.PrefixListId] = details
 				slog.Debug("Resolved prefix list", "id", *prefixList.PrefixListId, "name", *prefixList.PrefixListName)
 			}
 		}
 	}
 
-	slog.Info("Successfully resolved prefix list names", "resolved", len(prefixListNames), "total", len(uniquePrefixListIds))
-	return prefixListNames
+	// Now get the actual entries for each prefix list
+	for i := 0; i < len(uniquePrefixListIds); i += maxIdsPerRequest {
+		end := i + maxIdsPerRequest
+		if end > len(uniquePrefixListIds) {
+			end = len(uniquePrefixListIds)
+		}
+
+		batch := uniquePrefixListIds[i:end]
+
+		// Process each prefix list individually since GetManagedPrefixListEntries doesn't support batching
+		for _, prefixListId := range batch {
+			input := &ec2.GetManagedPrefixListEntriesInput{
+				PrefixListId: &prefixListId,
+			}
+
+			entriesOutput, err := client.GetManagedPrefixListEntries(context.TODO(), input)
+			if err != nil {
+				slog.Error("Failed to get prefix list entries", "prefixListId", prefixListId, "error", err)
+				continue
+			}
+
+			var entries []string
+			for _, entry := range entriesOutput.Entries {
+				if entry.Cidr != nil {
+					entries = append(entries, *entry.Cidr)
+				}
+			}
+
+			if len(entries) > 0 {
+				// Add entries to existing details
+				if details, exists := prefixListDetails[prefixListId]; exists {
+					details["Entries"] = entries
+					details["EntryCount"] = len(entries)
+				} else {
+					// Create new details if none existed
+					prefixListDetails[prefixListId] = map[string]interface{}{
+						"Entries":    entries,
+						"EntryCount": len(entries),
+					}
+				}
+				slog.Debug("Retrieved prefix list entries", "id", prefixListId, "entryCount", len(entries))
+			}
+		}
+	}
+
+	slog.Info("Successfully resolved prefix list names and entries",
+		"resolvedNames", len(prefixListNames),
+		"resolvedDetails", len(prefixListDetails),
+		"total", len(uniquePrefixListIds))
+
+	return prefixListNames, prefixListDetails
 }
 
 func (e *EC2SecurityEnrichmentLink) getNetworkAclDetails(client *ec2.Client, subnetIds []string) []map[string]interface{} {

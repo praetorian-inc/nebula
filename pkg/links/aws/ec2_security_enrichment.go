@@ -121,6 +121,24 @@ func (e *EC2SecurityEnrichmentLink) getSecurityGroupDetails(client *ec2.Client, 
 		return nil
 	}
 
+	// Get all unique prefix list IDs to resolve their names
+	var allPrefixListIds []string
+	for _, sg := range output.SecurityGroups {
+		for _, rule := range sg.IpPermissions {
+			for _, prefixList := range rule.PrefixListIds {
+				allPrefixListIds = append(allPrefixListIds, *prefixList.PrefixListId)
+			}
+		}
+		for _, rule := range sg.IpPermissionsEgress {
+			for _, prefixList := range rule.PrefixListIds {
+				allPrefixListIds = append(allPrefixListIds, *prefixList.PrefixListId)
+			}
+		}
+	}
+
+	// Resolve prefix list names
+	prefixListNames := e.resolvePrefixListNames(client, allPrefixListIds)
+
 	var securityGroups []map[string]interface{}
 	for _, sg := range output.SecurityGroups {
 		sgInfo := map[string]interface{}{
@@ -130,16 +148,41 @@ func (e *EC2SecurityEnrichmentLink) getSecurityGroupDetails(client *ec2.Client, 
 			"Description": *sg.Description,
 		}
 
+		// Add additional security group metadata
+		if sg.OwnerId != nil {
+			sgInfo["OwnerId"] = *sg.OwnerId
+		}
+		if sg.SecurityGroupArn != nil {
+			sgInfo["SecurityGroupArn"] = *sg.SecurityGroupArn
+		}
+		if len(sg.Tags) > 0 {
+			tags := make(map[string]string)
+			for _, tag := range sg.Tags {
+				if tag.Key != nil && tag.Value != nil {
+					tags[*tag.Key] = *tag.Value
+				}
+			}
+			if len(tags) > 0 {
+				sgInfo["Tags"] = tags
+			}
+		}
+
 		// Add ingress rules
 		var ingressRules []map[string]interface{}
 		for _, rule := range sg.IpPermissions {
 			ingressRule := map[string]interface{}{
 				"Protocol": rule.IpProtocol,
-				"FromPort": rule.FromPort,
-				"ToPort":   rule.ToPort,
 			}
 
-			// Add source IP ranges
+			// Handle port ranges - AWS uses -1 for "all ports"
+			if rule.FromPort != nil {
+				ingressRule["FromPort"] = *rule.FromPort
+			}
+			if rule.ToPort != nil {
+				ingressRule["ToPort"] = *rule.ToPort
+			}
+
+			// Add source IP ranges (IPv4)
 			var sourceRanges []string
 			for _, ipRange := range rule.IpRanges {
 				if ipRange.Description != nil {
@@ -148,14 +191,75 @@ func (e *EC2SecurityEnrichmentLink) getSecurityGroupDetails(client *ec2.Client, 
 					sourceRanges = append(sourceRanges, *ipRange.CidrIp)
 				}
 			}
-			ingressRule["SourceRanges"] = sourceRanges
+			if len(sourceRanges) > 0 {
+				ingressRule["SourceRanges"] = sourceRanges
+			}
+
+			// Add source IPv6 ranges
+			var sourceIpv6Ranges []string
+			for _, ipv6Range := range rule.Ipv6Ranges {
+				if ipv6Range.Description != nil {
+					sourceIpv6Ranges = append(sourceIpv6Ranges, fmt.Sprintf("%s (%s)", *ipv6Range.CidrIpv6, *ipv6Range.Description))
+				} else {
+					sourceIpv6Ranges = append(sourceIpv6Ranges, *ipv6Range.CidrIpv6)
+				}
+			}
+			if len(sourceIpv6Ranges) > 0 {
+				ingressRule["SourceIpv6Ranges"] = sourceIpv6Ranges
+			}
 
 			// Add source security groups
-			var sourceGroups []string
+			var sourceGroups []map[string]interface{}
 			for _, group := range rule.UserIdGroupPairs {
-				sourceGroups = append(sourceGroups, *group.GroupId)
+				groupInfo := map[string]interface{}{
+					"GroupId": *group.GroupId,
+				}
+
+				// Add additional group reference information
+				if group.Description != nil {
+					groupInfo["Description"] = *group.Description
+				}
+				if group.GroupName != nil {
+					groupInfo["GroupName"] = *group.GroupName
+				}
+				if group.PeeringStatus != nil {
+					groupInfo["PeeringStatus"] = *group.PeeringStatus
+				}
+				if group.UserId != nil {
+					groupInfo["UserId"] = *group.UserId
+				}
+				if group.VpcId != nil {
+					groupInfo["VpcId"] = *group.VpcId
+				}
+
+				sourceGroups = append(sourceGroups, groupInfo)
 			}
-			ingressRule["SourceGroups"] = sourceGroups
+			if len(sourceGroups) > 0 {
+				ingressRule["SourceGroups"] = sourceGroups
+			}
+
+			// Add source prefix lists with names
+			var sourcePrefixLists []map[string]interface{}
+			for _, prefixList := range rule.PrefixListIds {
+				prefixListInfo := map[string]interface{}{
+					"PrefixListId": *prefixList.PrefixListId,
+				}
+
+				// Add prefix list name if resolved
+				if name, exists := prefixListNames[*prefixList.PrefixListId]; exists {
+					prefixListInfo["Name"] = name
+				}
+
+				// Add description if available
+				if prefixList.Description != nil {
+					prefixListInfo["Description"] = *prefixList.Description
+				}
+
+				sourcePrefixLists = append(sourcePrefixLists, prefixListInfo)
+			}
+			if len(sourcePrefixLists) > 0 {
+				ingressRule["SourcePrefixLists"] = sourcePrefixLists
+			}
 
 			ingressRules = append(ingressRules, ingressRule)
 		}
@@ -166,11 +270,17 @@ func (e *EC2SecurityEnrichmentLink) getSecurityGroupDetails(client *ec2.Client, 
 		for _, rule := range sg.IpPermissionsEgress {
 			egressRule := map[string]interface{}{
 				"Protocol": rule.IpProtocol,
-				"FromPort": rule.FromPort,
-				"ToPort":   rule.ToPort,
 			}
 
-			// Add destination IP ranges
+			// Handle port ranges - AWS uses -1 for "all ports"
+			if rule.FromPort != nil {
+				egressRule["FromPort"] = *rule.FromPort
+			}
+			if rule.ToPort != nil {
+				egressRule["ToPort"] = *rule.ToPort
+			}
+
+			// Add destination IP ranges (IPv4)
 			var destRanges []string
 			for _, ipRange := range rule.IpRanges {
 				if ipRange.Description != nil {
@@ -179,16 +289,142 @@ func (e *EC2SecurityEnrichmentLink) getSecurityGroupDetails(client *ec2.Client, 
 					destRanges = append(destRanges, *ipRange.CidrIp)
 				}
 			}
-			egressRule["DestinationRanges"] = destRanges
+			if len(destRanges) > 0 {
+				egressRule["DestinationRanges"] = destRanges
+			}
+
+			// Add destination IPv6 ranges
+			var destIpv6Ranges []string
+			for _, ipv6Range := range rule.Ipv6Ranges {
+				if ipv6Range.Description != nil {
+					destIpv6Ranges = append(destIpv6Ranges, fmt.Sprintf("%s (%s)", *ipv6Range.CidrIpv6, *ipv6Range.Description))
+				} else {
+					destIpv6Ranges = append(destIpv6Ranges, *ipv6Range.CidrIpv6)
+				}
+			}
+			if len(destIpv6Ranges) > 0 {
+				egressRule["DestinationIpv6Ranges"] = destIpv6Ranges
+			}
+
+			// Add destination security groups
+			var destGroups []map[string]interface{}
+			for _, group := range rule.UserIdGroupPairs {
+				groupInfo := map[string]interface{}{
+					"GroupId": *group.GroupId,
+				}
+
+				// Add additional group reference information
+				if group.Description != nil {
+					groupInfo["Description"] = *group.Description
+				}
+				if group.GroupName != nil {
+					groupInfo["GroupName"] = *group.GroupName
+				}
+				if group.PeeringStatus != nil {
+					groupInfo["PeeringStatus"] = *group.PeeringStatus
+				}
+				if group.UserId != nil {
+					groupInfo["UserId"] = *group.UserId
+				}
+				if group.VpcId != nil {
+					groupInfo["VpcId"] = *group.VpcId
+				}
+
+				destGroups = append(destGroups, groupInfo)
+			}
+			if len(destGroups) > 0 {
+				egressRule["DestinationGroups"] = destGroups
+			}
+
+			// Add destination prefix lists with names
+			var destPrefixLists []map[string]interface{}
+			for _, prefixList := range rule.PrefixListIds {
+				prefixListInfo := map[string]interface{}{
+					"PrefixListId": *prefixList.PrefixListId,
+				}
+
+				// Add prefix list name if resolved
+				if name, exists := prefixListNames[*prefixList.PrefixListId]; exists {
+					prefixListInfo["Name"] = name
+				}
+
+				// Add description if available
+				if prefixList.Description != nil {
+					prefixListInfo["Description"] = *prefixList.Description
+				}
+
+				destPrefixLists = append(destPrefixLists, prefixListInfo)
+			}
+			if len(destPrefixLists) > 0 {
+				egressRule["DestinationPrefixLists"] = destPrefixLists
+			}
 
 			egressRules = append(egressRules, egressRule)
 		}
 		sgInfo["EgressRules"] = egressRules
 
+		// Add summary information
+		sgInfo["RuleSummary"] = map[string]interface{}{
+			"IngressRuleCount": len(ingressRules),
+			"EgressRuleCount":  len(egressRules),
+			"TotalRuleCount":   len(ingressRules) + len(egressRules),
+		}
+
 		securityGroups = append(securityGroups, sgInfo)
 	}
 
 	return securityGroups
+}
+
+// resolvePrefixListNames resolves prefix list IDs to their names for better readability
+func (e *EC2SecurityEnrichmentLink) resolvePrefixListNames(client *ec2.Client, prefixListIds []string) map[string]string {
+	if len(prefixListIds) == 0 {
+		return make(map[string]string)
+	}
+
+	// Remove duplicates
+	uniqueIds := make(map[string]bool)
+	var uniquePrefixListIds []string
+	for _, id := range prefixListIds {
+		if !uniqueIds[id] {
+			uniqueIds[id] = true
+			uniquePrefixListIds = append(uniquePrefixListIds, id)
+		}
+	}
+
+	slog.Info("Resolving prefix list names", "count", len(uniquePrefixListIds))
+
+	// AWS API has a limit on the number of IDs per request, so we might need to batch
+	const maxIdsPerRequest = 200
+	prefixListNames := make(map[string]string)
+
+	for i := 0; i < len(uniquePrefixListIds); i += maxIdsPerRequest {
+		end := i + maxIdsPerRequest
+		if end > len(uniquePrefixListIds) {
+			end = len(uniquePrefixListIds)
+		}
+
+		batch := uniquePrefixListIds[i:end]
+		input := &ec2.DescribeManagedPrefixListsInput{
+			PrefixListIds: batch,
+		}
+
+		output, err := client.DescribeManagedPrefixLists(context.TODO(), input)
+		if err != nil {
+			slog.Error("Failed to describe prefix lists", "prefixListIds", batch, "error", err)
+			continue
+		}
+
+		for _, prefixList := range output.PrefixLists {
+			if prefixList.PrefixListId != nil && prefixList.PrefixListName != nil {
+				prefixListNames[*prefixList.PrefixListId] = *prefixList.PrefixListName
+				slog.Debug("Resolved prefix list", "id", *prefixList.PrefixListId, "name", *prefixList.PrefixListName)
+			}
+		}
+	}
+
+	slog.Info("Successfully resolved prefix list names", "resolved", len(prefixListNames), "total", len(uniquePrefixListIds))
+	return prefixListNames
 }
 
 func (e *EC2SecurityEnrichmentLink) getNetworkAclDetails(client *ec2.Client, subnetIds []string) []map[string]interface{} {

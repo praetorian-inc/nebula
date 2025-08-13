@@ -509,11 +509,18 @@ func (e *EC2SecurityEnrichmentLink) resolvePrefixListNames(client *ec2.Client, p
 				continue
 			}
 
-			var entries []string
+			var entries []map[string]interface{}
 			for _, entry := range entriesOutput.Entries {
-				if entry.Cidr != nil {
-					entries = append(entries, *entry.Cidr)
+				entryInfo := map[string]interface{}{
+					"Cidr": *entry.Cidr,
 				}
+
+				// Add description if available
+				if entry.Description != nil {
+					entryInfo["Description"] = *entry.Description
+				}
+
+				entries = append(entries, entryInfo)
 			}
 
 			if len(entries) > 0 {
@@ -521,12 +528,30 @@ func (e *EC2SecurityEnrichmentLink) resolvePrefixListNames(client *ec2.Client, p
 				if details, exists := prefixListDetails[prefixListId]; exists {
 					details["Entries"] = entries
 					details["EntryCount"] = len(entries)
+
+					// Add a summary of entry types for quick analysis
+					var cidrSummary []string
+					for _, entry := range entries {
+						if cidr, hasCidr := entry["Cidr"]; hasCidr {
+							cidrSummary = append(cidrSummary, cidr.(string))
+						}
+					}
+					details["CidrSummary"] = cidrSummary
 				} else {
 					// Create new details if none existed
 					prefixListDetails[prefixListId] = map[string]interface{}{
 						"Entries":    entries,
 						"EntryCount": len(entries),
 					}
+
+					// Add a summary of entry types for quick analysis
+					var cidrSummary []string
+					for _, entry := range entries {
+						if cidr, hasCidr := entry["Cidr"]; hasCidr {
+							cidrSummary = append(cidrSummary, cidr.(string))
+						}
+					}
+					prefixListDetails[prefixListId]["CidrSummary"] = cidrSummary
 				}
 				slog.Debug("Retrieved prefix list entries", "id", prefixListId, "entryCount", len(entries))
 			}

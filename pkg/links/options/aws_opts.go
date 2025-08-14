@@ -331,3 +331,8 @@ func AwsFederationName() cfg.Param {
 	return cfg.NewParam[string]("federation-name", "Name for federation token").
 		WithDefault("nebula-federation")
 }
+
+func AwsSecurityGroupIds() cfg.Param {
+	return cfg.NewParam[[]string]("security-group-ids", "Security group IDs to analyze (comma-separated)").
+		AsRequired()
+}

@@ -20,3 +20,4 @@ out.json
 debug.log*
 *.json
 nebula-darwin-arm64
+*.test

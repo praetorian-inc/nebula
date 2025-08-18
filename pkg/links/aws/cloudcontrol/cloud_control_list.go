@@ -3,6 +3,9 @@ package cloudcontrol
 import (
 	"fmt"
 	"log/slog"
+	"os/exec"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -20,17 +23,23 @@ import (
 
 type AWSCloudControl struct {
 	*base.AwsReconLink
-	semaphores          map[string]chan struct{}
-	serviceSemaphore    chan struct{}
-	wg                  sync.WaitGroup
-	serviceWg           sync.WaitGroup
-	cloudControlClients map[string]*cloudcontrol.Client
+	semaphores            map[string]chan struct{}           // per-region semaphores
+	serviceRegionSemaphores map[string]chan struct{}         // per (service+region) semaphores
+	globalSemaphore       chan struct{}                      // global connection limit
+	serviceSemaphore      chan struct{}
+	regionWorkSemaphore   chan struct{}                      // limit concurrent listResourcesInRegion goroutines
+	wg                    sync.WaitGroup
+	serviceWg             sync.WaitGroup
+	cloudControlClients   map[string]*cloudcontrol.Client
 	maxConcurrentServices int
-	serviceQueue        chan ServiceBatch
-	startOnce           sync.Once
-	workerStarted       bool
-	serviceGroups       map[string][]string // service -> resource types
-	mu                  sync.Mutex           // protects serviceGroups
+	maxGlobalConnections  int                                // limit total concurrent connections
+	maxConcurrentRegionWork int                              // limit concurrent region work goroutines
+	serviceQueue          chan ServiceBatch
+	startOnce             sync.Once
+	workerStarted         bool
+	workerMu              sync.Mutex                         // protects workerStarted
+	serviceGroups         map[string][]string                // service -> resource types
+	mu                    sync.Mutex                         // protects serviceGroups and serviceRegionSemaphores
 }
 
 type ServiceBatch struct {
@@ -47,16 +56,22 @@ func (a *AWSCloudControl) Params() []cfg.Param {
 	params = append(params, options.AwsCommonReconOptions()...)
 	params = append(params, options.AwsRegions(), options.AwsResourceType())
 	params = append(params, cfg.NewParam[int]("max-concurrent-services", "Maximum number of AWS services to process concurrently").
-		WithDefault(10))
+		WithDefault(1000))
+	params = append(params, cfg.NewParam[int]("max-global-connections", "Maximum total concurrent connections (to avoid port exhaustion)").
+		WithDefault(13000))
+	params = append(params, cfg.NewParam[int]("max-concurrent-region-work", "Maximum concurrent goroutines for region work (to avoid goroutine explosion)").
+		WithDefault(2000))
 
 	return params
 }
 
 func NewAWSCloudControl(configs ...cfg.Config) chain.Link {
 	cc := &AWSCloudControl{
-		wg:                    sync.WaitGroup{},
-		serviceWg:             sync.WaitGroup{},
-		maxConcurrentServices: 10, // Default to 10 concurrent services
+		wg:                      sync.WaitGroup{},
+		serviceWg:               sync.WaitGroup{},
+		maxConcurrentServices:   1000, // Default to 1000 concurrent services
+		maxGlobalConnections:    13000, // Default to 13000 total connections (~80% of macOS default 16383)
+		maxConcurrentRegionWork: 2000, // Default to 2000 concurrent region work goroutines
 	}
 	cc.AwsReconLink = base.NewAwsReconLink(cc, configs...)
 
@@ -70,14 +85,29 @@ func (a *AWSCloudControl) Initialize() error {
 
 	// Configure max concurrent services from parameters
 	if maxServices, err := cfg.As[int](a.Arg("max-concurrent-services")); err == nil {
-		if maxServices > 0 && maxServices <= 100 { // Reasonable bounds
+		if maxServices > 0 && maxServices <= 10000 { // Reasonable bounds
 			a.maxConcurrentServices = maxServices
+		}
+	}
+
+	// Configure max global connections from parameters
+	if maxConnections, err := cfg.As[int](a.Arg("max-global-connections")); err == nil {
+		if maxConnections > 0 && maxConnections <= 30000 { // Keep well below port limit
+			a.maxGlobalConnections = maxConnections
+		}
+	}
+
+	// Configure max concurrent region work from parameters
+	if maxRegionWork, err := cfg.As[int](a.Arg("max-concurrent-region-work")); err == nil {
+		if maxRegionWork > 0 && maxRegionWork <= 50000 { // Reasonable bounds for goroutines
+			a.maxConcurrentRegionWork = maxRegionWork
 		}
 	}
 
 	a.initializeClients()
 	a.initializeSemaphores()
 	a.initializeServiceSemaphore()
+	a.initializeRegionWorkSemaphore()
 	a.serviceQueue = make(chan ServiceBatch, 20) // Buffer for queuing service batches
 	a.serviceGroups = make(map[string][]string)
 	return nil
@@ -85,13 +115,108 @@ func (a *AWSCloudControl) Initialize() error {
 
 func (a *AWSCloudControl) initializeSemaphores() {
 	a.semaphores = make(map[string]chan struct{})
-	for _, region := range a.Regions {
-		a.semaphores[region] = make(chan struct{}, 5)
+	a.serviceRegionSemaphores = make(map[string]chan struct{})
+	
+	// Dynamically check ephemeral port range and adjust global limit
+	availablePorts := a.getAvailableEphemeralPorts()
+	if a.maxGlobalConnections > availablePorts {
+		slog.Warn("Reducing maxGlobalConnections to available ephemeral ports", 
+			"requested", a.maxGlobalConnections, 
+			"available", availablePorts)
+		a.maxGlobalConnections = availablePorts
 	}
+	
+	a.globalSemaphore = make(chan struct{}, a.maxGlobalConnections)
+	
+	// Region semaphores are only for result sending, not API rate limiting
+	// Keep a small limit for result processing
+	resultSendLimit := 10
+	
+	slog.Info("Initializing semaphores", 
+		"globalLimit", a.maxGlobalConnections,
+		"resultSendLimit", resultSendLimit,
+		"availablePorts", availablePorts)
+	
+	for _, region := range a.Regions {
+		a.semaphores[region] = make(chan struct{}, resultSendLimit)
+	}
+}
+
+func (a *AWSCloudControl) getAvailableEphemeralPorts() int {
+	switch runtime.GOOS {
+	case "darwin":
+		return a.getMacOSEphemeralPorts()
+	case "linux":
+		return a.getLinuxEphemeralPorts()
+	default:
+		slog.Warn("Unknown OS, using conservative port limit", "os", runtime.GOOS)
+		return 1000 // Conservative default
+	}
+}
+
+func (a *AWSCloudControl) getMacOSEphemeralPorts() int {
+	first, err := exec.Command("sysctl", "-n", "net.inet.ip.portrange.first").Output()
+	if err != nil {
+		slog.Error("Failed to get portrange.first", "error", err)
+		return 1000
+	}
+	
+	last, err := exec.Command("sysctl", "-n", "net.inet.ip.portrange.last").Output()
+	if err != nil {
+		slog.Error("Failed to get portrange.last", "error", err)
+		return 1000
+	}
+	
+	firstPort, err := strconv.Atoi(strings.TrimSpace(string(first)))
+	if err != nil {
+		return 1000
+	}
+	
+	lastPort, err := strconv.Atoi(strings.TrimSpace(string(last)))
+	if err != nil {
+		return 1000
+	}
+	
+	// Reserve 20% for other applications and OS
+	available := int(float64(lastPort-firstPort+1) * 0.8)
+	slog.Debug("macOS ephemeral port range", "first", firstPort, "last", lastPort, "available", available)
+	return available
+}
+
+func (a *AWSCloudControl) getLinuxEphemeralPorts() int {
+	output, err := exec.Command("cat", "/proc/sys/net/ipv4/ip_local_port_range").Output()
+	if err != nil {
+		slog.Error("Failed to read Linux port range", "error", err)
+		return 1000
+	}
+	
+	parts := strings.Fields(strings.TrimSpace(string(output)))
+	if len(parts) != 2 {
+		return 1000
+	}
+	
+	first, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 1000
+	}
+	
+	last, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 1000
+	}
+	
+	// Reserve 20% for other applications and OS
+	available := int(float64(last-first+1) * 0.8)
+	slog.Debug("Linux ephemeral port range", "first", first, "last", last, "available", available)
+	return available
 }
 
 func (a *AWSCloudControl) initializeServiceSemaphore() {
 	a.serviceSemaphore = make(chan struct{}, a.maxConcurrentServices)
+}
+
+func (a *AWSCloudControl) initializeRegionWorkSemaphore() {
+	a.regionWorkSemaphore = make(chan struct{}, a.maxConcurrentRegionWork)
 }
 
 func (a *AWSCloudControl) extractServiceName(resourceType string) string {
@@ -103,6 +228,27 @@ func (a *AWSCloudControl) extractServiceName(resourceType string) string {
 	return "Unknown"
 }
 
+func (a *AWSCloudControl) getServiceRegionKey(serviceName, region string) string {
+	return fmt.Sprintf("%s:%s", serviceName, region)
+}
+
+func (a *AWSCloudControl) ensureServiceRegionSemaphore(serviceName, region string) chan struct{} {
+	key := a.getServiceRegionKey(serviceName, region)
+	
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	
+	if sem, exists := a.serviceRegionSemaphores[key]; exists {
+		return sem
+	}
+	
+	// Create semaphore with limit based on service type
+	// AWS CloudControl rate limits vary by service, defaulting to 5 per service+region
+	limit := 5
+	a.serviceRegionSemaphores[key] = make(chan struct{}, limit)
+	return a.serviceRegionSemaphores[key]
+}
+
 func (a *AWSCloudControl) addResourceTypeToService(serviceName, resourceType string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -110,18 +256,26 @@ func (a *AWSCloudControl) addResourceTypeToService(serviceName, resourceType str
 }
 
 func (a *AWSCloudControl) sendServiceBatches() {
+	// Copy service groups under mutex protection
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	
-	totalServices := len(a.serviceGroups)
+	serviceGroupsCopy := make(map[string][]string)
+	for serviceName, resourceTypes := range a.serviceGroups {
+		// Create a copy of the slice to avoid sharing memory
+		resourceTypesCopy := make([]string, len(resourceTypes))
+		copy(resourceTypesCopy, resourceTypes)
+		serviceGroupsCopy[serviceName] = resourceTypesCopy
+	}
+	totalServices := len(serviceGroupsCopy)
 	totalResourceTypes := 0
-	for _, resourceTypes := range a.serviceGroups {
+	for _, resourceTypes := range serviceGroupsCopy {
 		totalResourceTypes += len(resourceTypes)
 	}
+	a.mu.Unlock()
 	
 	slog.Info("Sending service batches for parallel processing", "services", totalServices, "totalResourceTypes", totalResourceTypes, "maxConcurrentServices", a.maxConcurrentServices)
 	
-	for serviceName, resourceTypes := range a.serviceGroups {
+	// Send batches without holding mutex
+	for serviceName, resourceTypes := range serviceGroupsCopy {
 		slog.Debug("Queuing service batch", "service", serviceName, "resourceTypes", len(resourceTypes))
 		batch := ServiceBatch{
 			ServiceName:   serviceName,
@@ -137,6 +291,11 @@ func (a *AWSCloudControl) startWorkerPool() {
 		a.serviceWg.Add(1)
 		go a.serviceWorker()
 	}
+	
+	// Set workerStarted flag with mutex protection
+	a.workerMu.Lock()
+	a.workerStarted = true
+	a.workerMu.Unlock()
 }
 
 func (a *AWSCloudControl) serviceWorker() {
@@ -168,7 +327,13 @@ func (a *AWSCloudControl) processResourceType(resourceType string) {
 		}
 
 		a.wg.Add(1)
-		go a.listResourcesInRegion(resourceType, region)
+		go func(rt, r string) {
+			// Acquire semaphore to limit concurrent goroutines
+			a.regionWorkSemaphore <- struct{}{}
+			defer func() { <-a.regionWorkSemaphore }()
+			
+			a.listResourcesInRegion(rt, r)
+		}(resourceType, region)
 	}
 
 	slog.Debug("cloudcontrol queued for processing", "resourceType", resourceType)
@@ -193,7 +358,6 @@ func (a *AWSCloudControl) Process(resourceType string) error {
 	// Start worker pool on first call
 	a.startOnce.Do(func() {
 		a.startWorkerPool()
-		a.workerStarted = true
 	})
 
 	// Extract service name and group resource types by service
@@ -209,6 +373,17 @@ func (a *AWSCloudControl) isGlobalService(resourceType, region string) bool {
 
 func (a *AWSCloudControl) listResourcesInRegion(resourceType, region string) {
 	defer a.wg.Done()
+
+	// Apply global connection limit first
+	a.globalSemaphore <- struct{}{}
+	defer func() { <-a.globalSemaphore }()
+
+	serviceName := a.extractServiceName(resourceType)
+	
+	// Apply service+region specific limit
+	serviceRegionSem := a.ensureServiceRegionSemaphore(serviceName, region)
+	serviceRegionSem <- struct{}{}
+	defer func() { <-serviceRegionSem }()
 
 	message.Info("Listing %s resources in %s (profile: %s)", resourceType, region, a.Profile)
 	slog.Debug("Listing resources in region", "type", resourceType, "region", region, "profile", a.Profile)
@@ -298,16 +473,21 @@ func (a *AWSCloudControl) resourceDescriptionToERD(resource cctypes.ResourceDesc
 }
 
 func (a *AWSCloudControl) sendResource(region string, resource *types.EnrichedResourceDescription) {
+	// Apply region-specific limit for sending resources
 	sem := a.semaphores[region]
 	sem <- struct{}{}
-
 	defer func() { <-sem }()
 
 	a.Send(resource)
 }
 
 func (a *AWSCloudControl) Complete() error {
-	if a.workerStarted {
+	// Check if workers were started with mutex protection
+	a.workerMu.Lock()
+	started := a.workerStarted
+	a.workerMu.Unlock()
+	
+	if started {
 		// Send all service batches to the queue
 		a.sendServiceBatches()
 		// Close the queue to signal workers to finish

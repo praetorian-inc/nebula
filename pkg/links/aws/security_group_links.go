@@ -86,12 +86,16 @@ func (l *SecurityGroupLinks) Process(input any) error {
 	// Deduplicate security group IDs and filter out already processed ones
 	uniqueSgIds := make([]string, 0)
 	seen := make(map[string]bool)
+
+	// Acquire read lock before accessing processedSGs
+	l.mu.RLock()
 	for _, sgId := range sgIds {
 		if !seen[sgId] && !l.processedSGs[sgId] {
 			seen[sgId] = true
 			uniqueSgIds = append(uniqueSgIds, sgId)
 		}
 	}
+	l.mu.RUnlock()
 
 	if len(uniqueSgIds) != len(sgIds) {
 		l.Logger.Info("deduplicated security group IDs", "original_count", len(sgIds), "unique_count", len(uniqueSgIds))
@@ -342,10 +346,10 @@ func (l *SecurityGroupLinks) analyzeSecurityGroup(ctx context.Context, awsConfig
 
 	return map[string]interface{}{
 		"security_group_id":          sgId,
-		"security_group_name":        sgRes.sgDetails.GroupName,
-		"security_group_description": sgRes.sgDetails.Description,
+		"security_group_name":        l.derefString(sgRes.sgDetails.GroupName),
+		"security_group_description": l.derefString(sgRes.sgDetails.Description),
 		"region":                     region,
-		"vpc_id":                     sgRes.sgDetails.VpcId,
+		"vpc_id":                     l.derefString(sgRes.sgDetails.VpcId),
 		"vpc_info":                   vpcInfo,
 		"network_interfaces":         analyzedEnis,
 		"total_enis":                 len(eniRes.enis),
@@ -466,9 +470,12 @@ func (l *SecurityGroupLinks) extractPermissionRule(permission types.IpPermission
 					"description":    l.derefString(prefixListId.Description),
 				}
 
-				// Get detailed prefix list information if available
+				// Get detailed prefix list information if available (guarded by RLock)
 				if l.prefixListDetails != nil {
-					if details, exists := l.prefixListDetails[*prefixListId.PrefixListId]; exists {
+					l.mu.RLock()
+					details, exists := l.prefixListDetails[*prefixListId.PrefixListId]
+					l.mu.RUnlock()
+					if exists {
 						// Add prefix list name
 						if name, hasName := details["Name"]; hasName {
 							prefixList["name"] = name
@@ -627,7 +634,9 @@ func (l *SecurityGroupLinks) populatePrefixListDetails(ctx context.Context, clie
 					}
 				}
 
+				l.mu.Lock()
 				l.prefixListDetails[*prefixList.PrefixListId] = details
+				l.mu.Unlock()
 				l.Logger.Debug("Resolved prefix list metadata", "id", *prefixList.PrefixListId, "name", *prefixList.PrefixListName)
 			}
 		}
@@ -669,10 +678,11 @@ func (l *SecurityGroupLinks) populatePrefixListDetails(ctx context.Context, clie
 			}
 
 			if len(entries) > 0 {
-				// Add entries to existing details
+				l.mu.Lock()
 				if details, exists := l.prefixListDetails[prefixListId]; exists {
 					details["Entries"] = entries
 					details["EntryCount"] = len(entries)
+					l.prefixListDetails[prefixListId] = details
 				} else {
 					// Create new details if none existed
 					l.prefixListDetails[prefixListId] = map[string]interface{}{
@@ -680,6 +690,7 @@ func (l *SecurityGroupLinks) populatePrefixListDetails(ctx context.Context, clie
 						"EntryCount": len(entries),
 					}
 				}
+				l.mu.Unlock()
 				l.Logger.Debug("Retrieved prefix list entries", "id", prefixListId, "entryCount", len(entries))
 			}
 		}
@@ -771,14 +782,14 @@ func (l *SecurityGroupLinks) getVpcInfo(ctx context.Context, client *ec2.Client,
 
 func (l *SecurityGroupLinks) analyzeNetworkInterface(eni types.NetworkInterface) map[string]interface{} {
 	analysis := map[string]interface{}{
-		"eni_id":            *eni.NetworkInterfaceId,
+		"eni_id":            l.derefString(eni.NetworkInterfaceId),
 		"interface_type":    eni.InterfaceType,
-		"description":       eni.Description,
-		"subnet_id":         *eni.SubnetId,
-		"vpc_id":            *eni.VpcId,
-		"availability_zone": eni.AvailabilityZone,
-		"private_ip":        eni.PrivateIpAddress,
-		"mac_address":       eni.MacAddress,
+		"description":       l.derefString(eni.Description),
+		"subnet_id":         l.derefString(eni.SubnetId),
+		"vpc_id":            l.derefString(eni.VpcId),
+		"availability_zone": l.derefString(eni.AvailabilityZone),
+		"private_ip":        l.derefString(eni.PrivateIpAddress),
+		"mac_address":       l.derefString(eni.MacAddress),
 		"status":            eni.Status,
 	}
 

@@ -20,14 +20,16 @@ import (
 
 type SecurityGroupAnalysis struct {
 	*base.AwsReconBaseLink
-	regions      []string
-	processedSGs map[string]bool
-	mu           sync.RWMutex
+	regions           []string
+	processedSGs      map[string]bool
+	prefixListDetails map[string]map[string]interface{}
+	mu                sync.RWMutex
 }
 
 func NewSecurityGroupAnalysis(configs ...cfg.Config) chain.Link {
 	link := &SecurityGroupAnalysis{
-		processedSGs: make(map[string]bool),
+		processedSGs:      make(map[string]bool),
+		prefixListDetails: make(map[string]map[string]interface{}),
 	}
 	link.AwsReconBaseLink = base.NewAwsReconBaseLink(link, configs...)
 	link.Base.SetName("AWS Security Group Analysis")
@@ -332,6 +334,12 @@ func (l *SecurityGroupAnalysis) analyzeSecurityGroup(ctx context.Context, awsCon
 
 	vpcInfo := <-vpcInfoChan
 
+	// Get prefix list details for all prefix lists referenced in security group rules
+	l.populatePrefixListDetails(ctx, ec2Client, sgRes.sgDetails)
+
+	// Extract security group rules
+	securityGroupRules := l.extractSecurityGroupRules(sgRes.sgDetails)
+
 	return map[string]interface{}{
 		"security_group_id":          sgId,
 		"security_group_name":        sgRes.sgDetails.GroupName,
@@ -341,7 +349,361 @@ func (l *SecurityGroupAnalysis) analyzeSecurityGroup(ctx context.Context, awsCon
 		"vpc_info":                   vpcInfo,
 		"network_interfaces":         analyzedEnis,
 		"total_enis":                 len(eniRes.enis),
+		"security_group_rules":       securityGroupRules,
 	}, nil
+}
+
+// extractSecurityGroupRules extracts and formats the ingress and egress rules from a security group
+func (l *SecurityGroupAnalysis) extractSecurityGroupRules(sg *types.SecurityGroup) map[string]interface{} {
+	rules := map[string]interface{}{
+		"ingress_rules": []map[string]interface{}{},
+		"egress_rules":  []map[string]interface{}{},
+	}
+
+	// Process ingress rules
+	if sg.IpPermissions != nil {
+		for _, permission := range sg.IpPermissions {
+			rule := l.extractPermissionRule(permission)
+			rules["ingress_rules"] = append(rules["ingress_rules"].([]map[string]interface{}), rule)
+		}
+	}
+
+	// Process egress rules
+	if sg.IpPermissionsEgress != nil {
+		for _, permission := range sg.IpPermissionsEgress {
+			rule := l.extractPermissionRule(permission)
+			rules["egress_rules"] = append(rules["egress_rules"].([]map[string]interface{}), rule)
+		}
+	}
+
+	return rules
+}
+
+// extractPermissionRule extracts and formats a single permission rule with all reference types
+func (l *SecurityGroupAnalysis) extractPermissionRule(permission types.IpPermission) map[string]interface{} {
+	rule := map[string]interface{}{
+		"protocol":  l.derefString(permission.IpProtocol),
+		"from_port": l.derefInt32(permission.FromPort),
+		"to_port":   l.derefInt32(permission.ToPort),
+	}
+
+	// Extract IP ranges
+	if permission.IpRanges != nil {
+		var ipRanges []string
+		var descriptions []string
+
+		for _, ipRange := range permission.IpRanges {
+			if ipRange.CidrIp != nil {
+				ipRanges = append(ipRanges, *ipRange.CidrIp)
+			}
+			// Extract description if available
+			if ipRange.Description != nil {
+				descriptions = append(descriptions, *ipRange.Description)
+			}
+		}
+
+		// Only add fields if they have data
+		if len(ipRanges) > 0 {
+			rule["ip_ranges"] = ipRanges
+		}
+		if len(descriptions) > 0 {
+			rule["ip_range_descriptions"] = descriptions
+		}
+	}
+
+	// Extract IPv6 ranges
+	if permission.Ipv6Ranges != nil {
+		var ipv6Ranges []string
+		var descriptions []string
+
+		for _, ipv6Range := range permission.Ipv6Ranges {
+			if ipv6Range.CidrIpv6 != nil {
+				ipv6Ranges = append(ipv6Ranges, *ipv6Range.CidrIpv6)
+			}
+			// Extract description if available
+			if ipv6Range.Description != nil {
+				descriptions = append(descriptions, *ipv6Range.Description)
+			}
+		}
+
+		// Only add fields if they have data
+		if len(ipv6Ranges) > 0 {
+			rule["ipv6_ranges"] = ipv6Ranges
+		}
+		if len(descriptions) > 0 {
+			rule["ipv6_range_descriptions"] = descriptions
+		}
+	}
+
+	// Extract user ID group pairs (security group references)
+	if permission.UserIdGroupPairs != nil {
+		var pairs []map[string]interface{}
+
+		for _, pair := range permission.UserIdGroupPairs {
+			groupPair := map[string]interface{}{
+				"user_id":     l.derefString(pair.UserId),
+				"group_id":    l.derefString(pair.GroupId),
+				"group_name":  l.derefString(pair.GroupName),
+				"description": l.derefString(pair.Description),
+			}
+			pairs = append(pairs, groupPair)
+		}
+
+		// Only add field if there are pairs
+		if len(pairs) > 0 {
+			rule["user_id_group_pairs"] = pairs
+		}
+	}
+
+	// Extract prefix list references
+	if permission.PrefixListIds != nil {
+		var prefixLists []map[string]interface{}
+
+		for _, prefixListId := range permission.PrefixListIds {
+			if prefixListId.PrefixListId != nil {
+				prefixList := map[string]interface{}{
+					"prefix_list_id": l.derefString(prefixListId.PrefixListId),
+					"description":    l.derefString(prefixListId.Description),
+				}
+
+				// Get detailed prefix list information if available
+				if l.prefixListDetails != nil {
+					if details, exists := l.prefixListDetails[*prefixListId.PrefixListId]; exists {
+						// Add prefix list name
+						if name, hasName := details["Name"]; hasName {
+							prefixList["name"] = name
+						}
+
+						// Add CIDR entries
+						if entries, hasEntries := details["Entries"]; hasEntries {
+							prefixList["cidr_entries"] = entries
+						}
+
+						// Add entry count
+						if entryCount, hasEntryCount := details["EntryCount"]; hasEntryCount {
+							prefixList["EntryCount"] = entryCount
+						}
+
+						// Add other metadata
+						if version, hasVersion := details["Version"]; hasVersion {
+							prefixList["version"] = version
+						}
+						if maxEntries, hasMaxEntries := details["MaxEntries"]; hasMaxEntries {
+							prefixList["max_entries"] = maxEntries
+						}
+						if state, hasState := details["State"]; hasState {
+							prefixList["state"] = state
+						}
+						if addressFamily, hasAddressFamily := details["AddressFamily"]; hasAddressFamily {
+							prefixList["address_family"] = addressFamily
+						}
+						if ownerId, hasOwnerId := details["OwnerId"]; hasOwnerId {
+							prefixList["owner_id"] = ownerId
+						}
+						if tags, hasTags := details["Tags"]; hasTags {
+							prefixList["tags"] = tags
+						}
+					}
+				}
+
+				prefixLists = append(prefixLists, prefixList)
+			}
+		}
+
+		// Only add field if there are prefix lists
+		if len(prefixLists) > 0 {
+			rule["prefix_lists"] = prefixLists
+		}
+	}
+
+	// Note: Additional reference types like ReferencedGroupIds may be available
+	// in newer AWS SDK versions. This can be extended as needed.
+
+	return rule
+}
+
+// populatePrefixListDetails populates the prefixListDetails map with comprehensive information about prefix lists
+func (l *SecurityGroupAnalysis) populatePrefixListDetails(ctx context.Context, client *ec2.Client, sg *types.SecurityGroup) {
+	// Collect all prefix list IDs from security group rules
+	var allPrefixListIds []string
+
+	// Collect from ingress rules
+	if sg.IpPermissions != nil {
+		for _, permission := range sg.IpPermissions {
+			if permission.PrefixListIds != nil {
+				for _, prefixList := range permission.PrefixListIds {
+					if prefixList.PrefixListId != nil {
+						allPrefixListIds = append(allPrefixListIds, *prefixList.PrefixListId)
+					}
+				}
+			}
+		}
+	}
+
+	// Collect from egress rules
+	if sg.IpPermissionsEgress != nil {
+		for _, permission := range sg.IpPermissionsEgress {
+			if permission.PrefixListIds != nil {
+				for _, prefixList := range permission.PrefixListIds {
+					if prefixList.PrefixListId != nil {
+						allPrefixListIds = append(allPrefixListIds, *prefixList.PrefixListId)
+					}
+				}
+			}
+		}
+	}
+
+	if len(allPrefixListIds) == 0 {
+		return
+	}
+
+	// Remove duplicates
+	uniqueIds := make(map[string]bool)
+	var uniquePrefixListIds []string
+	for _, id := range allPrefixListIds {
+		if !uniqueIds[id] {
+			uniqueIds[id] = true
+			uniquePrefixListIds = append(uniquePrefixListIds, id)
+		}
+	}
+
+	l.Logger.Info("Resolving prefix list details", "count", len(uniquePrefixListIds))
+
+	// AWS API has a limit on the number of IDs per request, so we might need to batch
+	const maxIdsPerRequest = 200
+
+	for i := 0; i < len(uniquePrefixListIds); i += maxIdsPerRequest {
+		end := i + maxIdsPerRequest
+		if end > len(uniquePrefixListIds) {
+			end = len(uniquePrefixListIds)
+		}
+
+		batch := uniquePrefixListIds[i:end]
+		input := &ec2.DescribeManagedPrefixListsInput{
+			PrefixListIds: batch,
+		}
+
+		output, err := client.DescribeManagedPrefixLists(ctx, input)
+		if err != nil {
+			l.Logger.Warn("Failed to describe prefix lists", "prefixListIds", batch, "error", err)
+			continue
+		}
+
+		for _, prefixList := range output.PrefixLists {
+			if prefixList.PrefixListId != nil && prefixList.PrefixListName != nil {
+				// Store prefix list metadata
+				details := map[string]interface{}{
+					"Name": *prefixList.PrefixListName,
+				}
+
+				if prefixList.PrefixListArn != nil {
+					details["PrefixListArn"] = *prefixList.PrefixListArn
+				}
+				if prefixList.Version != nil {
+					details["Version"] = *prefixList.Version
+				}
+				if prefixList.MaxEntries != nil {
+					details["MaxEntries"] = *prefixList.MaxEntries
+				}
+				details["State"] = prefixList.State
+				if prefixList.StateMessage != nil {
+					details["StateMessage"] = *prefixList.StateMessage
+				}
+				if prefixList.AddressFamily != nil {
+					details["AddressFamily"] = *prefixList.AddressFamily
+				}
+				if prefixList.OwnerId != nil {
+					details["OwnerId"] = *prefixList.OwnerId
+				}
+				if len(prefixList.Tags) > 0 {
+					tags := make(map[string]string)
+					for _, tag := range prefixList.Tags {
+						if tag.Key != nil && tag.Value != nil {
+							tags[*tag.Key] = *tag.Value
+						}
+					}
+					if len(tags) > 0 {
+						details["Tags"] = tags
+					}
+				}
+
+				l.prefixListDetails[*prefixList.PrefixListId] = details
+				l.Logger.Debug("Resolved prefix list metadata", "id", *prefixList.PrefixListId, "name", *prefixList.PrefixListName)
+			}
+		}
+	}
+
+	// Now get the actual entries for each prefix list
+	for i := 0; i < len(uniquePrefixListIds); i += maxIdsPerRequest {
+		end := i + maxIdsPerRequest
+		if end > len(uniquePrefixListIds) {
+			end = len(uniquePrefixListIds)
+		}
+
+		batch := uniquePrefixListIds[i:end]
+
+		// Process each prefix list individually since GetManagedPrefixListEntries doesn't support batching
+		for _, prefixListId := range batch {
+			input := &ec2.GetManagedPrefixListEntriesInput{
+				PrefixListId: &prefixListId,
+			}
+
+			entriesOutput, err := client.GetManagedPrefixListEntries(ctx, input)
+			if err != nil {
+				l.Logger.Warn("Failed to get prefix list entries", "prefixListId", prefixListId, "error", err)
+				continue
+			}
+
+			var entries []map[string]interface{}
+			for _, entry := range entriesOutput.Entries {
+				entryInfo := map[string]interface{}{
+					"Cidr": *entry.Cidr,
+				}
+
+				// Add description if available
+				if entry.Description != nil {
+					entryInfo["Description"] = *entry.Description
+				}
+
+				entries = append(entries, entryInfo)
+			}
+
+			if len(entries) > 0 {
+				// Add entries to existing details
+				if details, exists := l.prefixListDetails[prefixListId]; exists {
+					details["Entries"] = entries
+					details["EntryCount"] = len(entries)
+				} else {
+					// Create new details if none existed
+					l.prefixListDetails[prefixListId] = map[string]interface{}{
+						"Entries":    entries,
+						"EntryCount": len(entries),
+					}
+				}
+				l.Logger.Debug("Retrieved prefix list entries", "id", prefixListId, "entryCount", len(entries))
+			}
+		}
+	}
+
+	l.Logger.Info("Successfully resolved prefix list details",
+		"resolvedCount", len(l.prefixListDetails),
+		"total", len(uniquePrefixListIds))
+}
+
+// derefString safely dereferences a string pointer, returning empty string if nil
+func (l *SecurityGroupAnalysis) derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// derefInt32 safely dereferences an int32 pointer, returning nil if nil
+func (l *SecurityGroupAnalysis) derefInt32(i *int32) interface{} {
+	if i == nil {
+		return nil
+	}
+	return *i
 }
 
 func (l *SecurityGroupAnalysis) getSecurityGroupDetails(ctx context.Context, client *ec2.Client, sgId string) (*types.SecurityGroup, error) {

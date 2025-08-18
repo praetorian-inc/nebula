@@ -57,8 +57,8 @@ func TestExtractSecurityGroupRules(t *testing.T) {
 		},
 	}
 
-	// Create an instance of SecurityGroupAnalysis to test the method
-	sga := &SecurityGroupAnalysis{}
+	// Create an instance of SecurityGroupLinks to test the method
+	sga := &SecurityGroupLinks{}
 
 	// Extract rules
 	rules := sga.extractSecurityGroupRules(testSG)
@@ -151,7 +151,7 @@ func TestExtractSecurityGroupRulesEmpty(t *testing.T) {
 		Description: aws.String("Empty security group"),
 	}
 
-	sga := &SecurityGroupAnalysis{}
+	sga := &SecurityGroupLinks{}
 	rules := sga.extractSecurityGroupRules(testSG)
 
 	// Should have empty arrays for rules
@@ -198,7 +198,7 @@ func TestExtractSecurityGroupRulesWithPrefixLists(t *testing.T) {
 		},
 	}
 
-	sga := &SecurityGroupAnalysis{}
+	sga := &SecurityGroupLinks{}
 
 	// Populate prefix list details for testing
 	sga.prefixListDetails = map[string]map[string]interface{}{
@@ -348,7 +348,7 @@ func TestExtractSecurityGroupRulesCleanOutput(t *testing.T) {
 		},
 	}
 
-	sga := &SecurityGroupAnalysis{}
+	sga := &SecurityGroupLinks{}
 	rules := sga.extractSecurityGroupRules(testSG)
 
 	// Test ingress rule - should only have basic fields

@@ -18,7 +18,7 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 )
 
-type SecurityGroupAnalysis struct {
+type SecurityGroupLinks struct {
 	*base.AwsReconBaseLink
 	regions           []string
 	processedSGs      map[string]bool
@@ -26,23 +26,23 @@ type SecurityGroupAnalysis struct {
 	mu                sync.RWMutex
 }
 
-func NewSecurityGroupAnalysis(configs ...cfg.Config) chain.Link {
-	link := &SecurityGroupAnalysis{
+func NewSecurityGroupLinks(configs ...cfg.Config) chain.Link {
+	link := &SecurityGroupLinks{
 		processedSGs:      make(map[string]bool),
 		prefixListDetails: make(map[string]map[string]interface{}),
 	}
 	link.AwsReconBaseLink = base.NewAwsReconBaseLink(link, configs...)
-	link.Base.SetName("AWS Security Group Analysis")
+	link.Base.SetName("AWS Security Group Links")
 	return link
 }
 
-func (l *SecurityGroupAnalysis) Params() []cfg.Param {
+func (l *SecurityGroupLinks) Params() []cfg.Param {
 	return append(l.AwsReconBaseLink.Params(),
 		options.AwsRegions(),
 		options.AwsSecurityGroupIds())
 }
 
-func (l *SecurityGroupAnalysis) Initialize() error {
+func (l *SecurityGroupLinks) Initialize() error {
 	if err := l.AwsReconBaseLink.Initialize(); err != nil {
 		return fmt.Errorf("failed to initialize base link: %w", err)
 	}
@@ -63,9 +63,9 @@ func (l *SecurityGroupAnalysis) Initialize() error {
 	return nil
 }
 
-func (l *SecurityGroupAnalysis) Process(input any) error {
+func (l *SecurityGroupLinks) Process(input any) error {
 	// Debug: Log when Process is called and with what input
-	l.Logger.Info("SecurityGroupAnalysis Process method called",
+	l.Logger.Info("SecurityGroupLinks Process method called",
 		"input", input,
 		"input_type", fmt.Sprintf("%T", input),
 		"timestamp", time.Now().UnixNano())
@@ -155,14 +155,14 @@ func (l *SecurityGroupAnalysis) Process(input any) error {
 		"results":                  allResults,
 	}
 
-	l.Logger.Info("SecurityGroupAnalysis sending results",
+	l.Logger.Info("SecurityGroupLinks sending results",
 		"results_count", len(allResults),
 		"timestamp", time.Now().UnixNano())
 
 	return l.Send(result)
 }
 
-func (l *SecurityGroupAnalysis) processSingleSecurityGroup(ctx context.Context, sgId string, resultsChan chan<- map[string]interface{}) {
+func (l *SecurityGroupLinks) processSingleSecurityGroup(ctx context.Context, sgId string, resultsChan chan<- map[string]interface{}) {
 	l.Logger.Info("analyzing security group", "security-group-id", sgId)
 
 	// Check if already processed with read lock
@@ -227,7 +227,7 @@ func (l *SecurityGroupAnalysis) processSingleSecurityGroup(ctx context.Context, 
 	}
 }
 
-func (l *SecurityGroupAnalysis) searchInRegion(ctx context.Context, sgId, region string, resultsChan chan<- map[string]interface{}) {
+func (l *SecurityGroupLinks) searchInRegion(ctx context.Context, sgId, region string, resultsChan chan<- map[string]interface{}) {
 	l.Logger.Debug("searching in region", "region", region, "security-group-id", sgId)
 
 	// Get AWS config for this region
@@ -258,7 +258,7 @@ func (l *SecurityGroupAnalysis) searchInRegion(ctx context.Context, sgId, region
 	resultsChan <- result
 }
 
-func (l *SecurityGroupAnalysis) analyzeSecurityGroup(ctx context.Context, awsConfig aws.Config, sgId string, region string) (map[string]interface{}, error) {
+func (l *SecurityGroupLinks) analyzeSecurityGroup(ctx context.Context, awsConfig aws.Config, sgId string, region string) (map[string]interface{}, error) {
 	ec2Client := ec2.NewFromConfig(awsConfig)
 
 	// Run API calls in parallel using goroutines
@@ -354,7 +354,7 @@ func (l *SecurityGroupAnalysis) analyzeSecurityGroup(ctx context.Context, awsCon
 }
 
 // extractSecurityGroupRules extracts and formats the ingress and egress rules from a security group
-func (l *SecurityGroupAnalysis) extractSecurityGroupRules(sg *types.SecurityGroup) map[string]interface{} {
+func (l *SecurityGroupLinks) extractSecurityGroupRules(sg *types.SecurityGroup) map[string]interface{} {
 	rules := map[string]interface{}{
 		"ingress_rules": []map[string]interface{}{},
 		"egress_rules":  []map[string]interface{}{},
@@ -380,7 +380,7 @@ func (l *SecurityGroupAnalysis) extractSecurityGroupRules(sg *types.SecurityGrou
 }
 
 // extractPermissionRule extracts and formats a single permission rule with all reference types
-func (l *SecurityGroupAnalysis) extractPermissionRule(permission types.IpPermission) map[string]interface{} {
+func (l *SecurityGroupLinks) extractPermissionRule(permission types.IpPermission) map[string]interface{} {
 	rule := map[string]interface{}{
 		"protocol":  l.derefString(permission.IpProtocol),
 		"from_port": l.derefInt32(permission.FromPort),
@@ -523,7 +523,7 @@ func (l *SecurityGroupAnalysis) extractPermissionRule(permission types.IpPermiss
 }
 
 // populatePrefixListDetails populates the prefixListDetails map with comprehensive information about prefix lists
-func (l *SecurityGroupAnalysis) populatePrefixListDetails(ctx context.Context, client *ec2.Client, sg *types.SecurityGroup) {
+func (l *SecurityGroupLinks) populatePrefixListDetails(ctx context.Context, client *ec2.Client, sg *types.SecurityGroup) {
 	// Collect all prefix list IDs from security group rules
 	var allPrefixListIds []string
 
@@ -691,7 +691,7 @@ func (l *SecurityGroupAnalysis) populatePrefixListDetails(ctx context.Context, c
 }
 
 // derefString safely dereferences a string pointer, returning empty string if nil
-func (l *SecurityGroupAnalysis) derefString(s *string) string {
+func (l *SecurityGroupLinks) derefString(s *string) string {
 	if s == nil {
 		return ""
 	}
@@ -699,14 +699,14 @@ func (l *SecurityGroupAnalysis) derefString(s *string) string {
 }
 
 // derefInt32 safely dereferences an int32 pointer, returning nil if nil
-func (l *SecurityGroupAnalysis) derefInt32(i *int32) interface{} {
+func (l *SecurityGroupLinks) derefInt32(i *int32) interface{} {
 	if i == nil {
 		return nil
 	}
 	return *i
 }
 
-func (l *SecurityGroupAnalysis) getSecurityGroupDetails(ctx context.Context, client *ec2.Client, sgId string) (*types.SecurityGroup, error) {
+func (l *SecurityGroupLinks) getSecurityGroupDetails(ctx context.Context, client *ec2.Client, sgId string) (*types.SecurityGroup, error) {
 	input := &ec2.DescribeSecurityGroupsInput{
 		GroupIds: []string{sgId},
 	}
@@ -723,7 +723,7 @@ func (l *SecurityGroupAnalysis) getSecurityGroupDetails(ctx context.Context, cli
 	return &result.SecurityGroups[0], nil
 }
 
-func (l *SecurityGroupAnalysis) getNetworkInterfaces(ctx context.Context, client *ec2.Client, sgId string) ([]types.NetworkInterface, error) {
+func (l *SecurityGroupLinks) getNetworkInterfaces(ctx context.Context, client *ec2.Client, sgId string) ([]types.NetworkInterface, error) {
 	input := &ec2.DescribeNetworkInterfacesInput{
 		Filters: []types.Filter{
 			{
@@ -741,7 +741,7 @@ func (l *SecurityGroupAnalysis) getNetworkInterfaces(ctx context.Context, client
 	return result.NetworkInterfaces, nil
 }
 
-func (l *SecurityGroupAnalysis) getVpcInfo(ctx context.Context, client *ec2.Client, vpcId *string) (map[string]interface{}, error) {
+func (l *SecurityGroupLinks) getVpcInfo(ctx context.Context, client *ec2.Client, vpcId *string) (map[string]interface{}, error) {
 	if vpcId == nil {
 		return nil, nil
 	}
@@ -769,7 +769,7 @@ func (l *SecurityGroupAnalysis) getVpcInfo(ctx context.Context, client *ec2.Clie
 	}, nil
 }
 
-func (l *SecurityGroupAnalysis) analyzeNetworkInterface(eni types.NetworkInterface) map[string]interface{} {
+func (l *SecurityGroupLinks) analyzeNetworkInterface(eni types.NetworkInterface) map[string]interface{} {
 	analysis := map[string]interface{}{
 		"eni_id":            *eni.NetworkInterfaceId,
 		"interface_type":    eni.InterfaceType,
@@ -800,7 +800,7 @@ func (l *SecurityGroupAnalysis) analyzeNetworkInterface(eni types.NetworkInterfa
 	return analysis
 }
 
-func (l *SecurityGroupAnalysis) determineAssetType(eni types.NetworkInterface) map[string]interface{} {
+func (l *SecurityGroupLinks) determineAssetType(eni types.NetworkInterface) map[string]interface{} {
 	description := ""
 	if eni.Description != nil {
 		description = *eni.Description
@@ -890,7 +890,7 @@ func (l *SecurityGroupAnalysis) determineAssetType(eni types.NetworkInterface) m
 	}
 }
 
-func (l *SecurityGroupAnalysis) extractDirectoryId(description string) string {
+func (l *SecurityGroupLinks) extractDirectoryId(description string) string {
 	// Extract directory ID from description (format: d-xxxxxxxxx)
 	dirRegex := regexp.MustCompile(`d-[a-z0-9]+`)
 	matches := dirRegex.FindString(description)

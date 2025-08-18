@@ -10,15 +10,15 @@ import (
 )
 
 func init() {
-	registry.Register("aws", "analyze", AWSSecurityGroupAnalysis.Metadata().Properties()["id"].(string), *AWSSecurityGroupAnalysis)
+	registry.Register("aws", "analyze", AWSSecurityGroupLinks.Metadata().Properties()["id"].(string), *AWSSecurityGroupLinks)
 }
 
-var AWSSecurityGroupAnalysis = chain.NewModule(
+var AWSSecurityGroupLinks = chain.NewModule(
 	cfg.NewMetadata(
-		"AWS Security Group Analysis",
+		"AWS Security Group Links",
 		"Correlates network resources to security groups.",
 	).WithProperties(map[string]any{
-		"id":          "security-group-analysis",
+		"id":          "security-group-links",
 		"platform":    "aws",
 		"opsec_level": "moderate",
 		"authors":     []string{"Praetorian"},
@@ -29,7 +29,7 @@ var AWSSecurityGroupAnalysis = chain.NewModule(
 	},
 	),
 ).WithLinks(
-	aws.NewSecurityGroupAnalysis,
+	aws.NewSecurityGroupLinks,
 ).WithOutputters(
 	outputters.NewRuntimeJSONOutputter,
 ).WithInputParam(
@@ -38,5 +38,5 @@ var AWSSecurityGroupAnalysis = chain.NewModule(
 	cfg.NewParam[string]("module-name", "name of the module for dynamic file naming"),
 	options.AwsRegions(),
 ).WithConfigs(
-	cfg.WithArg("module-name", "security-group-analysis"),
+	cfg.WithArg("module-name", "security-group-links"),
 ).WithAutoRun()

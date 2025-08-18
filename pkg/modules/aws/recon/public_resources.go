@@ -30,7 +30,7 @@ var AWSPublicResources = chain.NewModule(
 	general.NewResourceTypePreprocessor(&aws.AwsPublicResources{}),
 	cloudcontrol.NewAWSCloudControl,
 	aws.NewAwsPublicResources,
-	chain.Parallelize(aws.NewAWSPublicResourcesProcessor),
+	aws.NewAWSPublicResourcesProcessor,
 ).WithOutputters(
 	outputters.NewRuntimeJSONOutputter,
 	outputters.NewERDConsoleOutputter,

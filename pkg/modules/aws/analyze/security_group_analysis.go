@@ -16,7 +16,7 @@ func init() {
 var AWSSecurityGroupAnalysis = chain.NewModule(
 	cfg.NewMetadata(
 		"AWS Security Group Analysis",
-		"Analyzes security groups to find related ENIs, VPCs, subnets, and AWS assets.",
+		"Correlates network resources to security groups.",
 	).WithProperties(map[string]any{
 		"id":          "security-group-analysis",
 		"platform":    "aws",

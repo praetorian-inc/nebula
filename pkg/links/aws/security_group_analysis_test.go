@@ -8,6 +8,7 @@ import (
 )
 
 func TestExtractSecurityGroupRules(t *testing.T) {
+	t.Parallel()
 	// Create a test security group with sample rules
 	testSG := &types.SecurityGroup{
 		GroupId:     aws.String("sg-test123"),
@@ -74,7 +75,16 @@ func TestExtractSecurityGroupRules(t *testing.T) {
 
 	// Test first ingress rule (port 80)
 	ingressRules := rules["ingress_rules"].([]map[string]interface{})
-	firstRule := ingressRules[0]
+	var firstRule map[string]interface{}
+	for _, r := range ingressRules {
+		if r["from_port"] == int32(80) && r["to_port"] == int32(80) {
+			firstRule = r
+			break
+		}
+	}
+	if firstRule == nil {
+		t.Fatalf("did not find ingress rule for port 80")
+	}
 	if firstRule["protocol"] != "tcp" {
 		t.Errorf("Expected protocol 'tcp', got %v", firstRule["protocol"])
 	}
@@ -92,7 +102,16 @@ func TestExtractSecurityGroupRules(t *testing.T) {
 	}
 
 	// Test second ingress rule with security group reference
-	secondRule := ingressRules[1]
+	var secondRule map[string]interface{}
+	for _, r := range ingressRules {
+		if r["from_port"] == int32(443) && r["to_port"] == int32(443) {
+			secondRule = r
+			break
+		}
+	}
+	if secondRule == nil {
+		t.Fatalf("did not find ingress rule for port 443")
+	}
 	userGroupPairs := secondRule["user_id_group_pairs"].([]map[string]interface{})
 	if len(userGroupPairs) != 1 {
 		t.Errorf("Expected 1 user group pair, got %d", len(userGroupPairs))
@@ -124,6 +143,7 @@ func TestExtractSecurityGroupRules(t *testing.T) {
 }
 
 func TestExtractSecurityGroupRulesEmpty(t *testing.T) {
+	t.Parallel()
 	// Test with empty security group
 	testSG := &types.SecurityGroup{
 		GroupId:     aws.String("sg-empty"),
@@ -144,6 +164,7 @@ func TestExtractSecurityGroupRulesEmpty(t *testing.T) {
 }
 
 func TestExtractSecurityGroupRulesWithPrefixLists(t *testing.T) {
+	t.Parallel()
 	// Create a test security group with prefix list references
 	testSG := &types.SecurityGroup{
 		GroupId:     aws.String("sg-prefix-test"),
@@ -296,12 +317,14 @@ func TestExtractSecurityGroupRulesWithPrefixLists(t *testing.T) {
 	if egressPrefixList["name"] != "internet-access" {
 		t.Errorf("Expected prefix list name 'internet-access', got %v", egressPrefixList["name"])
 	}
-	if egressPrefixList["EntryCount"] != 1 {
-		t.Errorf("Expected EntryCount 1, got %v", egressPrefixList["EntryCount"])
+	egressCidrEntries := egressPrefixList["cidr_entries"].([]map[string]interface{})
+	if len(egressCidrEntries) != 1 {
+		t.Errorf("Expected 1 CIDR entry, got %d", len(egressCidrEntries))
 	}
 }
 
 func TestExtractSecurityGroupRulesCleanOutput(t *testing.T) {
+	t.Parallel()
 	// Create a test security group with minimal rules
 	testSG := &types.SecurityGroup{
 		GroupId:     aws.String("sg-clean-test"),

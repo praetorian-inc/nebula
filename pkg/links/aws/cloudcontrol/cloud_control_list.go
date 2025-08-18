@@ -3,6 +3,7 @@ package cloudcontrol
 import (
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -34,17 +35,13 @@ type AWSCloudControl struct {
 	maxConcurrentServices int
 	maxGlobalConnections  int                                // limit total concurrent connections
 	maxConcurrentRegionWork int                              // limit concurrent region work goroutines
-	serviceQueue          chan ServiceBatch
+	resourceQueue         chan string                        // queue of individual resource types
+	processedResources    sync.Map                          // concurrent map to track processed resource types
 	startOnce             sync.Once
 	workerStarted         bool
 	workerMu              sync.Mutex                         // protects workerStarted
-	serviceGroups         map[string][]string                // service -> resource types
-	mu                    sync.Mutex                         // protects serviceGroups and serviceRegionSemaphores
-}
-
-type ServiceBatch struct {
-	ServiceName   string
-	ResourceTypes []string
+	pendingResources      []string                          // buffer for resource types before processing
+	mu                    sync.Mutex                         // protects pendingResources and serviceRegionSemaphores
 }
 
 func (a *AWSCloudControl) Metadata() *cfg.Metadata {
@@ -108,8 +105,8 @@ func (a *AWSCloudControl) Initialize() error {
 	a.initializeSemaphores()
 	a.initializeServiceSemaphore()
 	a.initializeRegionWorkSemaphore()
-	a.serviceQueue = make(chan ServiceBatch, 20) // Buffer for queuing service batches
-	a.serviceGroups = make(map[string][]string)
+	a.resourceQueue = make(chan string, 1000) // Buffer for individual resource types
+	a.pendingResources = make([]string, 0)
 	return nil
 }
 
@@ -249,47 +246,39 @@ func (a *AWSCloudControl) ensureServiceRegionSemaphore(serviceName, region strin
 	return a.serviceRegionSemaphores[key]
 }
 
-func (a *AWSCloudControl) addResourceTypeToService(serviceName, resourceType string) {
+func (a *AWSCloudControl) addResourceType(resourceType string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.serviceGroups[serviceName] = append(a.serviceGroups[serviceName], resourceType)
+	a.pendingResources = append(a.pendingResources, resourceType)
 }
 
-func (a *AWSCloudControl) sendServiceBatches() {
-	// Copy service groups under mutex protection
+func (a *AWSCloudControl) sendResourcesRandomly() {
+	// Copy pending resources under mutex protection
 	a.mu.Lock()
-	serviceGroupsCopy := make(map[string][]string)
-	for serviceName, resourceTypes := range a.serviceGroups {
-		// Create a copy of the slice to avoid sharing memory
-		resourceTypesCopy := make([]string, len(resourceTypes))
-		copy(resourceTypesCopy, resourceTypes)
-		serviceGroupsCopy[serviceName] = resourceTypesCopy
-	}
-	totalServices := len(serviceGroupsCopy)
-	totalResourceTypes := 0
-	for _, resourceTypes := range serviceGroupsCopy {
-		totalResourceTypes += len(resourceTypes)
-	}
+	resourcesCopy := make([]string, len(a.pendingResources))
+	copy(resourcesCopy, a.pendingResources)
+	totalResourceTypes := len(resourcesCopy)
 	a.mu.Unlock()
 	
-	slog.Info("Sending service batches for parallel processing", "services", totalServices, "totalResourceTypes", totalResourceTypes, "maxConcurrentServices", a.maxConcurrentServices)
+	slog.Info("Sending resources for parallel processing", "totalResourceTypes", totalResourceTypes, "maxConcurrentServices", a.maxConcurrentServices)
 	
-	// Send batches without holding mutex
-	for serviceName, resourceTypes := range serviceGroupsCopy {
-		slog.Debug("Queuing service batch", "service", serviceName, "resourceTypes", len(resourceTypes))
-		batch := ServiceBatch{
-			ServiceName:   serviceName,
-			ResourceTypes: resourceTypes,
-		}
-		a.serviceQueue <- batch
+	// Shuffle resources randomly to avoid processing hotspots
+	rand.Shuffle(len(resourcesCopy), func(i, j int) {
+		resourcesCopy[i], resourcesCopy[j] = resourcesCopy[j], resourcesCopy[i]
+	})
+	
+	// Send randomized resources to queue
+	for _, resourceType := range resourcesCopy {
+		slog.Debug("Queuing resource type", "type", resourceType)
+		a.resourceQueue <- resourceType
 	}
 }
 
 func (a *AWSCloudControl) startWorkerPool() {
-	// Start worker goroutines to process services
+	// Start worker goroutines to process individual resource types
 	for i := 0; i < a.maxConcurrentServices; i++ {
 		a.serviceWg.Add(1)
-		go a.serviceWorker()
+		go a.resourceWorker()
 	}
 	
 	// Set workerStarted flag with mutex protection
@@ -298,26 +287,21 @@ func (a *AWSCloudControl) startWorkerPool() {
 	a.workerMu.Unlock()
 }
 
-func (a *AWSCloudControl) serviceWorker() {
+func (a *AWSCloudControl) resourceWorker() {
 	defer a.serviceWg.Done()
 
-	for serviceBatch := range a.serviceQueue {
-		a.processServiceBatch(serviceBatch)
+	for resourceType := range a.resourceQueue {
+		a.processResourceTypeWithDedupe(resourceType)
 	}
 }
 
-func (a *AWSCloudControl) processServiceBatch(batch ServiceBatch) {
-	slog.Debug("Processing service batch", "service", batch.ServiceName, "resourceTypeCount", len(batch.ResourceTypes))
-	
-	// Process all resource types for this service
-	for _, resourceType := range batch.ResourceTypes {
-		a.processResourceType(resourceType)
+func (a *AWSCloudControl) processResourceTypeWithDedupe(resourceType string) {
+	// Check if already processed using compare-and-swap
+	if _, loaded := a.processedResources.LoadOrStore(resourceType, true); loaded {
+		slog.Debug("Skipping already processed resource type", "type", resourceType)
+		return
 	}
 	
-	slog.Debug("Completed service batch", "service", batch.ServiceName)
-}
-
-func (a *AWSCloudControl) processResourceType(resourceType string) {
 	slog.Debug("Processing resource type", "type", resourceType)
 
 	for _, region := range a.Regions {
@@ -337,6 +321,10 @@ func (a *AWSCloudControl) processResourceType(resourceType string) {
 	}
 
 	slog.Debug("cloudcontrol queued for processing", "resourceType", resourceType)
+}
+
+func (a *AWSCloudControl) processResourceType(resourceType string) {
+	a.processResourceTypeWithDedupe(resourceType)
 }
 
 func (a *AWSCloudControl) initializeClients() error {
@@ -360,9 +348,8 @@ func (a *AWSCloudControl) Process(resourceType string) error {
 		a.startWorkerPool()
 	})
 
-	// Extract service name and group resource types by service
-	serviceName := a.extractServiceName(resourceType)
-	a.addResourceTypeToService(serviceName, resourceType)
+	// Add resource type to pending list
+	a.addResourceType(resourceType)
 
 	return nil
 }
@@ -488,11 +475,11 @@ func (a *AWSCloudControl) Complete() error {
 	a.workerMu.Unlock()
 	
 	if started {
-		// Send all service batches to the queue
-		a.sendServiceBatches()
+		// Send all resources to the queue with random distribution
+		a.sendResourcesRandomly()
 		// Close the queue to signal workers to finish
-		close(a.serviceQueue)
-		// Wait for all service workers to complete
+		close(a.resourceQueue)
+		// Wait for all resource workers to complete
 		a.serviceWg.Wait()
 	}
 	// Wait for any remaining region workers

@@ -39,9 +39,9 @@ var (
 	}
 	logger             = *logs.NewLogger()
 	cacheMaintained    = false
-	cacheHitCount      int64
-	cacheMissCount     int64
-	cacheBypassedCount int64
+	cacheHitCount      int64 = 0
+	cacheMissCount     int64 = 0
+	cacheBypassedCount int64 = 0
 	throttlingStats    sync.Map
 )
 
@@ -330,7 +330,7 @@ var CacheOps = middleware.DeserializeMiddlewareFunc("CacheOps", func(ctx context
 	}
 
 	// Cache configuration not found in context
-	logger.Warn("Cache configuration not found in context")
+	logger.Warn("Cache configuration not found in context, cache bypassed")
 	atomic.AddInt64(&cacheBypassedCount, 1)
 	output, metadata, err := handler.HandleDeserialize(ctx, input)
 	if err != nil {
@@ -338,6 +338,86 @@ var CacheOps = middleware.DeserializeMiddlewareFunc("CacheOps", func(ctx context
 	}
 	return output, metadata, err
 })
+
+func GetCachePrepWithoutIdentity(opts []*types.Option) middleware.InitializeMiddleware {
+	cacheDir := options.GetOptionByName(options.AwsCacheDirOpt.Name, opts).Value
+	cacheExt := options.GetOptionByName(options.AwsCacheExtOpt.Name, opts).Value
+	cacheTTL := options.GetOptionByName(options.AwsCacheTTLOpt.Name, opts).Value
+	cacheErrTypes := options.GetOptionByName(options.AwsCacheErrorRespTypesOpt.Name, opts).Value
+	cacheError := options.GetOptionByName(options.AwsCacheErrorRespOpt.Name, opts).Value
+	saveAllError := false
+	TTL, err := strconv.Atoi(cacheTTL)
+	if err != nil {
+		logger.Error("Could not determine cache TTL", "error", err)
+		logger.Warn("Fallback to default TTL of 3600")
+		TTL = 3600
+	}
+	CacheDisabled := options.GetOptionByName(options.AwsDisableCacheOpt.Name, opts).Value
+	CacheEnabled, err := strconv.ParseBool(CacheDisabled)
+	if err != nil {
+		logger.Error("Could not determine cache enabled", "error", err)
+		logger.Warn("Fallback to enable cache")
+		CacheEnabled = true
+	} else { // Mapping from CacheDisabled to CacheEnabled
+		CacheEnabled = !CacheEnabled
+	}
+	CacheErrorResp, err := strconv.ParseBool(cacheError)
+	if err != nil {
+		logger.Error("Could not determine cache error response", "error", err)
+		logger.Warn("Fallback to Not cache error response")
+		CacheErrorResp = false
+	}
+	if CacheEnabled && CacheErrorResp {
+		if strings.EqualFold(cacheErrTypes, "all") {
+			saveAllError = true
+		} else {
+			if !(cacheErrTypes == "") {
+				exceptions := strings.Split(cacheErrTypes, ",")
+				for i, exception := range exceptions {
+					exceptions[i] = strings.TrimSpace(exception)
+				}
+				CacheableExceptions = exceptions
+				logger.Debug("Overriding cache error response types", "types", cacheErrTypes)
+			}
+		}
+	}
+	if !(CacheEnabled) {
+		logger.Debug("Config Cache bypassed", "enabled", CacheEnabled, "cacheErrorResp", CacheErrorResp)
+	}
+	return middleware.InitializeMiddlewareFunc("CachePrep", func(ctx context.Context, input middleware.InitializeInput, handler middleware.InitializeHandler) (middleware.InitializeOutput, middleware.Metadata, error) {
+		// Extract service and operation information using awsmiddleware helpers
+		service := awsmiddleware.GetServiceID(ctx)
+		operation := awsmiddleware.GetOperationName(ctx)
+		region := awsmiddleware.GetRegion(ctx)
+		// Skip if we couldn't determine service, operation, or region
+		if service == "" || operation == "" || region == "" {
+			logger.Warn("Could not determine service, operation, or region",
+				"service", service, "operation", operation, "region", region, "parameters", input.Parameters)
+			return handler.HandleInitialize(ctx, input)
+		}
+		logger.Debug("Processing request (stealth mode)", "service", service, "operation", operation, "region", region)
+		// Generate cache key without caller identity - use "stealth" as ARN placeholder
+		cacheKey := generateCacheKey("stealth", service, region, operation, input.Parameters)
+		logger.Debug("CacheKey computed (stealth)", "cacheKey", cacheKey)
+		cachePath := getCachePath(cacheDir, cacheKey, cacheExt)
+		cacheConfig := CacheConfigs{
+			CachePath:      cachePath,
+			CacheKey:       cacheKey,
+			Enabled:        CacheEnabled,
+			CacheErrorResp: CacheErrorResp,
+			TTL:            TTL,
+			Cacheable:      isRequestCacheable(service, operation),
+			Identity:       sts.GetCallerIdentityOutput{}, // Empty identity for stealth
+			ResponseDump:   nil,
+			CacheAllError:  saveAllError,
+			CacheErrorType: CacheableExceptions,
+		}
+		// Set context with this configuration for use in deserializer
+		ctx = SetCacheConfig(ctx, "cache_config", cacheConfig)
+		// Call the next handler
+		return handler.HandleInitialize(ctx, input)
+	})
+}
 
 func GetCachePrepWithIdentity(callerIdentity sts.GetCallerIdentityOutput, opts []*types.Option) middleware.InitializeMiddleware {
 	cacheDir := options.GetOptionByName(options.AwsCacheDirOpt.Name, opts).Value
@@ -565,25 +645,17 @@ func ShowThrottlingCounts() {
 
 func ConfigureAWSCacheLogger(logLevel, logFile string) {
 	var cacheLogger *slog.Logger
-	
-	// If no specific log level is set, use the global default logger
+
 	if logLevel == "" {
-		if logFile != "" {
-			// Use global log level but redirect to file
-			cacheLogger = logs.NewLoggerWithFile("", logFile)
-		} else {
-			// Use the global default logger
-			cacheLogger = logs.NewLogger()
-		}
-	} else {
-		// Create a new logger with the specified level and optional file output
-		if logFile != "" {
-			cacheLogger = logs.NewLoggerWithFile(logLevel, logFile)
-		} else {
-			cacheLogger = logs.NewLoggerWithLevel(logLevel)
-		}
+		logLevel = "none"
 	}
-	
+
+	if logFile != "" {
+		cacheLogger = logs.NewLoggerWithFile(logLevel, logFile)
+	} else {
+		cacheLogger = logs.NewLoggerWithLevel(logLevel)
+	}
+
 	if cacheLogger != nil {
 		logger = *cacheLogger
 	}

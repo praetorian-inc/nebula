@@ -7,6 +7,7 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/base"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/cloudcontrol"
+	"github.com/praetorian-inc/nebula/pkg/links/aws/lambda"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	"github.com/praetorian-inc/nebula/pkg/types"
 )
@@ -41,28 +42,22 @@ func (a *AwsPublicResources) Initialize() error {
 }
 
 func (a *AwsPublicResources) Process(resource *types.EnrichedResourceDescription) error {
-	rc, ok := a.resourceMap[resource.TypeName]
+	constructor, ok := a.resourceMap[resource.TypeName]
 	if !ok {
-		slog.Error("Unsupported resource type", "resourceType", resource.Type)
+		slog.Error("Unsupported resource type", "resource", resource)
 		return nil
 	}
 
-	c := rc()
-	c.WithConfigs(cfg.WithArgs(a.Args()))
+	slog.Debug("Dispatching resource for processing", "resource_type", resource.TypeName, "resource_id", resource.Identifier)
 
-	c.Send(resource)
-	c.Close()
-
-	for o, ok := chain.RecvAs[*types.EnrichedResourceDescription](c); ok; o, ok = chain.RecvAs[*types.EnrichedResourceDescription](c) {
-		a.Send(o)
+	// Create pair and send to processor
+	pair := &ResourceChainPair{
+		Resource:         resource,
+		ChainConstructor: constructor,
+		Args:             a.Args(),
 	}
 
-	if err := c.Error(); err != nil {
-		slog.Error("Error processing resource for public resources", "resource", resource, "error", err)
-	}
-
-	return nil
-
+	return a.Send(pair)
 }
 
 func (a *AwsPublicResources) SupportedResourceTypes() []string {
@@ -118,6 +113,7 @@ func (a *AwsPublicResources) ResourceMap() map[string]func() chain.Chain {
 	resourceMap["AWS::Lambda::Function"] = func() chain.Chain {
 		return chain.NewChain(
 			cloudcontrol.NewCloudControlGet(),
+			lambda.NewAWSLambdaFunctionURL(),
 			NewAwsResourcePolicyChecker(),
 		)
 	}

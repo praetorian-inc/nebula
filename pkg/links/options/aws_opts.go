@@ -200,13 +200,11 @@ func AwsRegions() cfg.Param {
 	return cfg.NewParam[[]string]("regions", "AWS regions to scan").
 		WithDefault([]string{"all"}).
 		WithRegex(regexp.MustCompile(`(?i)^[a-z]{2}\-([a-z]+\-){1,2}\d|all$`)).
-		AsRequired().
 		WithShortcode("r")
 }
 
 func AwsProfile() cfg.Param {
 	return cfg.NewParam[string]("profile", "AWS profile to use").
-		WithDefault("default").
 		WithShortcode("p")
 }
 
@@ -247,6 +245,11 @@ func AwsCacheErrorTypes() cfg.Param {
 	return cfg.NewParam[string]("cache-error-resp-type", "A comma-separated list of strings specifying cache error response types, e.g., TypeNotFoundException, AccessDeniedException. Use all to represent any error.")
 }
 
+func AwsOrgPoliciesFile() cfg.Param {
+	return cfg.NewParam[string]("org-policies", "Path to AWS organization policies JSON file from get-org-policies module").
+		WithShortcode("o")
+}
+
 func AwsCacheErrorResp() cfg.Param {
 	return cfg.NewParam[bool]("cache-error-resp", "Cache error response").
 		WithDefault(false)
@@ -272,15 +275,13 @@ func AwsReconBaseOptions() []cfg.Param {
 		AwsCacheErrorTypes(),
 		AwsCacheErrorResp(),
 		AwsDisableCache(),
-		OutputDir(),
+		AwsOpsecLevel(),
 	}
 }
 
 func AwsCommonReconOptions() []cfg.Param {
 	baseOpts := AwsReconBaseOptions()
 	return append(baseOpts, []cfg.Param{
-		AwsProfile(),
-		AwsProfileDir(),
 		AwsRegions(),
 		AwsResourceType(),
 	}...)
@@ -336,4 +337,15 @@ func AwsEnableEC2SecurityEnrichment() cfg.Param {
 	return cfg.NewParam[bool]("enable-ec2-security-enrichment", "Enable EC2 security group enrichment for public resources").
 		WithShortcode("e").
 		WithDefault(false)
+}
+
+func AwsCdkQualifiers() cfg.Param {
+	return cfg.NewParam[[]string]("cdk-qualifiers", "CDK bootstrap qualifiers to check").
+		WithDefault([]string{"hnb659fds"}).
+		WithShortcode("q")
+}
+
+func AwsOpsecLevel() cfg.Param {
+	return cfg.NewParam[string]("opsec_level", "Operational security level for AWS operations").
+		WithDefault("none")
 }

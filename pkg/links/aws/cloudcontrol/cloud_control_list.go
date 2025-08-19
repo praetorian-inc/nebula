@@ -1,14 +1,21 @@
 package cloudcontrol
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudcontrol"
@@ -24,24 +31,40 @@ import (
 
 type AWSCloudControl struct {
 	*base.AwsReconLink
-	semaphores            map[string]chan struct{}           // per-region semaphores
-	serviceRegionSemaphores map[string]chan struct{}         // per (service+region) semaphores
-	globalSemaphore       chan struct{}                      // global connection limit
-	serviceSemaphore      chan struct{}
-	regionWorkSemaphore   chan struct{}                      // limit concurrent listResourcesInRegion goroutines
-	wg                    sync.WaitGroup
-	serviceWg             sync.WaitGroup
-	cloudControlClients   map[string]*cloudcontrol.Client
-	maxConcurrentServices int
-	maxGlobalConnections  int                                // limit total concurrent connections
-	maxConcurrentRegionWork int                              // limit concurrent region work goroutines
-	resourceQueue         chan string                        // queue of individual resource types
-	processedResources    sync.Map                          // concurrent map to track processed resource types
-	startOnce             sync.Once
-	workerStarted         bool
-	workerMu              sync.Mutex                         // protects workerStarted
-	pendingResources      []string                          // buffer for resource types before processing
-	mu                    sync.Mutex                         // protects pendingResources and serviceRegionSemaphores
+	semaphores              map[string]chan struct{} // per-region semaphores
+	serviceSemaphores       map[string]chan struct{} // per service global semaphores (AWS CloudControl limits per service, not per region)
+	globalSemaphore         chan struct{}            // global connection limit
+	accountSemaphore        chan struct{}            // account-level rate limit semaphore (AWS CloudControl ~50 RPS account limit)
+	serviceSemaphore        chan struct{}
+	regionWorkSemaphore     chan struct{} // limit concurrent listResourcesInRegion goroutines
+	wg                      sync.WaitGroup
+	serviceWg               sync.WaitGroup
+	cloudControlClients     map[string]*cloudcontrol.Client // serviceRegionKey -> client
+	maxConcurrentServices   int
+	maxGlobalConnections    int         // limit total concurrent connections
+	maxConcurrentRegionWork int         // limit concurrent region work goroutines
+	accountRateLimit        int         // account-level rate limit (requests per second)
+	cachedAccountId         string      // cached account ID to avoid duplicate STS calls
+	resourceQueue           chan string // queue of individual resource types
+	processedResources      sync.Map    // concurrent map to track processed resource types
+	startOnce               sync.Once
+	workerStarted           bool
+	workerMu                sync.Mutex // protects workerStarted
+	pendingResources        []string   // buffer for resource types before processing
+	mu                      sync.Mutex // protects pendingResources and serviceSemaphores
+	// Debug metrics for rate limiting analysis (disabled in production)
+	debugMetrics       *DebugMetrics
+	enableDebugMetrics bool
+}
+
+// DebugMetrics tracks request rates for analyzing throttling patterns
+type DebugMetrics struct {
+	serviceRequestCounts       sync.Map // map[serviceName]int64
+	serviceRegionRequestCounts sync.Map // map[serviceRegionKey]int64
+	metricsStartTime           time.Time
+	lastReportTime             time.Time
+	reportTicker               *time.Ticker
+	stopChan                   chan struct{}
 }
 
 func (a *AWSCloudControl) Metadata() *cfg.Metadata {
@@ -58,6 +81,10 @@ func (a *AWSCloudControl) Params() []cfg.Param {
 		WithDefault(13000))
 	params = append(params, cfg.NewParam[int]("max-concurrent-region-work", "Maximum concurrent goroutines for region work (to avoid goroutine explosion)").
 		WithDefault(2000))
+	params = append(params, cfg.NewParam[int]("account-rate-limit", "Account-level rate limit in requests per second (AWS CloudControl account limit ~50 RPS)").
+		WithDefault(32))
+	params = append(params, cfg.NewParam[bool]("enable-debug-metrics", "Enable debug metrics for rate limiting analysis (disabled in production)").
+		WithDefault(false))
 
 	return params
 }
@@ -66,9 +93,10 @@ func NewAWSCloudControl(configs ...cfg.Config) chain.Link {
 	cc := &AWSCloudControl{
 		wg:                      sync.WaitGroup{},
 		serviceWg:               sync.WaitGroup{},
-		maxConcurrentServices:   1000, // Default to 1000 concurrent services
+		maxConcurrentServices:   1000,  // Default to 1000 concurrent services
 		maxGlobalConnections:    13000, // Default to 13000 total connections (~80% of macOS default 16383)
-		maxConcurrentRegionWork: 2000, // Default to 2000 concurrent region work goroutines
+		maxConcurrentRegionWork: 2000,  // Default to 2000 concurrent region work goroutines
+		accountRateLimit:        30,    // Default to 32 RPS account limit (conservative for zero throttling)
 	}
 	cc.AwsReconLink = base.NewAwsReconLink(cc, configs...)
 
@@ -101,10 +129,25 @@ func (a *AWSCloudControl) Initialize() error {
 		}
 	}
 
+	// Configure account rate limit from parameters
+	if accountRateLimit, err := cfg.As[int](a.Arg("account-rate-limit")); err == nil {
+		if accountRateLimit > 0 && accountRateLimit <= 200 { // Reasonable bounds for account-level limits
+			a.accountRateLimit = accountRateLimit
+		}
+	}
+
+	// Configure debug metrics from parameters
+	if enableDebugMetrics, err := cfg.As[bool](a.Arg("enable-debug-metrics")); err == nil {
+		a.enableDebugMetrics = enableDebugMetrics
+	}
+
 	a.initializeClients()
 	a.initializeSemaphores()
 	a.initializeServiceSemaphore()
 	a.initializeRegionWorkSemaphore()
+	a.initializeAccountSemaphore()
+	a.initializeDebugMetrics()
+	a.initializeAccountId()
 	a.resourceQueue = make(chan string, 1000) // Buffer for individual resource types
 	a.pendingResources = make([]string, 0)
 	return nil
@@ -112,28 +155,43 @@ func (a *AWSCloudControl) Initialize() error {
 
 func (a *AWSCloudControl) initializeSemaphores() {
 	a.semaphores = make(map[string]chan struct{})
-	a.serviceRegionSemaphores = make(map[string]chan struct{})
-	
+	a.serviceSemaphores = make(map[string]chan struct{})
+
 	// Dynamically check ephemeral port range and adjust global limit
 	availablePorts := a.getAvailableEphemeralPorts()
 	if a.maxGlobalConnections > availablePorts {
-		slog.Warn("Reducing maxGlobalConnections to available ephemeral ports", 
-			"requested", a.maxGlobalConnections, 
+		slog.Warn("Reducing maxGlobalConnections to available ephemeral ports",
+			"requested", a.maxGlobalConnections,
 			"available", availablePorts)
 		a.maxGlobalConnections = availablePorts
 	}
-	
+
 	a.globalSemaphore = make(chan struct{}, a.maxGlobalConnections)
-	
+
 	// Region semaphores are only for result sending, not API rate limiting
 	// Keep a small limit for result processing
 	resultSendLimit := 10
-	
-	slog.Info("Initializing semaphores", 
+
+	// Pre-create service semaphores for all known services
+	// AWS CloudControl API limits are per service globally (~5 RPS per service)
+	serviceRateLimit := 5
+	knownServices := make(map[string]bool)
+	for _, resourceType := range a.SupportedResourceTypes() {
+		serviceName := a.extractServiceName(resourceType)
+		if !knownServices[serviceName] {
+			a.serviceSemaphores[serviceName] = make(chan struct{}, serviceRateLimit)
+			knownServices[serviceName] = true
+		}
+	}
+
+	slog.Info("Initializing semaphores",
 		"globalLimit", a.maxGlobalConnections,
 		"resultSendLimit", resultSendLimit,
+		"serviceRateLimit", serviceRateLimit,
+		"accountRateLimit", a.accountRateLimit,
+		"knownServices", len(knownServices),
 		"availablePorts", availablePorts)
-	
+
 	for _, region := range a.Regions {
 		a.semaphores[region] = make(chan struct{}, resultSendLimit)
 	}
@@ -157,23 +215,23 @@ func (a *AWSCloudControl) getMacOSEphemeralPorts() int {
 		slog.Error("Failed to get portrange.first", "error", err)
 		return 1000
 	}
-	
+
 	last, err := exec.Command("sysctl", "-n", "net.inet.ip.portrange.last").Output()
 	if err != nil {
 		slog.Error("Failed to get portrange.last", "error", err)
 		return 1000
 	}
-	
+
 	firstPort, err := strconv.Atoi(strings.TrimSpace(string(first)))
 	if err != nil {
 		return 1000
 	}
-	
+
 	lastPort, err := strconv.Atoi(strings.TrimSpace(string(last)))
 	if err != nil {
 		return 1000
 	}
-	
+
 	// Reserve 20% for other applications and OS
 	available := int(float64(lastPort-firstPort+1) * 0.8)
 	slog.Debug("macOS ephemeral port range", "first", firstPort, "last", lastPort, "available", available)
@@ -186,22 +244,22 @@ func (a *AWSCloudControl) getLinuxEphemeralPorts() int {
 		slog.Error("Failed to read Linux port range", "error", err)
 		return 1000
 	}
-	
+
 	parts := strings.Fields(strings.TrimSpace(string(output)))
 	if len(parts) != 2 {
 		return 1000
 	}
-	
+
 	first, err := strconv.Atoi(parts[0])
 	if err != nil {
 		return 1000
 	}
-	
+
 	last, err := strconv.Atoi(parts[1])
 	if err != nil {
 		return 1000
 	}
-	
+
 	// Reserve 20% for other applications and OS
 	available := int(float64(last-first+1) * 0.8)
 	slog.Debug("Linux ephemeral port range", "first", first, "last", last, "available", available)
@@ -214,6 +272,140 @@ func (a *AWSCloudControl) initializeServiceSemaphore() {
 
 func (a *AWSCloudControl) initializeRegionWorkSemaphore() {
 	a.regionWorkSemaphore = make(chan struct{}, a.maxConcurrentRegionWork)
+}
+
+func (a *AWSCloudControl) initializeAccountSemaphore() {
+	// Account-level rate limiting to stay within AWS CloudControl account limits (~50 RPS)
+	a.accountSemaphore = make(chan struct{}, a.accountRateLimit)
+
+	slog.Info("Account-level rate limiting enabled",
+		"accountRateLimit", a.accountRateLimit,
+		"semaphoreSize", a.accountRateLimit)
+}
+
+func (a *AWSCloudControl) initializeAccountId() {
+	// Initialize cached account ID once to avoid duplicate STS calls
+	// Use first region to get account ID (same for all regions with same profile)
+	if len(a.Regions) > 0 {
+		config, err := a.GetConfigWithRuntimeArgs(a.Regions[0])
+		if err != nil {
+			slog.Error("Failed to get AWS config for account ID caching", "error", err)
+			return
+		}
+
+		accountId, err := helpers.GetAccountId(config)
+		if err != nil {
+			slog.Error("Failed to get account ID for caching", "error", err)
+			return
+		}
+
+		a.cachedAccountId = accountId
+		slog.Debug("Cached account ID for session", "accountId", accountId)
+	}
+}
+
+func (a *AWSCloudControl) initializeDebugMetrics() {
+	if !a.enableDebugMetrics {
+		return
+	}
+
+	a.debugMetrics = &DebugMetrics{
+		metricsStartTime: time.Now(),
+		lastReportTime:   time.Now(),
+		reportTicker:     time.NewTicker(5 * time.Second), // Report every 5 seconds
+		stopChan:         make(chan struct{}),
+	}
+
+	// Start metrics reporting goroutine
+	go a.runMetricsReporter()
+}
+
+func (a *AWSCloudControl) runMetricsReporter() {
+	if a.debugMetrics == nil {
+		return
+	}
+
+	defer a.debugMetrics.reportTicker.Stop()
+
+	for {
+		select {
+		case <-a.debugMetrics.reportTicker.C:
+			a.reportRequestRates()
+		case <-a.debugMetrics.stopChan:
+			return
+		}
+	}
+}
+
+func (a *AWSCloudControl) reportRequestRates() {
+	if a.debugMetrics == nil {
+		return
+	}
+
+	now := time.Now()
+	elapsed := now.Sub(a.debugMetrics.lastReportTime)
+	totalElapsed := now.Sub(a.debugMetrics.metricsStartTime)
+
+	slog.Info("CloudControl Request Rate Debug Metrics",
+		"reportInterval", elapsed.String(),
+		"totalRuntime", totalElapsed.String())
+
+	// Report service-level rates
+	a.debugMetrics.serviceRequestCounts.Range(func(key, value interface{}) bool {
+		serviceName := key.(string)
+		count := atomic.LoadInt64(value.(*int64))
+		rate := float64(count) / totalElapsed.Seconds()
+		slog.Info("Service request rate",
+			"service", serviceName,
+			"totalRequests", count,
+			"requestsPerSecond", fmt.Sprintf("%.2f", rate))
+		return true
+	})
+
+	// Report service+region rates
+	a.debugMetrics.serviceRegionRequestCounts.Range(func(key, value interface{}) bool {
+		serviceRegionKey := key.(string)
+		count := atomic.LoadInt64(value.(*int64))
+		rate := float64(count) / totalElapsed.Seconds()
+		slog.Info("Service+Region request rate",
+			"serviceRegion", serviceRegionKey,
+			"totalRequests", count,
+			"requestsPerSecond", fmt.Sprintf("%.2f", rate))
+		return true
+	})
+
+	a.debugMetrics.lastReportTime = now
+}
+
+func (a *AWSCloudControl) incrementServiceRequestCount(serviceName string) {
+	if !a.enableDebugMetrics || a.debugMetrics == nil {
+		return
+	}
+
+	// Get or create atomic counter for this service
+	value, _ := a.debugMetrics.serviceRequestCounts.LoadOrStore(serviceName, new(int64))
+	counter := value.(*int64)
+	atomic.AddInt64(counter, 1)
+}
+
+func (a *AWSCloudControl) incrementServiceRegionRequestCount(serviceName, region string) {
+	if !a.enableDebugMetrics || a.debugMetrics == nil {
+		return
+	}
+
+	serviceRegionKey := a.getServiceRegionKey(serviceName, region)
+
+	// Get or create atomic counter for this service+region
+	value, _ := a.debugMetrics.serviceRegionRequestCounts.LoadOrStore(serviceRegionKey, new(int64))
+	counter := value.(*int64)
+	atomic.AddInt64(counter, 1)
+}
+
+func (a *AWSCloudControl) stopDebugMetrics() {
+	if a.debugMetrics != nil {
+		close(a.debugMetrics.stopChan)
+		a.debugMetrics = nil
+	}
 }
 
 func (a *AWSCloudControl) extractServiceName(resourceType string) string {
@@ -229,21 +421,74 @@ func (a *AWSCloudControl) getServiceRegionKey(serviceName, region string) string
 	return fmt.Sprintf("%s:%s", serviceName, region)
 }
 
-func (a *AWSCloudControl) ensureServiceRegionSemaphore(serviceName, region string) chan struct{} {
-	key := a.getServiceRegionKey(serviceName, region)
-	
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	
-	if sem, exists := a.serviceRegionSemaphores[key]; exists {
-		return sem
+func (a *AWSCloudControl) getServiceSemaphore(serviceName string) chan struct{} {
+	// Service semaphores are pre-created during initialization
+	// AWS CloudControl rate limits are per service globally, not per region
+	return a.serviceSemaphores[serviceName]
+}
+
+// Helper function for max (Go 1.21+)
+func max(a, b int) int {
+	if a > b {
+		return a
 	}
-	
-	// Create semaphore with limit based on service type
-	// AWS CloudControl rate limits vary by service, defaulting to 5 per service+region
-	limit := 5
-	a.serviceRegionSemaphores[key] = make(chan struct{}, limit)
-	return a.serviceRegionSemaphores[key]
+	return b
+}
+
+// checkIfCached checks if a response is cached without acquiring rate limits
+func (a *AWSCloudControl) checkIfCached(resourceType, region string) bool {
+	// Use cached account ID to avoid duplicate STS calls
+	if a.cachedAccountId == "" {
+		return false // If no cached account ID, assume not cached
+	}
+
+	// Get cache configuration from args
+	opts := options.JanusArgsAdapter(a.Params(), a.Args())
+	cacheDir := options.GetOptionByName(options.AwsCacheDirOpt.Name, opts).Value
+	cacheExt := options.GetOptionByName(options.AwsCacheExtOpt.Name, opts).Value
+
+	// Create input parameters for cache key generation (matching CloudControl API)
+	input := &cloudcontrol.ListResourcesInput{
+		TypeName:   &resourceType,
+		MaxResults: aws.Int32(100),
+	}
+
+	// Generate cache key using the same logic as aws_cache.go (function is not exported, so we duplicate the logic)
+	cacheKey := a.generateCacheKey(a.cachedAccountId, "CloudControl", region, "ListResources", input)
+	cachePath := filepath.Join(cacheDir, cacheKey+cacheExt)
+
+	// Check if cache file exists and is not expired
+	if fileInfo, err := os.Stat(cachePath); err == nil {
+		// Get cache TTL
+		cacheTTL := options.GetOptionByName(options.AwsCacheTTLOpt.Name, opts).Value
+		ttl, parseErr := strconv.Atoi(cacheTTL)
+		if parseErr != nil {
+			ttl = 3600 // Default TTL
+		}
+
+		// Check if cache is not expired
+		if time.Since(fileInfo.ModTime()) < time.Duration(ttl)*time.Second {
+			slog.Debug("Found valid cache for resource", "type", resourceType, "region", region, "cachePath", cachePath)
+			return true
+		} else {
+			slog.Debug("Found expired cache for resource", "type", resourceType, "region", region, "age", time.Since(fileInfo.ModTime()))
+		}
+	}
+
+	return false
+}
+
+// generateCacheKey duplicates the logic from helpers/aws_cache.go since it's not exported
+func (a *AWSCloudControl) generateCacheKey(arn, service, region string, operation string, params interface{}) string {
+	data, err := json.Marshal(params)
+	if err != nil {
+		slog.Error("Failed to marshal parameters for cache key", "error", err)
+		return fmt.Sprintf("%s-%s-%s-%s", service, operation, arn, region)
+	}
+
+	combined := fmt.Sprintf("%s-%s-%s-%s-%s", arn, region, service, operation, string(data))
+	hash := sha256.Sum256([]byte(combined))
+	return hex.EncodeToString(hash[:])
 }
 
 func (a *AWSCloudControl) addResourceType(resourceType string) {
@@ -259,14 +504,14 @@ func (a *AWSCloudControl) sendResourcesRandomly() {
 	copy(resourcesCopy, a.pendingResources)
 	totalResourceTypes := len(resourcesCopy)
 	a.mu.Unlock()
-	
+
 	slog.Info("Sending resources for parallel processing", "totalResourceTypes", totalResourceTypes, "maxConcurrentServices", a.maxConcurrentServices)
-	
+
 	// Shuffle resources randomly to avoid processing hotspots
 	rand.Shuffle(len(resourcesCopy), func(i, j int) {
 		resourcesCopy[i], resourcesCopy[j] = resourcesCopy[j], resourcesCopy[i]
 	})
-	
+
 	// Send randomized resources to queue
 	for _, resourceType := range resourcesCopy {
 		slog.Debug("Queuing resource type", "type", resourceType)
@@ -280,7 +525,7 @@ func (a *AWSCloudControl) startWorkerPool() {
 		a.serviceWg.Add(1)
 		go a.resourceWorker()
 	}
-	
+
 	// Set workerStarted flag with mutex protection
 	a.workerMu.Lock()
 	a.workerStarted = true
@@ -301,7 +546,7 @@ func (a *AWSCloudControl) processResourceTypeWithDedupe(resourceType string) {
 		slog.Debug("Skipping already processed resource type", "type", resourceType)
 		return
 	}
-	
+
 	slog.Debug("Processing resource type", "type", resourceType)
 
 	for _, region := range a.Regions {
@@ -315,7 +560,7 @@ func (a *AWSCloudControl) processResourceTypeWithDedupe(resourceType string) {
 			// Acquire semaphore to limit concurrent goroutines
 			a.regionWorkSemaphore <- struct{}{}
 			defer func() { <-a.regionWorkSemaphore }()
-			
+
 			a.listResourcesInRegion(rt, r)
 		}(resourceType, region)
 	}
@@ -330,16 +575,40 @@ func (a *AWSCloudControl) processResourceType(resourceType string) {
 func (a *AWSCloudControl) initializeClients() error {
 	a.cloudControlClients = make(map[string]*cloudcontrol.Client)
 
-	for _, region := range a.Regions {
-		config, err := a.GetConfigWithRuntimeArgs(region)
-		if err != nil {
-			return fmt.Errorf("failed to create AWS config: %w", err)
-		}
-
-		a.cloudControlClients[region] = cloudcontrol.NewFromConfig(config)
+	// Get all unique service names from supported resource types
+	knownServices := make(map[string]bool)
+	for _, resourceType := range a.SupportedResourceTypes() {
+		serviceName := a.extractServiceName(resourceType)
+		knownServices[serviceName] = true
 	}
 
+	// Pre-create clients for all known service+region combinations
+	clientCount := 0
+	for serviceName := range knownServices {
+		for _, region := range a.Regions {
+			serviceRegionKey := a.getServiceRegionKey(serviceName, region)
+
+			config, err := a.GetConfigWithRuntimeArgs(region)
+			if err != nil {
+				return fmt.Errorf("failed to create AWS config for %s: %w", serviceRegionKey, err)
+			}
+
+			a.cloudControlClients[serviceRegionKey] = cloudcontrol.NewFromConfig(config)
+			clientCount++
+		}
+	}
+
+	slog.Info("Pre-created CloudControl clients",
+		"services", len(knownServices),
+		"regions", len(a.Regions),
+		"totalClients", clientCount)
+
 	return nil
+}
+
+func (a *AWSCloudControl) getClient(serviceName, region string) *cloudcontrol.Client {
+	serviceRegionKey := a.getServiceRegionKey(serviceName, region)
+	return a.cloudControlClients[serviceRegionKey]
 }
 
 func (a *AWSCloudControl) Process(resourceType string) error {
@@ -361,42 +630,78 @@ func (a *AWSCloudControl) isGlobalService(resourceType, region string) bool {
 func (a *AWSCloudControl) listResourcesInRegion(resourceType, region string) {
 	defer a.wg.Done()
 
-	// Apply global connection limit first
-	a.globalSemaphore <- struct{}{}
-	defer func() { <-a.globalSemaphore }()
-
 	serviceName := a.extractServiceName(resourceType)
-	
-	// Apply service+region specific limit
-	serviceRegionSem := a.ensureServiceRegionSemaphore(serviceName, region)
-	serviceRegionSem <- struct{}{}
-	defer func() { <-serviceRegionSem }()
 
+	// Check if response is cached first - bypass all rate limiting for cached responses
+	if a.checkIfCached(resourceType, region) {
+		slog.Debug("Bypassing all rate limits for cached response", "type", resourceType, "region", region)
+
+		// Still need global semaphore for connection management
+		a.globalSemaphore <- struct{}{}
+		defer func() { <-a.globalSemaphore }()
+
+		// Process cached request without any rate limiting
+		a.processCachedOrUncachedRequest(resourceType, region, serviceName, true)
+		return
+	}
+
+	// For uncached requests, apply full hierarchical rate limiting
 	message.Info("Listing %s resources in %s (profile: %s)", resourceType, region, a.Profile)
 	slog.Debug("Listing resources in region", "type", resourceType, "region", region, "profile", a.Profile)
 
-	config, err := a.GetConfigWithRuntimeArgs(region)
+	// Apply global connection limit (but not account-level yet - that's per API call)
+	a.globalSemaphore <- struct{}{}
+	defer func() { <-a.globalSemaphore }()
 
-	if err != nil {
-		slog.Error("Failed to create AWS config", "error", err)
-		return
-	}
+	// Apply service-level rate limit (AWS CloudControl limits are per service globally)
+	// We'll acquire this just before the API call and release it quickly
+	serviceSem := a.getServiceSemaphore(serviceName)
+	serviceSem <- struct{}{}
 
-	accountId, err := helpers.GetAccountId(config)
-	if err != nil {
-		slog.Error("Failed to get account ID", "error", err, "region", region)
-		return
-	}
+	// Process uncached request - this will release the service semaphore quickly
+	a.processCachedOrUncachedRequest(resourceType, region, serviceName, false)
 
-	cc := a.cloudControlClients[region]
+	// Service semaphore is released inside processCachedOrUncachedRequest
+}
+
+func (a *AWSCloudControl) processCachedOrUncachedRequest(resourceType, region, serviceName string, isCached bool) {
+	// Note: Metrics are now incremented per actual API call in the pagination loop
+
+	// Use cached account ID to avoid duplicate STS calls
+	accountId := a.cachedAccountId
+
+	cc := a.getClient(serviceName, region)
 
 	paginator := cloudcontrol.NewListResourcesPaginator(cc, &cloudcontrol.ListResourcesInput{
 		TypeName:   &resourceType,
 		MaxResults: aws.Int32(100),
 	})
 
+	// For uncached requests, we need to release service semaphore after first request
+	// This allows other services to proceed while we process paginated results
+	serviceSemaphoreReleased := isCached // If cached, no semaphore was acquired
+
 	for paginator.HasMorePages() {
+		// Apply account-level rate limiting for each API call (including pagination)
+		a.accountSemaphore <- struct{}{}
+
 		res, err := paginator.NextPage(a.Context())
+
+		// Release account semaphore immediately after API call
+		<-a.accountSemaphore
+
+		// Increment debug metrics counters for each actual API call
+		a.incrementServiceRequestCount(serviceName)
+		a.incrementServiceRegionRequestCount(serviceName, region)
+
+		// Release service semaphore immediately after first API call
+		// Cache check happens inside SDK, so first call determines if cached or not
+		if !serviceSemaphoreReleased {
+			serviceSem := a.getServiceSemaphore(serviceName)
+			<-serviceSem
+			serviceSemaphoreReleased = true
+			slog.Debug("Released service semaphore after first API call", "service", serviceName, "type", resourceType, "region", region)
+		}
 
 		if err != nil {
 			err, shouldBreak := a.processError(resourceType, region, err)
@@ -414,7 +719,13 @@ func (a *AWSCloudControl) listResourcesInRegion(resourceType, region string) {
 			erd := a.resourceDescriptionToERD(resource, resourceType, accountId, region)
 			a.sendResource(region, erd)
 		}
+	}
 
+	// Ensure semaphore is released even if no pages processed
+	if !serviceSemaphoreReleased {
+		serviceSem := a.getServiceSemaphore(serviceName)
+		<-serviceSem
+		slog.Debug("Released service semaphore (no pages processed)", "service", serviceName, "type", resourceType, "region", region)
 	}
 }
 
@@ -473,7 +784,7 @@ func (a *AWSCloudControl) Complete() error {
 	a.workerMu.Lock()
 	started := a.workerStarted
 	a.workerMu.Unlock()
-	
+
 	if started {
 		// Send all resources to the queue with random distribution
 		a.sendResourcesRandomly()
@@ -484,6 +795,10 @@ func (a *AWSCloudControl) Complete() error {
 	}
 	// Wait for any remaining region workers
 	a.wg.Wait()
+
+	// Stop debug metrics reporting
+	a.stopDebugMetrics()
+
 	return nil
 }
 

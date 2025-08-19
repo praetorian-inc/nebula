@@ -331,3 +331,9 @@ func AwsFederationName() cfg.Param {
 	return cfg.NewParam[string]("federation-name", "Name for federation token").
 		WithDefault("nebula-federation")
 }
+
+func AwsEnableEC2SecurityEnrichment() cfg.Param {
+	return cfg.NewParam[bool]("enable-ec2-security-enrichment", "Enable EC2 security group enrichment for public resources").
+		WithShortcode("e").
+		WithDefault(false)
+}

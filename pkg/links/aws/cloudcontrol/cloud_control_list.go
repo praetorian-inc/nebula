@@ -30,7 +30,6 @@ import (
 	"golang.org/x/time/rate"
 )
 
-
 type AWSCloudControl struct {
 	*base.AwsReconLink
 	wg                    sync.WaitGroup
@@ -78,67 +77,84 @@ type DebugMetrics struct {
 
 // CompletionTracker tracks completion of work across all regions
 type CompletionTracker struct {
-	mu                      sync.Mutex
-	expectedServiceRegions  map[string]bool // serviceRegionKey -> expected
-	completedServiceRegions map[string]bool // serviceRegionKey -> completed
-	pendingRetries          map[string]int  // serviceRegionKey -> retry count
-	totalExpected           int
-	totalCompleted          int
+	mu                       sync.Mutex
+	expectedResourceRegions  map[string]bool // resourceTypeRegionKey -> expected
+	completedResourceRegions map[string]bool // resourceTypeRegionKey -> completed
+	pendingRetries           map[string]int  // resourceTypeRegionKey -> retry count
+	totalExpected            int
+	totalCompleted           int
 }
 
 func NewCompletionTracker() *CompletionTracker {
 	return &CompletionTracker{
-		expectedServiceRegions:  make(map[string]bool),
-		completedServiceRegions: make(map[string]bool),
-		pendingRetries:          make(map[string]int),
+		expectedResourceRegions:  make(map[string]bool),
+		completedResourceRegions: make(map[string]bool),
+		pendingRetries:           make(map[string]int),
 	}
 }
 
-// AddExpectedWork registers a service+region combination as expected work
-func (ct *CompletionTracker) AddExpectedWork(serviceRegionKey string) {
+func NewCompletionTrackerWithExpectedCount(expectedCount int) *CompletionTracker {
+	return &CompletionTracker{
+		expectedResourceRegions:  make(map[string]bool),
+		completedResourceRegions: make(map[string]bool),
+		pendingRetries:           make(map[string]int),
+		totalExpected:            expectedCount,
+	}
+}
+
+// AddExpectedWork registers a resourceType+region combination as expected work
+// Note: totalExpected is now set at initialization, this just tracks individual work items
+func (ct *CompletionTracker) AddExpectedWork(resourceTypeRegionKey string) {
 	if ct == nil {
-		slog.Warn("CompletionTracker is nil, cannot add expected work", "serviceRegion", serviceRegionKey)
+		slog.Warn("CompletionTracker is nil, cannot add expected work", "resourceTypeRegion", resourceTypeRegionKey)
 		return
 	}
 
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
 
-	if !ct.expectedServiceRegions[serviceRegionKey] {
-		ct.expectedServiceRegions[serviceRegionKey] = true
-		ct.totalExpected++
+	if !ct.expectedResourceRegions[resourceTypeRegionKey] {
+		ct.expectedResourceRegions[resourceTypeRegionKey] = true
+		// Validation: warn if we're registering more work than expected
+		registeredCount := len(ct.expectedResourceRegions)
+		if registeredCount > ct.totalExpected {
+			slog.Warn("Registered more work items than expected",
+				"registered", registeredCount,
+				"expected", ct.totalExpected,
+				"resourceTypeRegion", resourceTypeRegionKey)
+		}
 	}
 }
 
-// AddPendingRetry increments pending retry count for a service+region
-func (ct *CompletionTracker) AddPendingRetry(serviceRegionKey string) {
-	ct.mu.Lock()https://wiki.sqprod.co/pages/viewpage.action?pageId=200851846
+// AddPendingRetry increments pending retry count for a resourceType+region
+func (ct *CompletionTracker) AddPendingRetry(resourceTypeRegionKey string) {
+	ct.mu.Lock()
 	defer ct.mu.Unlock()
 
-	ct.pendingRetries[serviceRegionKey]++
-	slog.Debug("Added pending retry", "serviceRegion", serviceRegionKey, "pendingRetries", ct.pendingRetries[serviceRegionKey])
+	ct.pendingRetries[resourceTypeRegionKey]++
+	slog.Debug("Added pending retry", "resourceTypeRegion", resourceTypeRegionKey, "pendingRetries", ct.pendingRetries[resourceTypeRegionKey])
 }
 
-// RemovePendingRetry decrements pending retry count for a service+region
-func (ct *CompletionTracker) RemovePendingRetry(serviceRegionKey string) {
+// RemovePendingRetry decrements pending retry count for a resourceType+region
+func (ct *CompletionTracker) RemovePendingRetry(resourceTypeRegionKey string) {
 	if ct == nil {
-		slog.Warn("CompletionTracker is nil, cannot remove pending retry", "serviceRegion", serviceRegionKey)
+		slog.Warn("CompletionTracker is nil, cannot remove pending retry", "resourceTypeRegion", resourceTypeRegionKey)
 		return
 	}
 
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
 
-	if ct.pendingRetries[serviceRegionKey] > 0 {
-		ct.pendingRetries[serviceRegionKey]--
-		slog.Debug("Removed pending retry", "serviceRegion", serviceRegionKey, "pendingRetries", ct.pendingRetries[serviceRegionKey])
+	if ct.pendingRetries[resourceTypeRegionKey] > 0 {
+		ct.pendingRetries[resourceTypeRegionKey]--
+		slog.Debug("Removed pending retry", "resourceTypeRegion", resourceTypeRegionKey, "pendingRetries", ct.pendingRetries[resourceTypeRegionKey])
 	}
 }
 
-// MarkCompleted marks a service+region combination as completed (only if no pending retries)
-func (ct *CompletionTracker) MarkCompleted(serviceRegionKey string) {
+// MarkCompleted marks a resourceType+region combination as completed (only if no pending retries)
+func (ct *CompletionTracker) MarkCompleted(resourceTypeRegionKey string) {
 	if ct == nil {
-		slog.Warn("CompletionTracker is nil, cannot mark completed", "serviceRegion", serviceRegionKey)
+		slog.Warn("CompletionTracker is nil, cannot mark completed", "resourceTypeRegion", resourceTypeRegionKey)
 		return
 	}
 
@@ -146,12 +162,12 @@ func (ct *CompletionTracker) MarkCompleted(serviceRegionKey string) {
 	defer ct.mu.Unlock()
 
 	// Only mark as completed if there are no pending retries
-	if ct.expectedServiceRegions[serviceRegionKey] && !ct.completedServiceRegions[serviceRegionKey] && ct.pendingRetries[serviceRegionKey] == 0 {
-		ct.completedServiceRegions[serviceRegionKey] = true
+	if ct.expectedResourceRegions[resourceTypeRegionKey] && !ct.completedResourceRegions[resourceTypeRegionKey] && ct.pendingRetries[resourceTypeRegionKey] == 0 {
+		ct.completedResourceRegions[resourceTypeRegionKey] = true
 		ct.totalCompleted++
-		slog.Debug("Marked service+region as completed", "serviceRegion", serviceRegionKey, "progress", fmt.Sprintf("%d/%d", ct.totalCompleted, ct.totalExpected))
-	} else if ct.pendingRetries[serviceRegionKey] > 0 {
-		slog.Debug("Cannot mark as completed - has pending retries", "serviceRegion", serviceRegionKey, "pendingRetries", ct.pendingRetries[serviceRegionKey])
+		slog.Debug("Marked resourceType+region as completed", "resourceTypeRegion", resourceTypeRegionKey, "progress", fmt.Sprintf("%d/%d", ct.totalCompleted, ct.totalExpected))
+	} else if ct.pendingRetries[resourceTypeRegionKey] > 0 {
+		slog.Debug("Cannot mark as completed - has pending retries", "resourceTypeRegion", resourceTypeRegionKey, "pendingRetries", ct.pendingRetries[resourceTypeRegionKey])
 	}
 }
 
@@ -179,6 +195,39 @@ func (ct *CompletionTracker) GetProgress() (completed, total int) {
 	return ct.totalCompleted, ct.totalExpected
 }
 
+// GetRegistrationProgress returns work registration progress
+func (ct *CompletionTracker) GetRegistrationProgress() (registered, expected int) {
+	if ct == nil {
+		return 0, 0
+	}
+
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	return len(ct.expectedResourceRegions), ct.totalExpected
+}
+
+// ValidateExpectedWorkRegistration checks if all expected work has been properly registered
+func (ct *CompletionTracker) ValidateExpectedWorkRegistration() {
+	if ct == nil {
+		return
+	}
+
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	registered := len(ct.expectedResourceRegions)
+	if registered != ct.totalExpected {
+		slog.Warn("Expected work registration mismatch",
+			"registered", registered,
+			"expected", ct.totalExpected,
+			"difference", ct.totalExpected-registered)
+	} else {
+		slog.Info("All expected work properly registered",
+			"totalWork", ct.totalExpected)
+	}
+}
+
 func (a *AWSCloudControl) Metadata() *cfg.Metadata {
 	return &cfg.Metadata{Name: "AWS CloudControl"}
 }
@@ -202,7 +251,7 @@ func NewAWSCloudControl(configs ...cfg.Config) chain.Link {
 		wg:                    sync.WaitGroup{},
 		maxConcurrentServices: 1000,                   // Default to 1000 concurrent services
 		globalRateLimit:       5,                      // Default to 5 TPS per region rate limit
-		completionTracker:     NewCompletionTracker(), // Initialize early to prevent nil panics
+		completionTracker:     NewCompletionTracker(), // Initialize early to prevent nil panics, will be updated in Initialize()
 	}
 	cc.AwsReconLink = base.NewAwsReconLink(cc, configs...)
 
@@ -241,6 +290,15 @@ func (a *AWSCloudControl) Initialize() error {
 
 	a.initializeDebugMetrics()
 	a.initializeAccountId()
+
+	// Calculate total expected work based on regions and resource types
+	expectedWorkCount := a.calculateExpectedWorkCount()
+	a.completionTracker = NewCompletionTrackerWithExpectedCount(expectedWorkCount)
+
+	slog.Info("CloudControl expected work calculated",
+		"totalResourceTypes", len(a.SupportedResourceTypes()),
+		"totalRegions", len(a.Regions),
+		"expectedWorkItems", expectedWorkCount)
 
 	a.workQueue = make(chan workItem, 2000) // Unified queue with larger buffer
 	a.pendingResources = make([]string, 0)
@@ -389,6 +447,10 @@ func (a *AWSCloudControl) getServiceRegionKey(serviceName, region string) string
 	return fmt.Sprintf("%s:%s", serviceName, region)
 }
 
+func (a *AWSCloudControl) getResourceTypeRegionKey(resourceType, region string) string {
+	return fmt.Sprintf("%s:%s", resourceType, region)
+}
+
 // waitForRateLimit waits for the rate limiter to allow a request
 func (a *AWSCloudControl) waitForRateLimit(region string) error {
 	rateLimiter := a.regionRateLimiters[region]
@@ -397,7 +459,6 @@ func (a *AWSCloudControl) waitForRateLimit(region string) error {
 	}
 	return nil
 }
-
 
 // checkIfCached checks if a response is cached without acquiring rate limits
 func (a *AWSCloudControl) checkIfCached(resourceType, region string) bool {
@@ -535,18 +596,18 @@ func (a *AWSCloudControl) processWorkItem(item workItem) {
 	go func() {
 		defer a.wg.Done()
 
-		serviceRegionKey := fmt.Sprintf("%s:%s", a.extractServiceName(item.resourceType), item.region)
+		resourceTypeRegionKey := a.getResourceTypeRegionKey(item.resourceType, item.region)
 
 		// Track whether work actually completed (not skipped during shutdown)
 		workCompleted := false
 		defer func() {
 			// If this is a retry, remove it from pending retries when we start processing
 			if item.retryCount > 0 {
-				a.completionTracker.RemovePendingRetry(serviceRegionKey)
+				a.completionTracker.RemovePendingRetry(resourceTypeRegionKey)
 			}
 			// Only mark as completed if work actually finished (not skipped during shutdown)
 			if workCompleted {
-				a.completionTracker.MarkCompleted(serviceRegionKey)
+				a.completionTracker.MarkCompleted(resourceTypeRegionKey)
 			}
 		}()
 
@@ -569,8 +630,8 @@ func (a *AWSCloudControl) processResourceTypeWithDedupe(resourceType string) {
 		}
 
 		// Register expected work for completion tracking
-		serviceRegionKey := fmt.Sprintf("%s:%s", a.extractServiceName(resourceType), region)
-		a.completionTracker.AddExpectedWork(serviceRegionKey)
+		resourceTypeRegionKey := a.getResourceTypeRegionKey(resourceType, region)
+		a.completionTracker.AddExpectedWork(resourceTypeRegionKey)
 
 		item := workItem{
 			resourceType: resourceType,
@@ -694,6 +755,30 @@ func (a *AWSCloudControl) isGlobalService(resourceType, region string) bool {
 	return helpers.IsGlobalService(resourceType) && region != "us-east-1"
 }
 
+// calculateExpectedWorkCount calculates the total expected work items
+// accounting for global services that are only processed in us-east-1
+func (a *AWSCloudControl) calculateExpectedWorkCount() int {
+	supportedTypes := a.SupportedResourceTypes()
+	totalWork := 0
+
+	for _, resourceType := range supportedTypes {
+		if helpers.IsGlobalService(resourceType) {
+			// Global services are only processed in us-east-1
+			for _, region := range a.Regions {
+				if region == "us-east-1" {
+					totalWork++
+					break
+				}
+			}
+		} else {
+			// Regular services are processed in all regions
+			totalWork += len(a.Regions)
+		}
+	}
+
+	return totalWork
+}
+
 func (a *AWSCloudControl) listResourcesInRegion(resourceType, region string) {
 	_ = a.listResourcesInRegionWithRetry(resourceType, region, 0)
 }
@@ -784,8 +869,8 @@ func (a *AWSCloudControl) processError(resourceType, region string, err error, r
 		slog.Warn("Rate limited, scheduling retry", "type", resourceType, "region", region, "retryCount", retryCount)
 
 		// Track this as a pending retry
-		serviceRegionKey := fmt.Sprintf("%s:%s", a.extractServiceName(resourceType), region)
-		a.completionTracker.AddPendingRetry(serviceRegionKey)
+		resourceTypeRegionKey := a.getResourceTypeRegionKey(resourceType, region)
+		a.completionTracker.AddPendingRetry(resourceTypeRegionKey)
 
 		retryItem := workItem{
 			resourceType: resourceType,
@@ -799,8 +884,8 @@ func (a *AWSCloudControl) processError(resourceType, region string, err error, r
 			select {
 			case <-a.shutdownCtx.Done():
 				slog.Debug("Shutdown in progress, skipping retry", "type", resourceType, "region", region)
-				a.completionTracker.RemovePendingRetry(serviceRegionKey) // Remove the pending retry we just added
-				return nil, true, true                                   // Skip retry during shutdown (error, shouldBreak, workSkipped)
+				a.completionTracker.RemovePendingRetry(resourceTypeRegionKey) // Remove the pending retry we just added
+				return nil, true, true                                        // Skip retry during shutdown (error, shouldBreak, workSkipped)
 			default:
 			}
 		}
@@ -812,7 +897,7 @@ func (a *AWSCloudControl) processError(resourceType, region string, err error, r
 				slog.Debug("Queued resource for retry after throttling", "type", resourceType, "region", region, "retryCount", retryItem.retryCount)
 			case <-a.shutdownCtx.Done():
 				slog.Debug("Shutdown during retry queue send, skipping", "type", resourceType, "region", region)
-				a.completionTracker.RemovePendingRetry(serviceRegionKey) // Remove the pending retry
+				a.completionTracker.RemovePendingRetry(resourceTypeRegionKey) // Remove the pending retry
 			}
 		} else {
 			// No shutdown context, just try to send
@@ -821,7 +906,7 @@ func (a *AWSCloudControl) processError(resourceType, region string, err error, r
 				slog.Debug("Queued resource for retry after throttling", "type", resourceType, "region", region, "retryCount", retryItem.retryCount)
 			default:
 				slog.Warn("Work queue full, dropping retry request", "type", resourceType, "region", region)
-				a.completionTracker.RemovePendingRetry(serviceRegionKey)
+				a.completionTracker.RemovePendingRetry(resourceTypeRegionKey)
 			}
 		}
 		return nil, true, false // Don't return error, resource will be retried (error, shouldBreak, workSkipped)
@@ -874,6 +959,9 @@ func (a *AWSCloudControl) Complete() error {
 		// Send all resources to the queue with random distribution
 		a.sendResourcesRandomly()
 
+		// Validate that all expected work has been registered
+		a.completionTracker.ValidateExpectedWorkRegistration()
+
 		// Wait for all work to be actually completed (not just queue to be empty)
 		go func() {
 			ticker := time.NewTicker(2 * time.Second) // Check every 2 seconds
@@ -907,10 +995,14 @@ func (a *AWSCloudControl) Complete() error {
 						return
 					}
 
-					// Log progress every 10 seconds
+					// Log progress every 10 seconds with registration info
 					if int(elapsed.Seconds())%10 == 0 {
+						registered, expectedReg := a.completionTracker.GetRegistrationProgress()
 						slog.Info("Waiting for work completion",
-							"completed", completed, "total", total, "queueLength", queueLen, "waitTime", elapsed)
+							"completed", completed, "total", total,
+							"registered", registered, "expectedRegistrations", expectedReg,
+							"queueLength", queueLen, "waitTime", elapsed,
+							"completionPercent", fmt.Sprintf("%.1f%%", float64(completed)/float64(total)*100))
 					}
 				}
 			}

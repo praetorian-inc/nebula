@@ -1,6 +1,7 @@
 package cloudcontrol
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -8,9 +9,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/service/cloudcontrol"
 	cctypes "github.com/aws/aws-sdk-go-v2/service/cloudcontrol/types"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
@@ -27,34 +27,59 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/links/aws/base"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	"github.com/praetorian-inc/nebula/pkg/types"
+	"golang.org/x/time/rate"
 )
+
+// abs returns the absolute value of x
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// getServiceName extracts service name from resource type (e.g., "AWS::S3::Bucket" -> "S3")
+func (a *AWSCloudControl) getServiceName(resourceType string) string {
+	parts := strings.Split(resourceType, "::")
+	if len(parts) >= 2 {
+		return parts[1] // Return service name (e.g., "S3", "EC2", etc.)
+	}
+	return resourceType // Fallback to full resource type
+}
 
 type AWSCloudControl struct {
 	*base.AwsReconLink
-	semaphores              map[string]chan struct{} // per-region semaphores
-	serviceSemaphores       map[string]chan struct{} // per service global semaphores (AWS CloudControl limits per service, not per region)
-	globalSemaphore         chan struct{}            // global connection limit
-	accountSemaphore        chan struct{}            // account-level rate limit semaphore (AWS CloudControl ~50 RPS account limit)
-	serviceSemaphore        chan struct{}
-	regionWorkSemaphore     chan struct{} // limit concurrent listResourcesInRegion goroutines
-	wg                      sync.WaitGroup
-	serviceWg               sync.WaitGroup
-	cloudControlClients     map[string]*cloudcontrol.Client // serviceRegionKey -> client
-	maxConcurrentServices   int
-	maxGlobalConnections    int         // limit total concurrent connections
-	maxConcurrentRegionWork int         // limit concurrent region work goroutines
-	accountRateLimit        int         // account-level rate limit (requests per second)
-	cachedAccountId         string      // cached account ID to avoid duplicate STS calls
-	resourceQueue           chan string // queue of individual resource types
-	processedResources      sync.Map    // concurrent map to track processed resource types
-	startOnce               sync.Once
-	workerStarted           bool
-	workerMu                sync.Mutex // protects workerStarted
-	pendingResources        []string   // buffer for resource types before processing
-	mu                      sync.Mutex // protects pendingResources and serviceSemaphores
+	wg                    sync.WaitGroup
+	cloudControlClients   map[string]*cloudcontrol.Client // serviceRegionKey -> client
+	regionRateLimiters    map[string]*rate.Limiter        // region -> rate limiter
+	maxConcurrentServices int
+	globalRateLimit       int           // per-region rate limit in TPS (requests per second)
+	cachedAccountId       string        // cached account ID to avoid duplicate STS calls
+	workQueue             chan workItem // unified queue for all work items
+	processedResources    sync.Map      // concurrent map to track processed resource types
+	startOnce             sync.Once
+	workerStarted         bool
+	workerMu              sync.Mutex // protects workerStarted
+	pendingResources      []string   // buffer for resource types before processing
+	mu                    sync.Mutex // protects pendingResources
 	// Debug metrics for rate limiting analysis (disabled in production)
 	debugMetrics       *DebugMetrics
 	enableDebugMetrics bool
+	shutdownCtx        context.Context
+	shutdownCancel     context.CancelFunc
+
+	// Completion tracking for proper shutdown
+	completionTracker *CompletionTracker
+	totalExpectedWork int
+	completedWork     atomic.Int64
+}
+
+// workItem represents a unit of work to be processed
+type workItem struct {
+	resourceType string
+	region       string
+	retryCount   int
+	lastAttempt  time.Time
 }
 
 // DebugMetrics tracks request rates for analyzing throttling patterns
@@ -67,6 +92,109 @@ type DebugMetrics struct {
 	stopChan                   chan struct{}
 }
 
+// CompletionTracker tracks completion of work across all regions
+type CompletionTracker struct {
+	mu                      sync.Mutex
+	expectedServiceRegions  map[string]bool // serviceRegionKey -> expected
+	completedServiceRegions map[string]bool // serviceRegionKey -> completed
+	pendingRetries          map[string]int  // serviceRegionKey -> retry count
+	totalExpected           int
+	totalCompleted          int
+}
+
+func NewCompletionTracker() *CompletionTracker {
+	return &CompletionTracker{
+		expectedServiceRegions:  make(map[string]bool),
+		completedServiceRegions: make(map[string]bool),
+		pendingRetries:          make(map[string]int),
+	}
+}
+
+// AddExpectedWork registers a service+region combination as expected work
+func (ct *CompletionTracker) AddExpectedWork(serviceRegionKey string) {
+	if ct == nil {
+		slog.Warn("CompletionTracker is nil, cannot add expected work", "serviceRegion", serviceRegionKey)
+		return
+	}
+
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	if !ct.expectedServiceRegions[serviceRegionKey] {
+		ct.expectedServiceRegions[serviceRegionKey] = true
+		ct.totalExpected++
+	}
+}
+
+// AddPendingRetry increments pending retry count for a service+region
+func (ct *CompletionTracker) AddPendingRetry(serviceRegionKey string) {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	ct.pendingRetries[serviceRegionKey]++
+	slog.Debug("Added pending retry", "serviceRegion", serviceRegionKey, "pendingRetries", ct.pendingRetries[serviceRegionKey])
+}
+
+// RemovePendingRetry decrements pending retry count for a service+region
+func (ct *CompletionTracker) RemovePendingRetry(serviceRegionKey string) {
+	if ct == nil {
+		slog.Warn("CompletionTracker is nil, cannot remove pending retry", "serviceRegion", serviceRegionKey)
+		return
+	}
+
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	if ct.pendingRetries[serviceRegionKey] > 0 {
+		ct.pendingRetries[serviceRegionKey]--
+		slog.Debug("Removed pending retry", "serviceRegion", serviceRegionKey, "pendingRetries", ct.pendingRetries[serviceRegionKey])
+	}
+}
+
+// MarkCompleted marks a service+region combination as completed (only if no pending retries)
+func (ct *CompletionTracker) MarkCompleted(serviceRegionKey string) {
+	if ct == nil {
+		slog.Warn("CompletionTracker is nil, cannot mark completed", "serviceRegion", serviceRegionKey)
+		return
+	}
+
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	// Only mark as completed if there are no pending retries
+	if ct.expectedServiceRegions[serviceRegionKey] && !ct.completedServiceRegions[serviceRegionKey] && ct.pendingRetries[serviceRegionKey] == 0 {
+		ct.completedServiceRegions[serviceRegionKey] = true
+		ct.totalCompleted++
+		slog.Debug("Marked service+region as completed", "serviceRegion", serviceRegionKey, "progress", fmt.Sprintf("%d/%d", ct.totalCompleted, ct.totalExpected))
+	} else if ct.pendingRetries[serviceRegionKey] > 0 {
+		slog.Debug("Cannot mark as completed - has pending retries", "serviceRegion", serviceRegionKey, "pendingRetries", ct.pendingRetries[serviceRegionKey])
+	}
+}
+
+// IsAllComplete returns true if all expected work has been completed
+func (ct *CompletionTracker) IsAllComplete() bool {
+	if ct == nil {
+		return false
+	}
+
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	return ct.totalExpected > 0 && ct.totalCompleted >= ct.totalExpected
+}
+
+// GetProgress returns current completion progress
+func (ct *CompletionTracker) GetProgress() (completed, total int) {
+	if ct == nil {
+		return 0, 0
+	}
+
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	return ct.totalCompleted, ct.totalExpected
+}
+
 func (a *AWSCloudControl) Metadata() *cfg.Metadata {
 	return &cfg.Metadata{Name: "AWS CloudControl"}
 }
@@ -77,12 +205,8 @@ func (a *AWSCloudControl) Params() []cfg.Param {
 	params = append(params, options.AwsRegions(), options.AwsResourceType())
 	params = append(params, cfg.NewParam[int]("max-concurrent-services", "Maximum number of AWS services to process concurrently").
 		WithDefault(1000))
-	params = append(params, cfg.NewParam[int]("max-global-connections", "Maximum total concurrent connections (to avoid port exhaustion)").
-		WithDefault(13000))
-	params = append(params, cfg.NewParam[int]("max-concurrent-region-work", "Maximum concurrent goroutines for region work (to avoid goroutine explosion)").
-		WithDefault(2000))
-	params = append(params, cfg.NewParam[int]("account-rate-limit", "Account-level rate limit in requests per second (AWS CloudControl account limit ~50 RPS)").
-		WithDefault(32))
+	params = append(params, cfg.NewParam[int]("global-rate-limit", "Per-region rate limit in requests per second (AWS SDK level)").
+		WithDefault(5))
 	params = append(params, cfg.NewParam[bool]("enable-debug-metrics", "Enable debug metrics for rate limiting analysis (disabled in production)").
 		WithDefault(false))
 
@@ -91,12 +215,10 @@ func (a *AWSCloudControl) Params() []cfg.Param {
 
 func NewAWSCloudControl(configs ...cfg.Config) chain.Link {
 	cc := &AWSCloudControl{
-		wg:                      sync.WaitGroup{},
-		serviceWg:               sync.WaitGroup{},
-		maxConcurrentServices:   1000,  // Default to 1000 concurrent services
-		maxGlobalConnections:    13000, // Default to 13000 total connections (~80% of macOS default 16383)
-		maxConcurrentRegionWork: 2000,  // Default to 2000 concurrent region work goroutines
-		accountRateLimit:        30,    // Default to 32 RPS account limit (conservative for zero throttling)
+		wg:                    sync.WaitGroup{},
+		maxConcurrentServices: 1000,                   // Default to 1000 concurrent services
+		globalRateLimit:       5,                      // Default to 5 TPS per region rate limit
+		completionTracker:     NewCompletionTracker(), // Initialize early to prevent nil panics
 	}
 	cc.AwsReconLink = base.NewAwsReconLink(cc, configs...)
 
@@ -104,7 +226,10 @@ func NewAWSCloudControl(configs ...cfg.Config) chain.Link {
 }
 
 func (a *AWSCloudControl) Initialize() error {
+	slog.Debug("AWSCloudControl.Initialize() called")
+
 	if err := a.AwsReconLink.Initialize(); err != nil {
+		slog.Error("AwsReconLink.Initialize() failed", "error", err)
 		return err
 	}
 
@@ -115,24 +240,10 @@ func (a *AWSCloudControl) Initialize() error {
 		}
 	}
 
-	// Configure max global connections from parameters
-	if maxConnections, err := cfg.As[int](a.Arg("max-global-connections")); err == nil {
-		if maxConnections > 0 && maxConnections <= 30000 { // Keep well below port limit
-			a.maxGlobalConnections = maxConnections
-		}
-	}
-
-	// Configure max concurrent region work from parameters
-	if maxRegionWork, err := cfg.As[int](a.Arg("max-concurrent-region-work")); err == nil {
-		if maxRegionWork > 0 && maxRegionWork <= 50000 { // Reasonable bounds for goroutines
-			a.maxConcurrentRegionWork = maxRegionWork
-		}
-	}
-
-	// Configure account rate limit from parameters
-	if accountRateLimit, err := cfg.As[int](a.Arg("account-rate-limit")); err == nil {
-		if accountRateLimit > 0 && accountRateLimit <= 200 { // Reasonable bounds for account-level limits
-			a.accountRateLimit = accountRateLimit
+	// Configure per-region rate limit from parameters
+	if globalRateLimit, err := cfg.As[int](a.Arg("global-rate-limit")); err == nil {
+		if globalRateLimit > 0 && globalRateLimit <= 100 { // Reasonable bounds for rate limits
+			a.globalRateLimit = globalRateLimit
 		}
 	}
 
@@ -141,146 +252,33 @@ func (a *AWSCloudControl) Initialize() error {
 		a.enableDebugMetrics = enableDebugMetrics
 	}
 
-	a.initializeClients()
-	a.initializeSemaphores()
-	a.initializeServiceSemaphore()
-	a.initializeRegionWorkSemaphore()
-	a.initializeAccountSemaphore()
+	slog.Debug("Initializing CloudControl clients...")
+	if err := a.initializeClients(); err != nil {
+		slog.Error("Failed to initialize CloudControl clients", "error", err)
+		return fmt.Errorf("failed to initialize CloudControl clients: %w", err)
+	}
+	slog.Debug("CloudControl clients initialized successfully")
+
+	slog.Debug("Initializing debug metrics...")
 	a.initializeDebugMetrics()
+	slog.Debug("Debug metrics initialized")
+
+	slog.Debug("Initializing account ID...")
 	a.initializeAccountId()
-	a.resourceQueue = make(chan string, 1000) // Buffer for individual resource types
+	slog.Debug("Account ID initialized")
+
+	slog.Debug("Creating work queue and shutdown context...")
+	a.workQueue = make(chan workItem, 2000) // Unified queue with larger buffer
 	a.pendingResources = make([]string, 0)
+	a.shutdownCtx, a.shutdownCancel = context.WithCancel(context.Background())
+	// completionTracker is already initialized in constructor
+	slog.Debug("Work queue and shutdown context created")
+
+	// Start worker pool during initialization
+	a.startWorkerPool()
+
+	slog.Debug("AWSCloudControl.Initialize() completed successfully")
 	return nil
-}
-
-func (a *AWSCloudControl) initializeSemaphores() {
-	a.semaphores = make(map[string]chan struct{})
-	a.serviceSemaphores = make(map[string]chan struct{})
-
-	// Dynamically check ephemeral port range and adjust global limit
-	availablePorts := a.getAvailableEphemeralPorts()
-	if a.maxGlobalConnections > availablePorts {
-		slog.Warn("Reducing maxGlobalConnections to available ephemeral ports",
-			"requested", a.maxGlobalConnections,
-			"available", availablePorts)
-		a.maxGlobalConnections = availablePorts
-	}
-
-	a.globalSemaphore = make(chan struct{}, a.maxGlobalConnections)
-
-	// Region semaphores are only for result sending, not API rate limiting
-	// Keep a small limit for result processing
-	resultSendLimit := 10
-
-	// Pre-create service semaphores for all known services
-	// AWS CloudControl API limits are per service globally (~5 RPS per service)
-	serviceRateLimit := 5
-	knownServices := make(map[string]bool)
-	for _, resourceType := range a.SupportedResourceTypes() {
-		serviceName := a.extractServiceName(resourceType)
-		if !knownServices[serviceName] {
-			a.serviceSemaphores[serviceName] = make(chan struct{}, serviceRateLimit)
-			knownServices[serviceName] = true
-		}
-	}
-
-	slog.Info("Initializing semaphores",
-		"globalLimit", a.maxGlobalConnections,
-		"resultSendLimit", resultSendLimit,
-		"serviceRateLimit", serviceRateLimit,
-		"accountRateLimit", a.accountRateLimit,
-		"knownServices", len(knownServices),
-		"availablePorts", availablePorts)
-
-	for _, region := range a.Regions {
-		a.semaphores[region] = make(chan struct{}, resultSendLimit)
-	}
-}
-
-func (a *AWSCloudControl) getAvailableEphemeralPorts() int {
-	switch runtime.GOOS {
-	case "darwin":
-		return a.getMacOSEphemeralPorts()
-	case "linux":
-		return a.getLinuxEphemeralPorts()
-	default:
-		slog.Warn("Unknown OS, using conservative port limit", "os", runtime.GOOS)
-		return 1000 // Conservative default
-	}
-}
-
-func (a *AWSCloudControl) getMacOSEphemeralPorts() int {
-	first, err := exec.Command("sysctl", "-n", "net.inet.ip.portrange.first").Output()
-	if err != nil {
-		slog.Error("Failed to get portrange.first", "error", err)
-		return 1000
-	}
-
-	last, err := exec.Command("sysctl", "-n", "net.inet.ip.portrange.last").Output()
-	if err != nil {
-		slog.Error("Failed to get portrange.last", "error", err)
-		return 1000
-	}
-
-	firstPort, err := strconv.Atoi(strings.TrimSpace(string(first)))
-	if err != nil {
-		return 1000
-	}
-
-	lastPort, err := strconv.Atoi(strings.TrimSpace(string(last)))
-	if err != nil {
-		return 1000
-	}
-
-	// Reserve 20% for other applications and OS
-	available := int(float64(lastPort-firstPort+1) * 0.8)
-	slog.Debug("macOS ephemeral port range", "first", firstPort, "last", lastPort, "available", available)
-	return available
-}
-
-func (a *AWSCloudControl) getLinuxEphemeralPorts() int {
-	output, err := exec.Command("cat", "/proc/sys/net/ipv4/ip_local_port_range").Output()
-	if err != nil {
-		slog.Error("Failed to read Linux port range", "error", err)
-		return 1000
-	}
-
-	parts := strings.Fields(strings.TrimSpace(string(output)))
-	if len(parts) != 2 {
-		return 1000
-	}
-
-	first, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 1000
-	}
-
-	last, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return 1000
-	}
-
-	// Reserve 20% for other applications and OS
-	available := int(float64(last-first+1) * 0.8)
-	slog.Debug("Linux ephemeral port range", "first", first, "last", last, "available", available)
-	return available
-}
-
-func (a *AWSCloudControl) initializeServiceSemaphore() {
-	a.serviceSemaphore = make(chan struct{}, a.maxConcurrentServices)
-}
-
-func (a *AWSCloudControl) initializeRegionWorkSemaphore() {
-	a.regionWorkSemaphore = make(chan struct{}, a.maxConcurrentRegionWork)
-}
-
-func (a *AWSCloudControl) initializeAccountSemaphore() {
-	// Account-level rate limiting to stay within AWS CloudControl account limits (~50 RPS)
-	a.accountSemaphore = make(chan struct{}, a.accountRateLimit)
-
-	slog.Info("Account-level rate limiting enabled",
-		"accountRateLimit", a.accountRateLimit,
-		"semaphoreSize", a.accountRateLimit)
 }
 
 func (a *AWSCloudControl) initializeAccountId() {
@@ -421,12 +419,6 @@ func (a *AWSCloudControl) getServiceRegionKey(serviceName, region string) string
 	return fmt.Sprintf("%s:%s", serviceName, region)
 }
 
-func (a *AWSCloudControl) getServiceSemaphore(serviceName string) chan struct{} {
-	// Service semaphores are pre-created during initialization
-	// AWS CloudControl rate limits are per service globally, not per region
-	return a.serviceSemaphores[serviceName]
-}
-
 // Helper function for max (Go 1.21+)
 func max(a, b int) int {
 	if a > b {
@@ -507,6 +499,12 @@ func (a *AWSCloudControl) sendResourcesRandomly() {
 
 	slog.Info("Sending resources for parallel processing", "totalResourceTypes", totalResourceTypes, "maxConcurrentServices", a.maxConcurrentServices)
 
+	// Check if work queue is nil
+	if a.workQueue == nil {
+		slog.Error("Work queue is nil, cannot send resources")
+		return
+	}
+
 	// Shuffle resources randomly to avoid processing hotspots
 	rand.Shuffle(len(resourcesCopy), func(i, j int) {
 		resourcesCopy[i], resourcesCopy[j] = resourcesCopy[j], resourcesCopy[i]
@@ -515,29 +513,77 @@ func (a *AWSCloudControl) sendResourcesRandomly() {
 	// Send randomized resources to queue
 	for _, resourceType := range resourcesCopy {
 		slog.Debug("Queuing resource type", "type", resourceType)
-		a.resourceQueue <- resourceType
+		a.processResourceTypeWithDedupe(resourceType)
 	}
 }
 
 func (a *AWSCloudControl) startWorkerPool() {
-	// Start worker goroutines to process individual resource types
+	slog.Debug("Starting worker pool", "maxConcurrentServices", a.maxConcurrentServices)
+
+	// Start worker goroutines to process work items
 	for i := 0; i < a.maxConcurrentServices; i++ {
-		a.serviceWg.Add(1)
-		go a.resourceWorker()
+		a.wg.Add(1)
+		go a.workItemProcessor()
 	}
 
 	// Set workerStarted flag with mutex protection
 	a.workerMu.Lock()
 	a.workerStarted = true
 	a.workerMu.Unlock()
+
+	slog.Debug("Worker pool started successfully", "workers", a.maxConcurrentServices)
 }
 
-func (a *AWSCloudControl) resourceWorker() {
-	defer a.serviceWg.Done()
+func (a *AWSCloudControl) workItemProcessor() {
+	defer a.wg.Done()
 
-	for resourceType := range a.resourceQueue {
-		a.processResourceTypeWithDedupe(resourceType)
+	for {
+		select {
+		case item, ok := <-a.workQueue:
+			if !ok {
+				return // Channel closed
+			}
+			a.processWorkItem(item)
+		default:
+			// Check for shutdown with nil safety
+			if a.shutdownCtx != nil {
+				select {
+				case <-a.shutdownCtx.Done():
+					return
+				default:
+				}
+			}
+			// Small sleep to prevent busy waiting (25ms for ~40 checks per second)
+			time.Sleep(25 * time.Millisecond)
+		}
 	}
+}
+
+func (a *AWSCloudControl) processWorkItem(item workItem) {
+	// No exponential backoff needed - rate limiter handles pacing at 5 RPS
+	// Just process the work item directly
+
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+
+		serviceRegionKey := fmt.Sprintf("%s:%s", a.getServiceName(item.resourceType), item.region)
+
+		// Track whether work actually completed (not skipped during shutdown)
+		workCompleted := false
+		defer func() {
+			// If this is a retry, remove it from pending retries when we start processing
+			if item.retryCount > 0 {
+				a.completionTracker.RemovePendingRetry(serviceRegionKey)
+			}
+			// Only mark as completed if work actually finished (not skipped during shutdown)
+			if workCompleted {
+				a.completionTracker.MarkCompleted(serviceRegionKey)
+			}
+		}()
+
+		workCompleted = a.listResourcesInRegionWithRetry(item.resourceType, item.region, item.retryCount)
+	}()
 }
 
 func (a *AWSCloudControl) processResourceTypeWithDedupe(resourceType string) {
@@ -549,20 +595,45 @@ func (a *AWSCloudControl) processResourceTypeWithDedupe(resourceType string) {
 
 	slog.Debug("Processing resource type", "type", resourceType)
 
+	// Queue work items for all regions
 	for _, region := range a.Regions {
 		if a.isGlobalService(resourceType, region) {
 			slog.Debug("Skipping global service", "type", resourceType, "region", region)
 			continue
 		}
 
-		a.wg.Add(1)
-		go func(rt, r string) {
-			// Acquire semaphore to limit concurrent goroutines
-			a.regionWorkSemaphore <- struct{}{}
-			defer func() { <-a.regionWorkSemaphore }()
+		// Register expected work for completion tracking
+		serviceRegionKey := fmt.Sprintf("%s:%s", a.getServiceName(resourceType), region)
+		a.completionTracker.AddExpectedWork(serviceRegionKey)
 
-			a.listResourcesInRegion(rt, r)
-		}(resourceType, region)
+		item := workItem{
+			resourceType: resourceType,
+			region:       region,
+			retryCount:   0,
+			lastAttempt:  time.Time{},
+		}
+
+		select {
+		case a.workQueue <- item:
+			slog.Debug("Queued work item", "type", resourceType, "region", region)
+		default:
+			// Check for shutdown with nil safety
+			if a.shutdownCtx != nil {
+				select {
+				case <-a.shutdownCtx.Done():
+					return
+				default:
+				}
+			}
+			// Try again after delay optimized for 5 RPS (200ms per request cycle)
+			time.Sleep(25 * time.Millisecond)
+			select {
+			case a.workQueue <- item:
+				slog.Debug("Queued work item after delay", "type", resourceType, "region", region)
+			default:
+				slog.Warn("Failed to queue work item, dropping", "type", resourceType, "region", region)
+			}
+		}
 	}
 
 	slog.Debug("cloudcontrol queued for processing", "resourceType", resourceType)
@@ -574,6 +645,15 @@ func (a *AWSCloudControl) processResourceType(resourceType string) {
 
 func (a *AWSCloudControl) initializeClients() error {
 	a.cloudControlClients = make(map[string]*cloudcontrol.Client)
+	a.regionRateLimiters = make(map[string]*rate.Limiter)
+
+	// Create per-region rate limiters using golang.org/x/time/rate for continuous 5 TPS
+	for _, region := range a.Regions {
+		// Create rate limiter: 5 requests per second with burst of 5
+		limiter := rate.NewLimiter(rate.Limit(a.globalRateLimit), a.globalRateLimit)
+		a.regionRateLimiters[region] = limiter
+		slog.Debug("Created rate limiter for region", "region", region, "rateLimit", a.globalRateLimit)
+	}
 
 	// Get all unique service names from supported resource types
 	knownServices := make(map[string]bool)
@@ -582,40 +662,66 @@ func (a *AWSCloudControl) initializeClients() error {
 		knownServices[serviceName] = true
 	}
 
-	// Pre-create clients for all known service+region combinations
+	// Pre-create clients for all known service+region combinations with no retries
 	clientCount := 0
 	for serviceName := range knownServices {
 		for _, region := range a.Regions {
 			serviceRegionKey := a.getServiceRegionKey(serviceName, region)
 
-			config, err := a.GetConfigWithRuntimeArgs(region)
+			// Get base config from framework
+			baseConfig, err := a.GetConfigWithRuntimeArgs(region)
 			if err != nil {
-				return fmt.Errorf("failed to create AWS config for %s: %w", serviceRegionKey, err)
+				return fmt.Errorf("failed to get base config for %s: %w", serviceRegionKey, err)
 			}
 
-			a.cloudControlClients[serviceRegionKey] = cloudcontrol.NewFromConfig(config)
+			// Disable retries completely - we handle rate limiting manually
+			baseConfig.Retryer = func() aws.Retryer {
+				return retry.NewStandard(func(o *retry.StandardOptions) {
+					o.MaxAttempts = 1 // No retries
+				})
+			}
+
+			client := cloudcontrol.NewFromConfig(baseConfig)
+			if client == nil {
+				return fmt.Errorf("failed to create CloudControl client for %s", serviceRegionKey)
+			}
+
+			a.cloudControlClients[serviceRegionKey] = client
 			clientCount++
+			slog.Debug("Created CloudControl client with no retries",
+				"serviceRegionKey", serviceRegionKey,
+				"clientCount", clientCount)
 		}
 	}
 
-	slog.Info("Pre-created CloudControl clients",
+	slog.Info("Pre-created CloudControl clients with per-region rate limiting",
 		"services", len(knownServices),
 		"regions", len(a.Regions),
-		"totalClients", clientCount)
+		"totalClients", clientCount,
+		"perRegionRateLimit", a.globalRateLimit,
+		"totalCapacity", a.globalRateLimit*len(a.Regions))
 
 	return nil
 }
 
 func (a *AWSCloudControl) getClient(serviceName, region string) *cloudcontrol.Client {
 	serviceRegionKey := a.getServiceRegionKey(serviceName, region)
-	return a.cloudControlClients[serviceRegionKey]
+	client := a.cloudControlClients[serviceRegionKey]
+	if client == nil {
+		slog.Error("CloudControl client is nil", "serviceRegionKey", serviceRegionKey, "serviceName", serviceName, "region", region)
+		slog.Debug("Available clients", "clientKeys", func() []string {
+			keys := make([]string, 0, len(a.cloudControlClients))
+			for k := range a.cloudControlClients {
+				keys = append(keys, k)
+			}
+			return keys
+		}())
+	}
+	return client
 }
 
 func (a *AWSCloudControl) Process(resourceType string) error {
-	// Start worker pool on first call
-	a.startOnce.Do(func() {
-		a.startWorkerPool()
-	})
+	// Worker pool is already started in Initialize()
 
 	// Add resource type to pending list
 	a.addResourceType(resourceType)
@@ -628,89 +734,78 @@ func (a *AWSCloudControl) isGlobalService(resourceType, region string) bool {
 }
 
 func (a *AWSCloudControl) listResourcesInRegion(resourceType, region string) {
-	defer a.wg.Done()
+	_ = a.listResourcesInRegionWithRetry(resourceType, region, 0)
+}
 
+func (a *AWSCloudControl) listResourcesInRegionWithRetry(resourceType, region string, retryCount int) bool {
 	serviceName := a.extractServiceName(resourceType)
 
 	// Check if response is cached first - bypass all rate limiting for cached responses
 	if a.checkIfCached(resourceType, region) {
-		slog.Debug("Bypassing all rate limits for cached response", "type", resourceType, "region", region)
-
-		// Still need global semaphore for connection management
-		a.globalSemaphore <- struct{}{}
-		defer func() { <-a.globalSemaphore }()
+		slog.Debug("Using cached response", "type", resourceType, "region", region)
 
 		// Process cached request without any rate limiting
-		a.processCachedOrUncachedRequest(resourceType, region, serviceName, true)
-		return
+		a.processCachedOrUncachedRequest(resourceType, region, serviceName, true, retryCount)
+		return true
 	}
 
-	// For uncached requests, apply full hierarchical rate limiting
+	// For uncached requests, rate limiting is handled by AWS SDK ratelimit package
 	message.Info("Listing %s resources in %s (profile: %s)", resourceType, region, a.Profile)
 	slog.Debug("Listing resources in region", "type", resourceType, "region", region, "profile", a.Profile)
 
-	// Apply global connection limit (but not account-level yet - that's per API call)
-	a.globalSemaphore <- struct{}{}
-	defer func() { <-a.globalSemaphore }()
-
-	// Apply service-level rate limit (AWS CloudControl limits are per service globally)
-	// We'll acquire this just before the API call and release it quickly
-	serviceSem := a.getServiceSemaphore(serviceName)
-	serviceSem <- struct{}{}
-
-	// Process uncached request - this will release the service semaphore quickly
-	a.processCachedOrUncachedRequest(resourceType, region, serviceName, false)
-
-	// Service semaphore is released inside processCachedOrUncachedRequest
+	// Process uncached request - rate limiting handled by AWS SDK
+	a.processCachedOrUncachedRequest(resourceType, region, serviceName, false, retryCount)
+	return true
 }
 
-func (a *AWSCloudControl) processCachedOrUncachedRequest(resourceType, region, serviceName string, isCached bool) {
+func (a *AWSCloudControl) processCachedOrUncachedRequest(resourceType, region, serviceName string, isCached bool, retryCount int) {
 	// Note: Metrics are now incremented per actual API call in the pagination loop
 
 	// Use cached account ID to avoid duplicate STS calls
 	accountId := a.cachedAccountId
 
 	cc := a.getClient(serviceName, region)
+	if cc == nil {
+		slog.Error("Failed to get CloudControl client, skipping", "serviceName", serviceName, "region", region, "resourceType", resourceType)
+		return
+	}
 
 	paginator := cloudcontrol.NewListResourcesPaginator(cc, &cloudcontrol.ListResourcesInput{
 		TypeName:   &resourceType,
 		MaxResults: aws.Int32(100),
 	})
 
-	// For uncached requests, we need to release service semaphore after first request
-	// This allows other services to proceed while we process paginated results
-	serviceSemaphoreReleased := isCached // If cached, no semaphore was acquired
+	// No service semaphore needed - per-region rate limiting handles all throttling
 
 	for paginator.HasMorePages() {
-		// Apply account-level rate limiting for each API call (including pagination)
-		a.accountSemaphore <- struct{}{}
+		// Apply per-region rate limiting before making API call
+		rateLimiter := a.regionRateLimiters[region]
+		if rateLimiter != nil {
+			err := rateLimiter.Wait(a.Context()) // Block until rate limit permits
+			if err != nil {
+				slog.Error("Rate limiter context cancelled", "error", err, "region", region)
+				return
+			}
+		}
 
 		res, err := paginator.NextPage(a.Context())
-
-		// Release account semaphore immediately after API call
-		<-a.accountSemaphore
 
 		// Increment debug metrics counters for each actual API call
 		a.incrementServiceRequestCount(serviceName)
 		a.incrementServiceRegionRequestCount(serviceName, region)
 
-		// Release service semaphore immediately after first API call
-		// Cache check happens inside SDK, so first call determines if cached or not
-		if !serviceSemaphoreReleased {
-			serviceSem := a.getServiceSemaphore(serviceName)
-			<-serviceSem
-			serviceSemaphoreReleased = true
-			slog.Debug("Released service semaphore after first API call", "service", serviceName, "type", resourceType, "region", region)
-		}
-
 		if err != nil {
-			err, shouldBreak := a.processError(resourceType, region, err)
+			err, shouldBreak, workSkipped := a.processError(resourceType, region, err, retryCount)
 			if err != nil {
 				slog.Error("Failed to list resources", "error", err)
 				return
 			}
 
 			if shouldBreak {
+				if workSkipped {
+					slog.Debug("shouldBreak, workSkipped", "serviceName", serviceName, "region", region)
+					return // Work was skipped during shutdown
+				}
 				break
 			}
 		}
@@ -721,32 +816,64 @@ func (a *AWSCloudControl) processCachedOrUncachedRequest(resourceType, region, s
 		}
 	}
 
-	// Ensure semaphore is released even if no pages processed
-	if !serviceSemaphoreReleased {
-		serviceSem := a.getServiceSemaphore(serviceName)
-		<-serviceSem
-		slog.Debug("Released service semaphore (no pages processed)", "service", serviceName, "type", resourceType, "region", region)
-	}
+	// No service semaphore cleanup needed - using per-region rate limiting only
 }
 
-func (a *AWSCloudControl) processError(resourceType, region string, err error) (error, bool) {
+func (a *AWSCloudControl) processError(resourceType, region string, err error, retryCount int) (error, bool, bool) {
 	errMsg := err.Error()
 	switch {
-	case strings.Contains(errMsg, "TypeNotFoundException"):
-		return fmt.Errorf("%s is not available in region %s", resourceType, region), true
-
-	case strings.Contains(errMsg, "is not authorized to perform") || strings.Contains(errMsg, "AccessDeniedException"):
-		return fmt.Errorf("access denied to list resources of type %s in region %s: %s", resourceType, region, errMsg), true
-
-	case strings.Contains(errMsg, "UnsupportedActionException"):
-		return fmt.Errorf("the type %s is not supported in region %s", resourceType, region), true
 
 	case strings.Contains(errMsg, "ThrottlingException"):
-		// Log throttling but don't terminate - let AWS SDK retry with backoff
-		return fmt.Errorf("rate limited: %s", errMsg), false
+		slog.Warn("Rate limited, scheduling retry", "type", resourceType, "region", region, "retryCount", retryCount)
+
+		// Track this as a pending retry
+		serviceRegionKey := fmt.Sprintf("%s:%s", a.getServiceName(resourceType), region)
+		a.completionTracker.AddPendingRetry(serviceRegionKey)
+
+		retryItem := workItem{
+			resourceType: resourceType,
+			region:       region,
+			retryCount:   retryCount + 1,
+			lastAttempt:  time.Now(),
+		}
+
+		// Check if shutdown is in progress first (with nil safety)
+		if a.shutdownCtx != nil {
+			select {
+			case <-a.shutdownCtx.Done():
+				slog.Debug("Shutdown in progress, skipping retry", "type", resourceType, "region", region)
+				a.completionTracker.RemovePendingRetry(serviceRegionKey) // Remove the pending retry we just added
+				return nil, true, true                                   // Skip retry during shutdown (error, shouldBreak, workSkipped)
+			default:
+			}
+		}
+
+		// Try to send to queue with timeout (with nil safety)
+		if a.shutdownCtx != nil {
+			select {
+			case a.workQueue <- retryItem:
+				slog.Debug("Queued resource for retry after throttling", "type", resourceType, "region", region, "retryCount", retryItem.retryCount)
+			//case <-time.After(100 * time.Millisecond):
+			//	slog.Warn("Work queue send timeout during retry, dropping request", "type", resourceType, "region", region)
+			//	a.completionTracker.RemovePendingRetry(serviceRegionKey) // Remove the pending retry
+			case <-a.shutdownCtx.Done():
+				slog.Debug("Shutdown during retry queue send, skipping", "type", resourceType, "region", region)
+				a.completionTracker.RemovePendingRetry(serviceRegionKey) // Remove the pending retry
+			}
+		} else {
+			// No shutdown context, just try to send with timeout
+			select {
+			case a.workQueue <- retryItem:
+				slog.Debug("Queued resource for retry after throttling", "type", resourceType, "region", region, "retryCount", retryItem.retryCount)
+				//case <-time.After(100 * time.Millisecond):
+				//	slog.Warn("Work queue send timeout during retry, dropping request", "type", resourceType, "region", region)
+				//	a.completionTracker.RemovePendingRetry(serviceRegionKey) // Remove the pending retry
+			}
+		}
+		return nil, true, false // Don't return error, resource will be retried (error, shouldBreak, workSkipped)
 
 	default:
-		return fmt.Errorf("failed to ListResources of type %s in region %s: %w", resourceType, region, err), false
+		return err, false, false
 	}
 }
 
@@ -771,11 +898,7 @@ func (a *AWSCloudControl) resourceDescriptionToERD(resource cctypes.ResourceDesc
 }
 
 func (a *AWSCloudControl) sendResource(region string, resource *types.EnrichedResourceDescription) {
-	// Apply region-specific limit for sending resources
-	sem := a.semaphores[region]
-	sem <- struct{}{}
-	defer func() { <-sem }()
-
+	// No rate limiting needed for sending resources - API rate limiting handles throttling
 	a.Send(resource)
 }
 
@@ -785,15 +908,76 @@ func (a *AWSCloudControl) Complete() error {
 	started := a.workerStarted
 	a.workerMu.Unlock()
 
-	if started {
+	slog.Debug("Complete() method called", "workerStarted", started, "workQueueNotNil", a.workQueue != nil)
+
+	// If initialization failed, workQueue will be nil - just return early
+	if a.workQueue == nil {
+		slog.Debug("Complete() called but initialization failed, skipping processing")
+		return nil
+	}
+
+	if started && a.workQueue != nil {
 		// Send all resources to the queue with random distribution
 		a.sendResourcesRandomly()
-		// Close the queue to signal workers to finish
-		close(a.resourceQueue)
-		// Wait for all resource workers to complete
-		a.serviceWg.Wait()
+
+		// Wait for all work to be actually completed (not just queue to be empty)
+		go func() {
+			ticker := time.NewTicker(2 * time.Second) // Check every 2 seconds
+			defer ticker.Stop()
+
+			maxWaitTime := 600 * time.Second // 5 minutes max wait
+			startTime := time.Now()
+
+			for {
+				select {
+				case <-ticker.C:
+					elapsed := time.Since(startTime)
+					completed, total := a.completionTracker.GetProgress()
+					queueLen := len(a.workQueue)
+
+					// Shutdown condition: All expected work completed
+					if a.completionTracker.IsAllComplete() {
+						slog.Info("All work completed - initiating shutdown",
+							"completed", completed, "total", total, "queueLength", queueLen, "waitTime", elapsed)
+						a.shutdownCancel()
+						close(a.workQueue)
+						return
+					}
+
+					// Safety timeout
+					if elapsed > maxWaitTime {
+						slog.Warn("Max wait time exceeded - forcing shutdown",
+							"completed", completed, "total", total, "queueLength", queueLen, "waitTime", elapsed)
+						a.shutdownCancel()
+						close(a.workQueue)
+						return
+					}
+
+					// Log progress every 10 seconds
+					if int(elapsed.Seconds())%10 == 0 {
+						slog.Info("Waiting for work completion",
+							"completed", completed, "total", total, "queueLength", queueLen, "waitTime", elapsed)
+					}
+				}
+			}
+		}()
+	} else {
+		// If no workers were started, process resources directly
+		slog.Debug("No workers started, processing resources directly")
+
+		// Copy pending resources under mutex protection
+		a.mu.Lock()
+		resourcesCopy := make([]string, len(a.pendingResources))
+		copy(resourcesCopy, a.pendingResources)
+		a.mu.Unlock()
+
+		// Process each resource type directly
+		for _, resourceType := range resourcesCopy {
+			a.processResourceType(resourceType)
+		}
 	}
-	// Wait for any remaining region workers
+
+	// Wait for all region processing to complete
 	a.wg.Wait()
 
 	// Stop debug metrics reporting

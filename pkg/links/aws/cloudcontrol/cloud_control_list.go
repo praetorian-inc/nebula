@@ -296,7 +296,7 @@ func (a *AWSCloudControl) Initialize() error {
 	a.completionTracker = NewCompletionTrackerWithExpectedCount(expectedWorkCount)
 
 	slog.Info("CloudControl expected work calculated",
-		"totalResourceTypes", len(a.SupportedResourceTypes()),
+		"totalResourceTypes", len(a.GetFilteredResourceTypes()),
 		"totalRegions", len(a.Regions),
 		"expectedWorkItems", expectedWorkCount)
 
@@ -677,9 +677,9 @@ func (a *AWSCloudControl) initializeClients() error {
 		slog.Debug("Created rate limiter for region", "region", region, "rateLimit", a.globalRateLimit)
 	}
 
-	// Get all unique service names from supported resource types
+	// Get all unique service names from filtered resource types
 	knownServices := make(map[string]bool)
-	for _, resourceType := range a.SupportedResourceTypes() {
+	for _, resourceType := range a.GetFilteredResourceTypes() {
 		serviceName := a.extractServiceName(resourceType)
 		knownServices[serviceName] = true
 	}
@@ -745,6 +745,18 @@ func (a *AWSCloudControl) getClient(serviceName, region string) *cloudcontrol.Cl
 func (a *AWSCloudControl) Process(resourceType string) error {
 	// Worker pool is already started in Initialize()
 
+	// Only process resource types that are in the filtered list
+	filteredTypes := a.GetFilteredResourceTypes()
+	filteredMap := make(map[string]bool)
+	for _, filteredType := range filteredTypes {
+		filteredMap[filteredType] = true
+	}
+
+	if !filteredMap[resourceType] {
+		slog.Debug("Skipping unfiltered resource type", "type", resourceType)
+		return nil
+	}
+
 	// Add resource type to pending list
 	a.addResourceType(resourceType)
 
@@ -758,10 +770,10 @@ func (a *AWSCloudControl) isGlobalService(resourceType, region string) bool {
 // calculateExpectedWorkCount calculates the total expected work items
 // accounting for global services that are only processed in us-east-1
 func (a *AWSCloudControl) calculateExpectedWorkCount() int {
-	supportedTypes := a.SupportedResourceTypes()
+	filteredTypes := a.GetFilteredResourceTypes()
 	totalWork := 0
 
-	for _, resourceType := range supportedTypes {
+	for _, resourceType := range filteredTypes {
 		if helpers.IsGlobalService(resourceType) {
 			// Global services are only processed in us-east-1
 			for _, region := range a.Regions {
@@ -1030,6 +1042,45 @@ func (a *AWSCloudControl) Complete() error {
 	a.stopDebugMetrics()
 
 	return nil
+}
+
+// GetFilteredResourceTypes returns resource types based on CLI arguments
+func (a *AWSCloudControl) GetFilteredResourceTypes() []string {
+	// Get resource types from command line arguments
+	resourceTypes, err := cfg.As[[]string](a.Arg(options.AwsResourceType().Name()))
+	if err != nil {
+		slog.Warn("Failed to get resource types from arguments, using all supported types", "error", err)
+		return a.SupportedResourceTypes()
+	}
+
+	// If empty or contains "all", return all supported types
+	if len(resourceTypes) == 0 || (len(resourceTypes) == 1 && strings.ToLower(resourceTypes[0]) == "all") {
+		return a.SupportedResourceTypes()
+	}
+
+	// Filter to only include supported resource types
+	var filteredTypes []string
+	supportedTypes := a.SupportedResourceTypes()
+	supportedMap := make(map[string]bool)
+	for _, t := range supportedTypes {
+		supportedMap[t] = true
+	}
+
+	for _, requestedType := range resourceTypes {
+		if supportedMap[requestedType] {
+			filteredTypes = append(filteredTypes, requestedType)
+		} else {
+			slog.Warn("Unsupported resource type requested, skipping", "resourceType", requestedType)
+		}
+	}
+
+	if len(filteredTypes) == 0 {
+		slog.Warn("No valid resource types found in arguments, using all supported types")
+		return a.SupportedResourceTypes()
+	}
+
+	slog.Info("Using filtered resource types", "requestedCount", len(resourceTypes), "filteredCount", len(filteredTypes))
+	return filteredTypes
 }
 
 func (a *AWSCloudControl) SupportedResourceTypes() []string {

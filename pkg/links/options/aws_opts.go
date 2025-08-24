@@ -343,6 +343,12 @@ func AwsFederationName() cfg.Param {
 		WithDefault("nebula-federation")
 }
 
+func AwsSecurityGroupIds() cfg.Param {
+	return cfg.NewParam[[]string]("security-group-ids", "Security group IDs to analyze (comma-separated)").
+		WithShortcode("g").
+		AsRequired()
+}
+
 func AwsCdkQualifiers() cfg.Param {
 	return cfg.NewParam[[]string]("cdk-qualifiers", "CDK bootstrap qualifiers to check").
 		WithDefault([]string{"hnb659fds"}).

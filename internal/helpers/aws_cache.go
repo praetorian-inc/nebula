@@ -646,7 +646,7 @@ func ShowCacheStat() {
 }
 
 func ShowThrottlingCounts() {
-	fmt.Printf("AWS Total Throtting: %d", getAllThrottlingCount())
+	fmt.Printf("AWS Total Throttling: %d\n", getAllThrottlingCount())
 }
 
 func ConfigureAWSCacheLogger(logLevel, logFile string) {

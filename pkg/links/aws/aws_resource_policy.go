@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/elasticsearchservice"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -121,7 +122,7 @@ func (a *AwsResourcePolicyChecker) Process(resource *types.EnrichedResourceDescr
 	}
 
 	// Get the policy
-	policy, err := ServiceMap[resource.TypeName].GetPolicy(context.TODO(), awsCfg, identifierStr)
+	policy, err := ServiceMap[resource.TypeName].GetPolicy(context.TODO(), awsCfg, identifierStr, a.Regions)
 	if err != nil {
 		slog.Debug("Failed to get policy", "resource", identifierStr, "type", resource.TypeName, "error", err)
 		return nil // Continue with other resources
@@ -132,7 +133,12 @@ func (a *AwsResourcePolicyChecker) Process(resource *types.EnrichedResourceDescr
 		return nil
 	}
 
-	slog.Debug(fmt.Sprintf("policy for %s", resource.Arn.String()), "policy", policy)
+	policyJson, err := json.MarshalIndent(policy, "", "  ")
+	if err != nil {
+		slog.Debug(fmt.Sprintf("policy for %s (failed to marshal): %v", resource.Arn.String(), err))
+	} else {
+		slog.Debug(fmt.Sprintf("policy for %s", resource.Arn.String()), "policy", string(policyJson))
+	}
 
 	// Check if the policy allows public access
 	res, err := a.analyzePolicy(resource.Arn.String(), policy, resource.AccountId, resource.TypeName)
@@ -179,7 +185,7 @@ type ContextGenerator struct {
 	Conditions     []ConditionPermutation
 }
 
-// Bool helper function for creating *bool values  
+// Bool helper function for creating *bool values
 func Bool(b bool) *bool {
 	return &b
 }
@@ -187,7 +193,7 @@ func Bool(b bool) *bool {
 // GenerateAllPermutations creates all combinations of contexts with condition permutations
 func (cg *ContextGenerator) GenerateAllPermutations() []*iam.RequestContext {
 	contexts := []*iam.RequestContext{}
-	
+
 	// Add base principal contexts first (existing behavior)
 	for _, principal := range cg.BasePrincipals {
 		ctx := &iam.RequestContext{
@@ -196,20 +202,20 @@ func (cg *ContextGenerator) GenerateAllPermutations() []*iam.RequestContext {
 		}
 		contexts = append(contexts, ctx)
 	}
-	
+
 	// Generate all condition combinations for wildcard principal
 	permutations := cg.generateConditionPermutations()
-	
+
 	for _, perm := range permutations {
 		ctx := &iam.RequestContext{
 			PrincipalArn:      "*", // Wildcard for public access testing
 			RequestParameters: make(map[string]string),
 		}
-		
+
 		cg.applyPermutation(ctx, perm)
 		contexts = append(contexts, ctx)
 	}
-	
+
 	return contexts
 }
 
@@ -218,20 +224,20 @@ func (cg *ContextGenerator) generateConditionPermutations() []map[string]string 
 	if len(cg.Conditions) == 0 {
 		return []map[string]string{{}}
 	}
-	
+
 	// Calculate total permutations
 	totalPerms := 1
 	for _, condition := range cg.Conditions {
 		totalPerms *= len(condition.Values)
 	}
-	
+
 	permutations := make([]map[string]string, totalPerms)
-	
+
 	// Generate all combinations
 	for i := 0; i < totalPerms; i++ {
 		perm := make(map[string]string)
 		temp := i
-		
+
 		for _, condition := range cg.Conditions {
 			valueIndex := temp % len(condition.Values)
 			value := condition.Values[valueIndex]
@@ -240,10 +246,10 @@ func (cg *ContextGenerator) generateConditionPermutations() []map[string]string 
 			}
 			temp /= len(condition.Values)
 		}
-		
+
 		permutations[i] = perm
 	}
-	
+
 	return permutations
 }
 
@@ -268,7 +274,7 @@ func (cg *ContextGenerator) applyPermutation(ctx *iam.RequestContext, perm map[s
 			ctx.SourceArn = value
 		case "aws:PrincipalOrgID":
 			ctx.PrincipalOrgID = value
-			
+
 		// RequestParameters (service-specific keys)
 		default:
 			ctx.RequestParameters[key] = value
@@ -283,8 +289,8 @@ func GetEvaluationContexts(resourceType string) []*iam.RequestContext {
 		generator := ContextGenerator{
 			BasePrincipals: []string{
 				"arn:aws:iam::111122223333:role/praetorian", // Generic cross-account
-				"apigateway.amazonaws.com",                   // API Gateway service
-				"lambda.amazonaws.com",                       // Lambda service
+				"apigateway.amazonaws.com",                  // API Gateway service
+				"lambda.amazonaws.com",                      // Lambda service
 			},
 			Conditions: []ConditionPermutation{
 				{"lambda:FunctionUrlAuthType", []string{"NONE", "AWS_IAM", ""}},
@@ -294,13 +300,13 @@ func GetEvaluationContexts(resourceType string) []*iam.RequestContext {
 			},
 		}
 		return generator.GenerateAllPermutations()
-		
+
 	case "AWS::S3::Bucket":
 		generator := ContextGenerator{
 			BasePrincipals: []string{
 				"arn:aws:iam::111122223333:role/praetorian", // Generic cross-account
-				"cloudfront.amazonaws.com",                   // CloudFront service  
-				"s3.amazonaws.com",                           // S3 service
+				"cloudfront.amazonaws.com",                  // CloudFront service
+				"s3.amazonaws.com",                          // S3 service
 			},
 			Conditions: []ConditionPermutation{
 				{"aws:SecureTransport", []string{"true", "false", ""}},
@@ -308,10 +314,11 @@ func GetEvaluationContexts(resourceType string) []*iam.RequestContext {
 				{"s3:x-amz-server-side-encryption", []string{"AES256", "aws:kms", ""}},
 				{"aws:SourceAccount", []string{"111122223333", ""}},
 				{"aws:SourceVpc", []string{"vpc-12345678", ""}},
+				{"aws:SourceVpce", []string{"vpce-0123abcd4ef567890", ""}},
 			},
 		}
 		return generator.GenerateAllPermutations()
-		
+
 	case "AWS::SNS::Topic":
 		generator := ContextGenerator{
 			BasePrincipals: []string{
@@ -325,7 +332,7 @@ func GetEvaluationContexts(resourceType string) []*iam.RequestContext {
 			},
 		}
 		return generator.GenerateAllPermutations()
-		
+
 	case "AWS::SQS::Queue":
 		generator := ContextGenerator{
 			BasePrincipals: []string{
@@ -341,7 +348,7 @@ func GetEvaluationContexts(resourceType string) []*iam.RequestContext {
 			},
 		}
 		return generator.GenerateAllPermutations()
-		
+
 	default:
 		// Default fallback for unknown resource types
 		return []*iam.RequestContext{
@@ -369,7 +376,7 @@ func (a *AwsResourcePolicyChecker) evaluatePolicyWithContext(reqCtx *iam.Request
 
 	results := []*iam.EvaluationResult{}
 	actions := iam.ExtractActions(policy.Statement)
-	
+
 	for _, action := range actions {
 		er := &iam.EvaluationRequest{
 			Action:             action,
@@ -393,9 +400,9 @@ func (a *AwsResourcePolicyChecker) evaluatePolicyWithContext(reqCtx *iam.Request
 // analyzePolicy analyzes a policy to determine if it grants public access
 func (a *AwsResourcePolicyChecker) analyzePolicy(resource string, policy *types.Policy, accountId string, resourceType string) ([]*iam.EvaluationResult, error) {
 	allResults := []*iam.EvaluationResult{}
-	
+
 	contexts := GetEvaluationContexts(resourceType)
-	
+
 	for _, reqCtx := range contexts {
 		// Apply org policies context if available
 		if a.orgPolicies != nil && accountId != "" {
@@ -403,7 +410,7 @@ func (a *AwsResourcePolicyChecker) analyzePolicy(resource string, policy *types.
 			slog.Debug("Enhanced policy analysis with org policies", "resource", resource, "account", accountId, "principal", reqCtx.PrincipalArn, "org_policies_available", true)
 		}
 		reqCtx.PopulateDefaultRequestConditionKeys(resource)
-		
+
 		// Evaluate policy with this context
 		results, err := a.evaluatePolicyWithContext(reqCtx, policy, resource)
 		if err != nil {
@@ -432,11 +439,13 @@ func isPublic(results []*iam.EvaluationResult) bool {
 
 func getAllowedActions(results []*iam.EvaluationResult) []string {
 	allowed := getAllowedResults(results)
+	actionSet := make(map[string]struct{})
 	actions := []string{}
 	for _, res := range allowed {
-		action := string(res.Action)
-		if !slices.Contains(actions, action) {
-			actions = append(actions, action)
+		actionStr := string(res.Action)
+		if _, exists := actionSet[actionStr]; !exists {
+			actionSet[actionStr] = struct{}{}
+			actions = append(actions, actionStr)
 		}
 	}
 	return actions
@@ -470,7 +479,7 @@ func strToPolicy(s string) (*types.Policy, error) {
 	return &p, nil
 }
 
-type PolicyGetter func(ctx context.Context, cfg aws.Config, identifier string) (*types.Policy, error)
+type PolicyGetter func(ctx context.Context, cfg aws.Config, identifier string, allowedRegions []string) (*types.Policy, error)
 
 type ServicePolicyConfig struct {
 	// GetPolicy retrieves the policy for the given identifier
@@ -518,7 +527,7 @@ var ServiceMap = map[string]ServicePolicyConfig{
 }
 
 var ServicePolicyFuncMap = map[string]PolicyGetter{
-	"AWS::Lambda::Function": func(ctx context.Context, cfg aws.Config, functionName string) (*types.Policy, error) {
+	"AWS::Lambda::Function": func(ctx context.Context, cfg aws.Config, functionName string, allowedRegions []string) (*types.Policy, error) {
 		client := lambda.NewFromConfig(cfg)
 		resp, err := client.GetPolicy(ctx, &lambda.GetPolicyInput{
 			FunctionName: aws.String(functionName),
@@ -541,55 +550,140 @@ var ServicePolicyFuncMap = map[string]PolicyGetter{
 
 		return policy, nil
 	},
-	"AWS::S3::Bucket": func(ctx context.Context, cfg aws.Config, bucketName string) (*types.Policy, error) {
+	"AWS::S3::Bucket": func(ctx context.Context, cfg aws.Config, bucketName string, allowedRegions []string) (*types.Policy, error) {
 		client := s3.NewFromConfig(cfg)
+
+		// 0. Check bucket location first to ensure we're using the correct region
+		locationResp, err := client.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
+			Bucket: aws.String(bucketName),
+		})
+		if err != nil {
+			slog.Error("Failed to get bucket location", "bucket", bucketName, "error", err)
+			return nil, err
+		}
+
+		// Handle empty LocationConstraint (means us-east-1)
+		bucketRegion := "us-east-1"
+		if locationResp.LocationConstraint != "" {
+			bucketRegion = string(locationResp.LocationConstraint)
+		}
+
+		// Check if the bucket's region is in the user's allowed regions list
+		if !slices.Contains(allowedRegions, bucketRegion) {
+			slog.Debug("Bucket region not in allowed regions list", "bucket", bucketName, "bucketRegion", bucketRegion, "allowedRegions", allowedRegions)
+			return nil, nil // Skip this bucket
+		}
+
+		// Only create a new client if the bucket is in a different region
+		if bucketRegion != cfg.Region {
+			newCfg := cfg.Copy()
+			newCfg.Region = bucketRegion
+			client = s3.NewFromConfig(newCfg)
+			slog.Debug("Created region-specific S3 client", "bucket", bucketName, "region", bucketRegion)
+		}
+
+		// 1. Check Block Public Access settings - if it blocks access, the request is denied regardless of policies or ACLs
+		blockPublicAccessResp, err := client.GetPublicAccessBlock(ctx, &s3.GetPublicAccessBlockInput{
+			Bucket: aws.String(bucketName),
+		})
+		if err != nil {
+			// Log the error but continue - some buckets might not have public access block settings
+			slog.Debug("Failed to get public access block settings", "bucket", bucketName, "error", err)
+		} else if blockPublicAccessResp.PublicAccessBlockConfiguration != nil {
+			config := blockPublicAccessResp.PublicAccessBlockConfiguration
+			// Only check the two flags that actually block current access:
+			// - IgnorePublicAcls: blocks all ACL-based public access
+			// - RestrictPublicBuckets: blocks all policy-based public access
+			// Note: BlockPublicAcls and BlockPublicPolicy only prevent future changes, not current access
+			if (config.IgnorePublicAcls != nil && *config.IgnorePublicAcls) ||
+				(config.RestrictPublicBuckets != nil && *config.RestrictPublicBuckets) {
+				slog.Debug("Bucket has public access blocked", "bucket", bucketName,
+					"ignorePublicAcls", config.IgnorePublicAcls != nil && *config.IgnorePublicAcls,
+					"restrictPublicBuckets", config.RestrictPublicBuckets != nil && *config.RestrictPublicBuckets)
+
+				// Create a policy that represents the blocked access
+				// Use the correct types for Principal, Action, Resource, and Condition
+				starPrincipal := types.DynaString{"*"}
+				actionDynaString := types.DynaString{"s3:*"}
+				resourceDynaString := types.DynaString{fmt.Sprintf("arn:aws:s3:::%s", bucketName), fmt.Sprintf("arn:aws:s3:::%s/*", bucketName)}
+
+				// Essentiall we just return a virtual policy that denies everything
+				blockStatement := types.PolicyStatement{
+					Sid:       "VirtualPolicyFromBlockPublicAccess",
+					Effect:    "Deny",
+					Principal: &types.Principal{AWS: &starPrincipal},
+					Action:    &actionDynaString,
+					Resource:  &resourceDynaString,
+				}
+
+				blockStatementList := types.PolicyStatementList{blockStatement}
+				return &types.Policy{
+					Version:   "2012-10-17",
+					Statement: &blockStatementList,
+				}, nil
+			}
+		}
+
+		// 2. We pass through the bucket policy since this is what we want from this function
+		var bucketPolicy *types.Policy
 		resp, err := client.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
 			Bucket: aws.String(bucketName),
 		})
 		if err != nil {
-			// Handle region redirect for S3 buckets
-			if strings.Contains(err.Error(), "PermanentRedirect") {
-				// Try to get bucket location first
-				locationResp, locErr := client.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
-					Bucket: aws.String(bucketName),
-				})
-				if locErr == nil {
-					// Handle empty LocationConstraint (means us-east-1)
-					region := "us-east-1"
-					if locationResp.LocationConstraint != "" {
-						region = string(locationResp.LocationConstraint)
-					}
-					
-					// Create new config with correct region
-					correctRegionCfg := cfg.Copy()
-					correctRegionCfg.Region = region
-					regionalClient := s3.NewFromConfig(correctRegionCfg)
-					
-					// Retry with correct region
-					resp, err = regionalClient.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
-						Bucket: aws.String(bucketName),
-					})
-				}
-			}
-			
-			if err != nil {
-				if strings.Contains(err.Error(), "NoSuchBucketPolicy") {
-					return nil, nil
-				}
+			if strings.Contains(err.Error(), "NoSuchBucketPolicy") {
+				slog.Debug("Bucket does not exists", "bucket", bucketName, "error", err)
 				return nil, err
 			}
+			slog.Debug("Failed to get bucket policy", "bucket", bucketName, "error", err)
+			// Continue since we need to evaluate bucket ACL
 		}
-		if resp.Policy == nil {
-			return nil, nil
-		}
-		policy, err := strToPolicy(*resp.Policy)
-		if err != nil {
-			return nil, err
+		if resp.Policy != nil {
+			bucketPolicy, err = strToPolicy(*resp.Policy)
+			if err != nil {
+				slog.Debug("Error in converting string to policy, continuing to evaluate ACLs", "policy", *resp.Policy, "error", err)
+			}
 		}
 
-		return policy, nil
+		// 3. ACLs are evaluated last and can provide additional access controls
+		// In this case, we merge the policies.
+		// No better way to do this at the moment unless we evaluate the policy in the combined function with other resources
+		aclResp, err := client.GetBucketAcl(ctx, &s3.GetBucketAclInput{
+			Bucket: aws.String(bucketName),
+		})
+		if err != nil {
+			// Log ACL check failure but don't fail the entire operation
+			slog.Debug("Failed to get bucket ACL", "bucket", bucketName, "error", err)
+		} else if aclResp.Grants != nil {
+			// Convert ACL grants to policy statements and merge with bucket policy
+			aclStatements := convertACLGrantsToStatements(aclResp.Grants, bucketName)
+			if len(aclStatements) > 0 {
+				if bucketPolicy == nil {
+					// Create a new policy if none exists
+					aclStatementList := types.PolicyStatementList(aclStatements)
+					bucketPolicy = &types.Policy{
+						Version:   "2012-10-17",
+						Statement: &aclStatementList,
+					}
+				} else {
+					// Merge ACL statements with existing policy
+					if bucketPolicy.Statement == nil {
+						aclStatementList := types.PolicyStatementList(aclStatements)
+						bucketPolicy.Statement = &aclStatementList
+					} else {
+						// Dereference, append, and reassign
+						existingStatements := *bucketPolicy.Statement
+						mergedStatements := append(existingStatements, aclStatements...)
+						bucketPolicy.Statement = &mergedStatements
+					}
+				}
+				slog.Debug("Merged ACL grants into bucket policy", "bucket", bucketName, "aclStatements", len(aclStatements))
+			}
+		}
+
+		// Return the bucket policy
+		return bucketPolicy, nil
 	},
-	"AWS::EFS::FileSystem": func(ctx context.Context, cfg aws.Config, fileSystemId string) (*types.Policy, error) {
+	"AWS::EFS::FileSystem": func(ctx context.Context, cfg aws.Config, fileSystemId string, allowedRegions []string) (*types.Policy, error) {
 		client := efs.NewFromConfig(cfg)
 		resp, err := client.DescribeFileSystemPolicy(ctx, &efs.DescribeFileSystemPolicyInput{
 			FileSystemId: aws.String(fileSystemId),
@@ -612,7 +706,7 @@ var ServicePolicyFuncMap = map[string]PolicyGetter{
 
 		return policy, nil
 	},
-	"AWS::SQS::Queue": func(ctx context.Context, cfg aws.Config, queueUrl string) (*types.Policy, error) {
+	"AWS::SQS::Queue": func(ctx context.Context, cfg aws.Config, queueUrl string, allowedRegions []string) (*types.Policy, error) {
 		client := sqs.NewFromConfig(cfg)
 		resp, err := client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 			QueueUrl:       aws.String(queueUrl),
@@ -637,7 +731,7 @@ var ServicePolicyFuncMap = map[string]PolicyGetter{
 
 		return policy, nil
 	},
-	"AWS::ElasticSearch::Domain": func(ctx context.Context, cfg aws.Config, domainName string) (*types.Policy, error) {
+	"AWS::ElasticSearch::Domain": func(ctx context.Context, cfg aws.Config, domainName string, allowedRegions []string) (*types.Policy, error) {
 		client := elasticsearchservice.NewFromConfig(cfg)
 		resp, err := client.DescribeElasticsearchDomainConfig(ctx, &elasticsearchservice.DescribeElasticsearchDomainConfigInput{
 			DomainName: aws.String(domainName),
@@ -660,7 +754,7 @@ var ServicePolicyFuncMap = map[string]PolicyGetter{
 
 		return policy, nil
 	},
-	"AWS::SNS::Topic": func(ctx context.Context, cfg aws.Config, topicArn string) (*types.Policy, error) {
+	"AWS::SNS::Topic": func(ctx context.Context, cfg aws.Config, topicArn string, allowedRegions []string) (*types.Policy, error) {
 		client := sns.NewFromConfig(cfg)
 		resp, err := client.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{
 			TopicArn: aws.String(topicArn),
@@ -684,6 +778,82 @@ var ServicePolicyFuncMap = map[string]PolicyGetter{
 
 		return policy, nil
 	},
+}
+
+// convertACLGrantsToStatements converts S3 ACL grants to IAM policy statements
+func convertACLGrantsToStatements(grants []s3types.Grant, bucketName string) []types.PolicyStatement {
+	var statements []types.PolicyStatement
+
+	for _, grant := range grants {
+		if grant.Grantee == nil || grant.Grantee.URI == nil {
+			continue
+		}
+
+		// Map ACL permissions to IAM actions
+		var actions []string
+		switch grant.Permission {
+		case "READ":
+			actions = []string{
+				"s3:GetObject",
+				"s3:GetObjectVersion",
+				"s3:ListBucket",
+			}
+		case "WRITE":
+			actions = []string{
+				"s3:PutObject",
+				"s3:DeleteObject",
+			}
+		case "READ_ACP":
+			actions = []string{"s3:GetBucketAcl"}
+		case "WRITE_ACP":
+			actions = []string{"s3:PutBucketAcl"}
+		case "FULL_CONTROL":
+			actions = []string{"s3:*"}
+		default:
+			continue
+		}
+
+		// Map grantee URI to principal
+		var principal *types.Principal
+		var granteeType string
+		switch *grant.Grantee.URI {
+		case "http://acs.amazonaws.com/groups/global/AllUsers":
+			// Create a Principal with AWS field set to "*"
+			star := types.DynaString{"*"}
+			principal = &types.Principal{
+				AWS: &star,
+			}
+			granteeType = "AllUsers"
+		case "http://acs.amazonaws.com/groups/global/AuthenticatedUsers":
+			// Create a Principal with AWS field set to "arn:aws:iam::*:root"
+			authUsers := types.DynaString{"arn:aws:iam::*:root"}
+			principal = &types.Principal{
+				AWS: &authUsers,
+			}
+			granteeType = "AuthenticatedUsers"
+		default:
+			// Skip other grantee types for now
+			continue
+		}
+
+		// Create statement with descriptive SID
+		actionDynaString := types.DynaString(actions)
+		resourceDynaString := types.DynaString{
+			fmt.Sprintf("arn:aws:s3:::%s", bucketName),
+			fmt.Sprintf("arn:aws:s3:::%s/*", bucketName),
+		}
+		statement := types.PolicyStatement{
+			Sid:       fmt.Sprintf("VirtualPolicyFromACL-%s-%s", granteeType, grant.Permission),
+			Effect:    "Allow",
+			Principal: principal,
+			Action:    &actionDynaString,
+			Resource:  &resourceDynaString,
+		}
+
+		statements = append(statements, statement)
+	}
+
+	return statements
 }
 
 type AwsResourcePolicyFetcher struct {
@@ -712,7 +882,7 @@ func (a *AwsResourcePolicyFetcher) Process(resource *types.EnrichedResourceDescr
 	}
 
 	// Get the policy
-	policy, err := policyGetter(a.ContextHolder.Context(), awsCfg, resource.Identifier)
+	policy, err := policyGetter(a.ContextHolder.Context(), awsCfg, resource.Identifier, a.Regions)
 	if err != nil {
 		return fmt.Errorf("failed to get policy: %w", err)
 	}

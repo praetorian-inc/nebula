@@ -200,7 +200,6 @@ func AwsRegions() cfg.Param {
 	return cfg.NewParam[[]string]("regions", "AWS regions to scan").
 		WithDefault([]string{"all"}).
 		WithRegex(regexp.MustCompile(`(?i)^[a-z]{2}\-([a-z]+\-){1,2}\d|all$`)).
-		AsRequired().
 		WithShortcode("r")
 }
 
@@ -249,6 +248,16 @@ func AwsCacheErrorTypes() cfg.Param {
 func AwsOrgPoliciesFile() cfg.Param {
 	return cfg.NewParam[string]("org-policies", "Path to AWS organization policies JSON file from get-org-policies module").
 		WithShortcode("o")
+}
+
+func AwsGaadFile() cfg.Param {
+	return cfg.NewParam[string]("gaad-file", "Path to AWS GAAD (GetAccountAuthorizationDetails) JSON file from account-auth-details module").
+		WithShortcode("g")
+}
+
+func AwsResourcePoliciesFile() cfg.Param {
+	return cfg.NewParam[string]("resource-policies-file", "Path to AWS resource policies JSON file from resource-policies module").
+		WithShortcode("rp")
 }
 
 func AwsCacheErrorResp() cfg.Param {
@@ -349,4 +358,13 @@ func AwsCdkQualifiers() cfg.Param {
 func AwsOpsecLevel() cfg.Param {
 	return cfg.NewParam[string]("opsec_level", "Operational security level for AWS operations").
 		WithDefault("none")
+}
+
+func AwsApolloOfflineOptions() []cfg.Param {
+	baseOpts := AwsReconBaseOptions()
+	return append(baseOpts, []cfg.Param{
+		AwsOrgPoliciesFile(),
+		AwsGaadFile(),
+		AwsResourcePoliciesFile(),
+	}...)
 }

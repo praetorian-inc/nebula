@@ -83,22 +83,36 @@ func (l *SecurityGroupLinks) Process(input any) error {
 		return fmt.Errorf("failed to get security group IDs parameter: %w", err)
 	}
 
-	// Deduplicate security group IDs and filter out already processed ones
-	uniqueSgIds := make([]string, 0)
-	seen := make(map[string]bool)
+	var uniqueSgIds []string
 
-	// Acquire read lock before accessing processedSGs
-	l.mu.RLock()
-	for _, sgId := range sgIds {
-		if !seen[sgId] && !l.processedSGs[sgId] {
-			seen[sgId] = true
-			uniqueSgIds = append(uniqueSgIds, sgId)
+	// Check if 'all' is specified
+	if len(sgIds) == 1 && strings.ToLower(sgIds[0]) == "all" {
+		l.Logger.Info("'all' specified, fetching all security groups from all regions")
+		allSgIds, err := l.getAllSecurityGroupIds()
+		if err != nil {
+			l.Logger.Error("failed to get all security group IDs", "error", err)
+			return fmt.Errorf("failed to get all security group IDs: %w", err)
 		}
-	}
-	l.mu.RUnlock()
+		uniqueSgIds = allSgIds
+		l.Logger.Info("found security groups", "count", len(uniqueSgIds))
+	} else {
+		// Deduplicate security group IDs and filter out already processed ones
+		uniqueSgIds = make([]string, 0)
+		seen := make(map[string]bool)
 
-	if len(uniqueSgIds) != len(sgIds) {
-		l.Logger.Info("deduplicated security group IDs", "original_count", len(sgIds), "unique_count", len(uniqueSgIds))
+		// Acquire read lock before accessing processedSGs
+		l.mu.RLock()
+		for _, sgId := range sgIds {
+			if !seen[sgId] && !l.processedSGs[sgId] {
+				seen[sgId] = true
+				uniqueSgIds = append(uniqueSgIds, sgId)
+			}
+		}
+		l.mu.RUnlock()
+
+		if len(uniqueSgIds) != len(sgIds) {
+			l.Logger.Info("deduplicated security group IDs", "original_count", len(sgIds), "unique_count", len(uniqueSgIds))
+		}
 	}
 
 	// If all security groups have already been processed, return empty results
@@ -906,4 +920,103 @@ func (l *SecurityGroupLinks) extractDirectoryId(description string) string {
 	dirRegex := regexp.MustCompile(`d-[a-z0-9]+`)
 	matches := dirRegex.FindString(description)
 	return matches
+}
+
+// getAllSecurityGroupIds fetches all security group IDs from all regions
+func (l *SecurityGroupLinks) getAllSecurityGroupIds() ([]string, error) {
+	ctx := context.Background()
+	var allSgIds []string
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	// Use a channel to limit concurrent region processing
+	const maxConcurrentRegions = 5
+	regionChan := make(chan string, len(l.regions))
+
+	// Start workers to process regions in parallel
+	for i := 0; i < maxConcurrentRegions && i < len(l.regions); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for region := range regionChan {
+				sgIds, err := l.getSecurityGroupIdsForRegion(ctx, region)
+				if err != nil {
+					l.Logger.Warn("failed to get security groups for region", "region", region, "error", err)
+					continue
+				}
+
+				mu.Lock()
+				allSgIds = append(allSgIds, sgIds...)
+				mu.Unlock()
+
+				l.Logger.Debug("found security groups in region", "region", region, "count", len(sgIds))
+			}
+		}()
+	}
+
+	// Send regions to workers
+	for _, region := range l.regions {
+		regionChan <- region
+	}
+	close(regionChan)
+
+	// Wait for all workers to complete
+	wg.Wait()
+
+	// Remove duplicates
+	uniqueSgIds := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, sgId := range allSgIds {
+		if !seen[sgId] {
+			seen[sgId] = true
+			uniqueSgIds = append(uniqueSgIds, sgId)
+		}
+	}
+
+	l.Logger.Info("collected security groups from all regions",
+		"total_found", len(allSgIds),
+		"unique_count", len(uniqueSgIds),
+		"regions_searched", len(l.regions))
+
+	return uniqueSgIds, nil
+}
+
+// getSecurityGroupIdsForRegion fetches all security group IDs from a specific region
+func (l *SecurityGroupLinks) getSecurityGroupIdsForRegion(ctx context.Context, region string) ([]string, error) {
+	// Get AWS config for this region
+	awsConfig, err := l.GetConfigWithRuntimeArgs(region)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get AWS config for region %s: %w", region, err)
+	}
+
+	ec2Client := ec2.NewFromConfig(awsConfig)
+	var allSgIds []string
+	var nextToken *string
+
+	// Paginate through all security groups
+	for {
+		input := &ec2.DescribeSecurityGroupsInput{
+			NextToken: nextToken,
+		}
+
+		result, err := ec2Client.DescribeSecurityGroups(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("failed to describe security groups in region %s: %w", region, err)
+		}
+
+		// Extract security group IDs
+		for _, sg := range result.SecurityGroups {
+			if sg.GroupId != nil {
+				allSgIds = append(allSgIds, *sg.GroupId)
+			}
+		}
+
+		// Check if there are more results
+		if result.NextToken == nil {
+			break
+		}
+		nextToken = result.NextToken
+	}
+
+	return allSgIds, nil
 }

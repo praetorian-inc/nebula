@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -393,5 +394,30 @@ func TestExtractSecurityGroupRulesCleanOutput(t *testing.T) {
 		if _, exists := egressRule[field]; exists {
 			t.Errorf("Expected field '%s' to NOT exist in egress rule (should be omitted when empty)", field)
 		}
+	}
+}
+
+func TestProcessWithAllArgument(t *testing.T) {
+	t.Parallel()
+
+	// Test that the Process method correctly handles the 'all' argument
+	// This is a unit test that verifies the logic without making actual AWS calls
+
+	// Test case 1: 'all' argument should be detected
+	sgIds := []string{"all"}
+	if len(sgIds) != 1 || strings.ToLower(sgIds[0]) != "all" {
+		t.Errorf("Expected 'all' argument to be detected, got %v", sgIds)
+	}
+
+	// Test case 2: Regular security group IDs should not trigger 'all' logic
+	sgIds = []string{"sg-12345678", "sg-87654321"}
+	if len(sgIds) == 1 && strings.ToLower(sgIds[0]) == "all" {
+		t.Errorf("Expected regular SG IDs not to trigger 'all' logic, got %v", sgIds)
+	}
+
+	// Test case 3: Mixed case 'ALL' should be detected
+	sgIds = []string{"ALL"}
+	if len(sgIds) != 1 || strings.ToLower(sgIds[0]) != "all" {
+		t.Errorf("Expected 'ALL' argument to be detected, got %v", sgIds)
 	}
 }

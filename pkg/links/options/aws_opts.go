@@ -335,7 +335,7 @@ func AwsFederationName() cfg.Param {
 }
 
 func AwsSecurityGroupIds() cfg.Param {
-	return cfg.NewParam[[]string]("security-group-ids", "Security group IDs to analyze (comma-separated)").
+	return cfg.NewParam[[]string]("security-group-ids", "Security group IDs to analyze (comma-separated) or 'all' for all security groups").
 		WithShortcode("g").
 		AsRequired()
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/utils"
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 	"google.golang.org/api/compute/v1"
+	"google.golang.org/api/iam/v1"
 	"google.golang.org/api/run/v2"
 )
 
@@ -92,6 +93,7 @@ type GcpCloudRunServiceListLink struct {
 	*base.GcpBaseLink
 	runService    *run.Service
 	regionService *compute.Service
+	iamService    *iam.Service
 }
 
 // creates a link to list all Cloud Run services in a project
@@ -113,6 +115,10 @@ func (g *GcpCloudRunServiceListLink) Initialize() error {
 	g.regionService, err = compute.NewService(context.Background(), g.ClientOptions...)
 	if err != nil {
 		return fmt.Errorf("failed to create compute service: %w", err)
+	}
+	g.iamService, err = iam.NewService(context.Background(), g.ClientOptions...)
+	if err != nil {
+		return fmt.Errorf("failed to create iam service: %w", err)
 	}
 	return nil
 }
@@ -140,11 +146,25 @@ func (g *GcpCloudRunServiceListLink) Process(resource tab.GCPResource) error {
 			servicesResp, err := servicesCall.Do()
 			if err == nil && servicesResp != nil {
 				for _, service := range servicesResp.Services {
+					properties := linkPostProcessCloudRunService(service)
+
+					// Check IAM policy for anonymous access
+					policy, policyErr := g.runService.Projects.Locations.Services.GetIamPolicy(service.Name).Do()
+					if policyErr == nil && policy != nil {
+						anonymousInfo := checkCloudRunAnonymousAccess(policy)
+						if anonymousInfo.TotalPublicBindings > 0 {
+							properties["anonymousAccessInfo"] = anonymousInfo
+							properties["riskLevel"] = calculateRiskLevel(anonymousInfo)
+						}
+					} else {
+						slog.Debug("Failed to get IAM policy for Cloud Run service", "service", service.Name, "error", policyErr)
+					}
+
 					gcpCloudRunService, err := tab.NewGCPResource(
-						service.Name,                            // resource name
-						projectId,                               // accountRef (project ID)
-						tab.GCPResourceCloudRunService,          // resource type
-						linkPostProcessCloudRunService(service), // properties
+						service.Name,                   // resource name
+						projectId,                      // accountRef (project ID)
+						tab.GCPResourceCloudRunService, // resource type
+						properties,                     // properties (with anonymous access info)
 					)
 					if err != nil {
 						slog.Error("Failed to create GCP Cloud Run service resource", "error", err, "service", service.Name)
@@ -242,6 +262,59 @@ func (g *GcpCloudRunSecretsLink) Process(input tab.GCPResource) error {
 
 // ------------------------------------------------------------------------------------------------
 // helper functions
+
+// AnonymousAccessInfo represents anonymous access configuration for a resource
+type AnonymousAccessInfo struct {
+	HasAllUsers                bool     `json:"hasAllUsers"`
+	HasAllAuthenticatedUsers   bool     `json:"hasAllAuthenticatedUsers"`
+	AllUsersRoles             []string `json:"allUsersRoles"`
+	AllAuthenticatedUsersRoles []string `json:"allAuthenticatedUsersRoles"`
+	TotalPublicBindings       int      `json:"totalPublicBindings"`
+	AccessMethods             []string `json:"accessMethods"`
+}
+
+// checkCloudRunAnonymousAccess checks if a Cloud Run service has anonymous access via IAM
+func checkCloudRunAnonymousAccess(policy *run.GoogleIamV1Policy) AnonymousAccessInfo {
+	info := AnonymousAccessInfo{
+		AllUsersRoles:             []string{},
+		AllAuthenticatedUsersRoles: []string{},
+		AccessMethods:             []string{},
+	}
+
+	if policy == nil || len(policy.Bindings) == 0 {
+		return info
+	}
+
+	for _, binding := range policy.Bindings {
+		for _, member := range binding.Members {
+			if member == "allUsers" {
+				info.HasAllUsers = true
+				info.AllUsersRoles = append(info.AllUsersRoles, binding.Role)
+				info.TotalPublicBindings++
+			} else if member == "allAuthenticatedUsers" {
+				info.HasAllAuthenticatedUsers = true
+				info.AllAuthenticatedUsersRoles = append(info.AllAuthenticatedUsersRoles, binding.Role)
+				info.TotalPublicBindings++
+			}
+		}
+	}
+
+	if info.TotalPublicBindings > 0 {
+		info.AccessMethods = append(info.AccessMethods, "IAM")
+	}
+
+	return info
+}
+
+// calculateRiskLevel determines risk level based on anonymous access info
+func calculateRiskLevel(info AnonymousAccessInfo) string {
+	if info.HasAllUsers {
+		return "critical"
+	} else if info.HasAllAuthenticatedUsers {
+		return "high"
+	}
+	return "low"
+}
 
 func linkPostProcessCloudRunService(service *run.GoogleCloudRunV2Service) map[string]any {
 	properties := map[string]any{

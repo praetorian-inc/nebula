@@ -18,7 +18,7 @@ var GcpOrgAllScan = chain.NewModule(
 		"GCP Organization-Wide All Resources Scan",
 		"Scan all available resource types across all projects in a GCP organization.",
 	).WithProperties(map[string]any{
-		"id":          "org-all-scan",
+		"id":          "all-recon-org-scan",
 		"platform":    "gcp",
 		"opsec_level": "moderate",
 		"authors":     []string{"Praetorian"},
@@ -36,6 +36,6 @@ var GcpOrgAllScan = chain.NewModule(
 	cfg.NewParam[string]("module-name", "name of the module for dynamic file naming"),
 	cfg.NewParam[bool]("filter-sys-projects", "filter out system projects").WithDefault(true),
 ).WithConfigs(
-	cfg.WithArg("module-name", "org-all-scan"),
+	cfg.WithArg("module-name", "all-recon-org-scan"),
 	cfg.WithArg("filter-sys-projects", true),
 ).WithStrictness(chain.Lax)

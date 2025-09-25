@@ -20,6 +20,7 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/utils"
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 	"google.golang.org/api/cloudfunctions/v1"
+	"google.golang.org/api/iam/v1"
 )
 
 // FILE INFO:
@@ -94,6 +95,7 @@ func (g *GcpFunctionInfoLink) Process(functionName string) error {
 type GcpFunctionListLink struct {
 	*base.GcpBaseLink
 	functionsService *cloudfunctions.Service
+	iamService       *iam.Service
 }
 
 // creates a link to list all cloud functions in a project
@@ -112,6 +114,10 @@ func (g *GcpFunctionListLink) Initialize() error {
 	if err != nil {
 		return fmt.Errorf("failed to create cloud functions service: %w", err)
 	}
+	g.iamService, err = iam.NewService(context.Background(), g.ClientOptions...)
+	if err != nil {
+		return fmt.Errorf("failed to create iam service: %w", err)
+	}
 	return nil
 }
 
@@ -124,11 +130,25 @@ func (g *GcpFunctionListLink) Process(resource tab.GCPResource) error {
 	err := listReq.Pages(context.Background(), func(page *cloudfunctions.ListFunctionsResponse) error {
 		for _, function := range page.Functions {
 			slog.Debug("Found function", "function", function.Name)
+			properties := linkPostProcessFunction(function)
+
+			// Check IAM policy for anonymous access
+			policy, policyErr := g.functionsService.Projects.Locations.Functions.GetIamPolicy(function.Name).Do()
+			if policyErr == nil && policy != nil {
+				anonymousInfo := checkFunctionAnonymousAccess(policy)
+				if anonymousInfo.TotalPublicBindings > 0 {
+					properties["anonymousAccessInfo"] = anonymousInfo
+					properties["riskLevel"] = calculateRiskLevel(anonymousInfo)
+				}
+			} else {
+				slog.Debug("Failed to get IAM policy for function", "function", function.Name, "error", policyErr)
+			}
+
 			gcpFunction, err := tab.NewGCPResource(
-				function.Name,                     // resource name
-				resource.Name,                     // accountRef (project ID)
-				tab.GCPResourceFunction,           // resource type
-				linkPostProcessFunction(function), // properties
+				function.Name,           // resource name
+				resource.Name,           // accountRef (project ID)
+				tab.GCPResourceFunction, // resource type
+				properties,              // properties (with anonymous access info)
 			)
 			if err != nil {
 				slog.Error("Failed to create GCP function resource", "error", err, "function", function.Name)
@@ -274,6 +294,41 @@ func (g *GcpFunctionSecretsLink) isSkippableFile(filename string) bool {
 
 // ------------------------------------------------------------------------------------------------
 // helper functions
+
+
+// checkFunctionAnonymousAccess checks if a Cloud Function has anonymous access via IAM
+func checkFunctionAnonymousAccess(policy *cloudfunctions.Policy) AnonymousAccessInfo {
+	info := AnonymousAccessInfo{
+		AllUsersRoles:             []string{},
+		AllAuthenticatedUsersRoles: []string{},
+		AccessMethods:             []string{},
+	}
+
+	if policy == nil || len(policy.Bindings) == 0 {
+		return info
+	}
+
+	for _, binding := range policy.Bindings {
+		for _, member := range binding.Members {
+			if member == "allUsers" {
+				info.HasAllUsers = true
+				info.AllUsersRoles = append(info.AllUsersRoles, binding.Role)
+				info.TotalPublicBindings++
+			} else if member == "allAuthenticatedUsers" {
+				info.HasAllAuthenticatedUsers = true
+				info.AllAuthenticatedUsersRoles = append(info.AllAuthenticatedUsersRoles, binding.Role)
+				info.TotalPublicBindings++
+			}
+		}
+	}
+
+	if info.TotalPublicBindings > 0 {
+		info.AccessMethods = append(info.AccessMethods, "IAM")
+	}
+
+	return info
+}
+
 
 func linkPostProcessFunction(function *cloudfunctions.CloudFunction) map[string]any {
 	properties := map[string]any{

@@ -15,6 +15,7 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	"github.com/praetorian-inc/nebula/pkg/utils"
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
+	"google.golang.org/api/iam/v1"
 	"google.golang.org/api/storage/v1"
 )
 
@@ -83,6 +84,7 @@ func (g *GcpStorageBucketInfoLink) Process(bucketName string) error {
 type GcpStorageBucketListLink struct {
 	*base.GcpBaseLink
 	storageService *storage.Service
+	iamService     *iam.Service
 }
 
 // creates a link to list all storage buckets in a project
@@ -101,6 +103,10 @@ func (g *GcpStorageBucketListLink) Initialize() error {
 	if err != nil {
 		return fmt.Errorf("failed to create storage service: %w", err)
 	}
+	g.iamService, err = iam.NewService(context.Background(), g.ClientOptions...)
+	if err != nil {
+		return fmt.Errorf("failed to create iam service: %w", err)
+	}
 	return nil
 }
 
@@ -115,11 +121,34 @@ func (g *GcpStorageBucketListLink) Process(resource tab.GCPResource) error {
 		return utils.HandleGcpError(err, "failed to list buckets in project")
 	}
 	for _, bucket := range buckets.Items {
+		properties := linkPostProcessBucket(bucket)
+
+		// Check IAM policy for anonymous access
+		policy, policyErr := g.storageService.Buckets.GetIamPolicy(bucket.Name).Do()
+		if policyErr == nil && policy != nil {
+			anonymousInfo := checkStorageAnonymousAccess(policy)
+
+			// Also check ACL for legacy public access
+			acl, aclErr := g.storageService.BucketAccessControls.List(bucket.Name).Do()
+			if aclErr == nil {
+				checkStorageACLForPublicAccess(&anonymousInfo, acl)
+			} else {
+				slog.Debug("Failed to get ACL for bucket", "bucket", bucket.Name, "error", aclErr)
+			}
+
+			if anonymousInfo.TotalPublicBindings > 0 {
+				properties["anonymousAccessInfo"] = anonymousInfo
+				properties["riskLevel"] = calculateRiskLevel(anonymousInfo)
+			}
+		} else {
+			slog.Debug("Failed to get IAM policy for bucket", "bucket", bucket.Name, "error", policyErr)
+		}
+
 		gcpBucket, err := tab.NewGCPResource(
-			bucket.Name,                   // resource name (bucket name)
-			projectId,                     // accountRef (project ID)
-			tab.GCPResourceBucket,         // resource type
-			linkPostProcessBucket(bucket), // properties
+			bucket.Name,           // resource name (bucket name)
+			projectId,             // accountRef (project ID)
+			tab.GCPResourceBucket, // resource type
+			properties,            // properties (with anonymous access info)
 		)
 		if err != nil {
 			slog.Error("Failed to create GCP bucket resource", "error", err, "bucket", bucket.Name)
@@ -281,6 +310,100 @@ func (g *GcpStorageObjectSecretsLink) Process(objRef *GcpStorageObjectRef) error
 
 // ---------------------------------------------------------------------------------------------------------------------
 // helper functions
+
+// AnonymousAccessInfo represents anonymous access configuration for a resource
+type AnonymousAccessInfo struct {
+	HasAllUsers                bool     `json:"hasAllUsers"`
+	HasAllAuthenticatedUsers   bool     `json:"hasAllAuthenticatedUsers"`
+	AllUsersRoles             []string `json:"allUsersRoles"`
+	AllAuthenticatedUsersRoles []string `json:"allAuthenticatedUsersRoles"`
+	TotalPublicBindings       int      `json:"totalPublicBindings"`
+	AccessMethods             []string `json:"accessMethods"`
+}
+
+// checkStorageAnonymousAccess checks if a storage bucket has anonymous access via IAM
+func checkStorageAnonymousAccess(policy *storage.Policy) AnonymousAccessInfo {
+	info := AnonymousAccessInfo{
+		AllUsersRoles:             []string{},
+		AllAuthenticatedUsersRoles: []string{},
+		AccessMethods:             []string{},
+	}
+
+	if policy == nil || len(policy.Bindings) == 0 {
+		return info
+	}
+
+	for _, binding := range policy.Bindings {
+		for _, member := range binding.Members {
+			if member == "allUsers" {
+				info.HasAllUsers = true
+				info.AllUsersRoles = append(info.AllUsersRoles, binding.Role)
+				info.TotalPublicBindings++
+			} else if member == "allAuthenticatedUsers" {
+				info.HasAllAuthenticatedUsers = true
+				info.AllAuthenticatedUsersRoles = append(info.AllAuthenticatedUsersRoles, binding.Role)
+				info.TotalPublicBindings++
+			}
+		}
+	}
+
+	if info.TotalPublicBindings > 0 {
+		info.AccessMethods = append(info.AccessMethods, "IAM")
+	}
+
+	return info
+}
+
+// checkStorageACLForPublicAccess checks bucket ACLs for public access
+func checkStorageACLForPublicAccess(info *AnonymousAccessInfo, acl *storage.BucketAccessControls) {
+	if acl == nil || len(acl.Items) == 0 {
+		return
+	}
+
+	for _, aclEntry := range acl.Items {
+		if aclEntry.Entity == "allUsers" {
+			info.HasAllUsers = true
+			// Convert ACL role to IAM-style role name for consistency
+			role := fmt.Sprintf("roles/storage.%s", aclEntry.Role)
+			if !contains(info.AllUsersRoles, role) {
+				info.AllUsersRoles = append(info.AllUsersRoles, role)
+				info.TotalPublicBindings++
+			}
+		} else if aclEntry.Entity == "allAuthenticatedUsers" {
+			info.HasAllAuthenticatedUsers = true
+			role := fmt.Sprintf("roles/storage.%s", aclEntry.Role)
+			if !contains(info.AllAuthenticatedUsersRoles, role) {
+				info.AllAuthenticatedUsersRoles = append(info.AllAuthenticatedUsersRoles, role)
+				info.TotalPublicBindings++
+			}
+		}
+	}
+
+	// Update access methods if ACL access found
+	if info.TotalPublicBindings > 0 && !contains(info.AccessMethods, "ACL") {
+		info.AccessMethods = append(info.AccessMethods, "ACL")
+	}
+}
+
+// Helper function to check if slice contains string
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+// calculateRiskLevel determines risk level based on anonymous access info
+func calculateRiskLevel(info AnonymousAccessInfo) string {
+	if info.HasAllUsers {
+		return "critical"
+	} else if info.HasAllAuthenticatedUsers {
+		return "high"
+	}
+	return "low"
+}
 
 func linkPostProcessBucket(bucket *storage.Bucket) map[string]any {
 	properties := map[string]any{

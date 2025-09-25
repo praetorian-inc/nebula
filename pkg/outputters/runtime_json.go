@@ -16,6 +16,7 @@ import (
 	"github.com/praetorian-inc/nebula/internal/message"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/common"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
+	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 )
 
 // NamedOutputData represents the structure that should be sent to the RuntimeJSONOutputter
@@ -37,8 +38,11 @@ const defaultOutfile = "out.json"
 
 // OutputSections represents the structured output with resources and errors
 type OutputSections struct {
-	Resources []any                  `json:"resources"`
-	Errors    []*common.ResourceError `json:"errors"`
+	Resources                        []any                  `json:"resources"`
+	Errors                          []*common.ResourceError `json:"errors"`
+	PublicNetworkAccess             []any                  `json:"public_network_access"`
+	AnonymousAccess                 []any                  `json:"anonymous_access"`
+	PublicNetworkAndAnonymousAccess []any                  `json:"public_network_and_anonymous_access"`
 }
 
 // RuntimeJSONOutputter allows specifying the output file at runtime
@@ -54,8 +58,11 @@ type RuntimeJSONOutputter struct {
 func NewRuntimeJSONOutputter(configs ...cfg.Config) chain.Outputter {
 	j := &RuntimeJSONOutputter{
 		sections: &OutputSections{
-			Resources: make([]any, 0),
-			Errors:    make([]*common.ResourceError, 0),
+			Resources:                        make([]any, 0),
+			Errors:                          make([]*common.ResourceError, 0),
+			PublicNetworkAccess:             make([]any, 0),
+			AnonymousAccess:                 make([]any, 0),
+			PublicNetworkAndAnonymousAccess: make([]any, 0),
 		},
 	}
 	j.BaseFileOutputter = NewBaseFileOutputter(j, configs...)
@@ -129,10 +136,132 @@ func (j *RuntimeJSONOutputter) Output(val any) error {
 	if resourceError, ok := dataToProcess.(*common.ResourceError); ok {
 		j.sections.Errors = append(j.sections.Errors, resourceError)
 	} else {
+		// Add to main resources list
 		j.sections.Resources = append(j.sections.Resources, dataToProcess)
+
+		// Also categorize into specialized sections (allow overlap)
+		hasNetworkAccess := j.hasNetworkAccess(dataToProcess)
+		hasAnonymousAccess := j.hasAnonymousAccess(dataToProcess)
+
+		// Resources can appear in multiple categories
+		if hasNetworkAccess {
+			j.sections.PublicNetworkAccess = append(j.sections.PublicNetworkAccess, dataToProcess)
+		}
+		if hasAnonymousAccess {
+			j.sections.AnonymousAccess = append(j.sections.AnonymousAccess, dataToProcess)
+		}
+		if hasNetworkAccess && hasAnonymousAccess {
+			j.sections.PublicNetworkAndAnonymousAccess = append(j.sections.PublicNetworkAndAnonymousAccess, dataToProcess)
+		}
 	}
 
 	return nil
+}
+
+// hasNetworkAccess checks if a resource has public network access
+func (j *RuntimeJSONOutputter) hasNetworkAccess(resource any) bool {
+	// Try to handle GCPResource first (both pointer and value)
+	if gcpRes, ok := resource.(*tab.GCPResource); ok {
+		return j.checkNetworkAccessGCP(gcpRes)
+	}
+	if gcpRes, ok := resource.(tab.GCPResource); ok {
+		return j.checkNetworkAccessGCP(&gcpRes)
+	}
+
+	// Fallback: Convert resource to map for property access
+	resourceMap, ok := resource.(map[string]any)
+	if !ok {
+		return false
+	}
+
+	// Check resource-level network fields
+	if ips, ok := resourceMap["ips"].([]any); ok && len(ips) > 0 {
+		return true
+	}
+	if urls, ok := resourceMap["urls"].([]any); ok && len(urls) > 0 {
+		return true
+	}
+
+	// Check properties for network access indicators
+	if properties, ok := resourceMap["properties"].(map[string]any); ok {
+		if publicURL, ok := properties["publicURL"].(string); ok && publicURL != "" {
+			return true
+		}
+		if publicURLs, ok := properties["publicURLs"].([]any); ok && len(publicURLs) > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// checkNetworkAccessGCP checks network access for GCP resources
+func (j *RuntimeJSONOutputter) checkNetworkAccessGCP(gcpRes *tab.GCPResource) bool {
+	// Check resource-level network fields
+	if len(gcpRes.IPs) > 0 {
+		return true
+	}
+	if len(gcpRes.URLs) > 0 {
+		return true
+	}
+	// Check properties for network access indicators
+	if gcpRes.Properties != nil {
+		if publicURL, ok := gcpRes.Properties["publicURL"].(string); ok && publicURL != "" {
+			return true
+		}
+		if publicURLs, ok := gcpRes.Properties["publicURLs"]; ok {
+			if urlSlice, ok := publicURLs.([]string); ok && len(urlSlice) > 0 {
+				return true
+			}
+			if urlSlice, ok := publicURLs.([]any); ok && len(urlSlice) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasAnonymousAccess checks if a resource has anonymous access permissions
+func (j *RuntimeJSONOutputter) hasAnonymousAccess(resource any) bool {
+	// Try to handle GCPResource first (both pointer and value)
+	if gcpRes, ok := resource.(*tab.GCPResource); ok {
+		return j.checkAnonymousAccessGCP(gcpRes)
+	}
+	if gcpRes, ok := resource.(tab.GCPResource); ok {
+		return j.checkAnonymousAccessGCP(&gcpRes)
+	}
+
+	// Fallback: Convert resource to map for property access
+	resourceMap, ok := resource.(map[string]any)
+	if !ok {
+		return false
+	}
+
+	// Check properties for anonymous access indicators
+	if properties, ok := resourceMap["properties"].(map[string]any); ok {
+		if _, ok := properties["anonymousAccessInfo"]; ok {
+			return true
+		}
+		if riskLevel, ok := properties["riskLevel"].(string); ok && riskLevel != "" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// checkAnonymousAccessGCP checks anonymous access for GCP resources
+func (j *RuntimeJSONOutputter) checkAnonymousAccessGCP(gcpRes *tab.GCPResource) bool {
+	// Check properties for anonymous access indicators
+	if gcpRes.Properties != nil {
+		if _, ok := gcpRes.Properties["anonymousAccessInfo"]; ok {
+			return true
+		}
+		if riskLevel, ok := gcpRes.Properties["riskLevel"].(string); ok && riskLevel != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // SetOutputFile allows changing the output file at runtime
@@ -165,7 +294,14 @@ func (j *RuntimeJSONOutputter) Complete() error {
 	}
 
 	totalEntries := len(j.sections.Resources) + len(j.sections.Errors)
-	slog.Debug("writing JSON output", "filename", j.outfile, "resources", len(j.sections.Resources), "errors", len(j.sections.Errors), "total", totalEntries)
+	slog.Debug("writing JSON output",
+		"filename", j.outfile,
+		"resources", len(j.sections.Resources),
+		"errors", len(j.sections.Errors),
+		"public_network_access", len(j.sections.PublicNetworkAccess),
+		"anonymous_access", len(j.sections.AnonymousAccess),
+		"public_network_and_anonymous_access", len(j.sections.PublicNetworkAndAnonymousAccess),
+		"total", totalEntries)
 
 	// Ensure the directory exists (using base functionality)
 	if err := j.EnsureOutputPath(j.outfile); err != nil {

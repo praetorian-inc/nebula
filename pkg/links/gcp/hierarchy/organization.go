@@ -238,7 +238,9 @@ func (g *GcpOrgProjectListLink) Process(resource tab.GCPResource) error {
 	}
 
 	for _, folderPath := range folders {
-		folderListReq := g.resourceManagerService.Projects.List().Filter(fmt.Sprintf("parent.id:%s", folderPath))
+		// Extract folder ID from path like "folders/1051116555540" -> "1051116555540"
+		folderID := strings.TrimPrefix(folderPath, "folders/")
+		folderListReq := g.resourceManagerService.Projects.List().Filter(fmt.Sprintf("parent.id:%s", folderID))
 		err := folderListReq.Pages(context.Background(), func(page *cloudresourcemanager.ListProjectsResponse) error {
 			for _, project := range page.Projects {
 				if g.FilterSysProjects && isSysProject(project) {

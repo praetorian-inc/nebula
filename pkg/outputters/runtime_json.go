@@ -14,6 +14,7 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/internal/helpers"
 	"github.com/praetorian-inc/nebula/internal/message"
+	"github.com/praetorian-inc/nebula/pkg/links/gcp/common"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 )
 
@@ -34,18 +35,29 @@ func NewNamedOutputData(data any, filename string) NamedOutputData {
 
 const defaultOutfile = "out.json"
 
+// OutputSections represents the structured output with resources and errors
+type OutputSections struct {
+	Resources []any                  `json:"resources"`
+	Errors    []*common.ResourceError `json:"errors"`
+}
+
 // RuntimeJSONOutputter allows specifying the output file at runtime
 // rather than at initialization time
 type RuntimeJSONOutputter struct {
 	*BaseFileOutputter
-	indent  int
-	output  []any
-	outfile string
+	indent   int
+	sections *OutputSections
+	outfile  string
 }
 
 // NewRuntimeJSONOutputter creates a new RuntimeJSONOutputter
 func NewRuntimeJSONOutputter(configs ...cfg.Config) chain.Outputter {
-	j := &RuntimeJSONOutputter{}
+	j := &RuntimeJSONOutputter{
+		sections: &OutputSections{
+			Resources: make([]any, 0),
+			Errors:    make([]*common.ResourceError, 0),
+		},
+	}
 	j.BaseFileOutputter = NewBaseFileOutputter(j, configs...)
 	return j
 }
@@ -101,18 +113,25 @@ func (j *RuntimeJSONOutputter) Initialize() error {
 
 // Output stores a value in memory for later writing
 func (j *RuntimeJSONOutputter) Output(val any) error {
+	var dataToProcess any = val
+
 	// Check if we received an OutputData structure
 	if outputData, ok := val.(NamedOutputData); ok {
 		// If filename is provided, update the output file
 		if outputData.OutputFilename != "" && j.outfile == defaultOutfile {
 			j.SetOutputFile(outputData.OutputFilename)
 		}
-		// Add the actual data to our output list
-		j.output = append(j.output, outputData.Data)
-	} else {
-		// Handle the original case where just data is provided
-		j.output = append(j.output, val)
+		// Extract the actual data
+		dataToProcess = outputData.Data
 	}
+
+	// Separate data by type - errors go to errors section, everything else to resources
+	if resourceError, ok := dataToProcess.(*common.ResourceError); ok {
+		j.sections.Errors = append(j.sections.Errors, resourceError)
+	} else {
+		j.sections.Resources = append(j.sections.Resources, dataToProcess)
+	}
+
 	return nil
 }
 
@@ -145,7 +164,8 @@ func (j *RuntimeJSONOutputter) Complete() error {
 		}
 	}
 
-	slog.Debug("writing JSON output", "filename", j.outfile, "entries", len(j.output))
+	totalEntries := len(j.sections.Resources) + len(j.sections.Errors)
+	slog.Debug("writing JSON output", "filename", j.outfile, "resources", len(j.sections.Resources), "errors", len(j.sections.Errors), "total", totalEntries)
 
 	// Ensure the directory exists (using base functionality)
 	if err := j.EnsureOutputPath(j.outfile); err != nil {
@@ -161,7 +181,7 @@ func (j *RuntimeJSONOutputter) Complete() error {
 	encoder := json.NewEncoder(writer)
 	encoder.SetIndent("", strings.Repeat(" ", j.indent))
 
-	err = encoder.Encode(j.output)
+	err = encoder.Encode(j.sections)
 	if err != nil {
 		return err
 	}
@@ -355,12 +375,12 @@ func (j *RuntimeJSONOutputter) enhanceFilenameWithPlatformInfo(filename string) 
 // extractTenantFromMetadata looks for tenant ID in the output data metadata
 func (j *RuntimeJSONOutputter) extractTenantFromMetadata() string {
 	// Check if we have any output data
-	if len(j.output) == 0 {
+	if len(j.sections.Resources) == 0 {
 		return ""
 	}
 
 	// Check if the first output item has metadata with tenant ID
-	firstOutput := j.output[0]
+	firstOutput := j.sections.Resources[0]
 	outputMap, ok := firstOutput.(map[string]any)
 	if !ok {
 		return ""

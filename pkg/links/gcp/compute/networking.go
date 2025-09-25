@@ -468,6 +468,7 @@ func (g *GCPNetworkingFanOut) Process(project tab.GCPResource) error {
 		chain.NewChain(NewGcpDnsManagedZoneListLink()),
 	)
 	multi.WithConfigs(cfg.WithArgs(g.Args()))
+	multi.WithStrictness(chain.Lax)
 	multi.Send(project)
 	multi.Close()
 	for result, ok := chain.RecvAs[*tab.GCPResource](multi); ok; result, ok = chain.RecvAs[*tab.GCPResource](multi) {

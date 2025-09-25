@@ -205,8 +205,10 @@ func (g *GcpOrgProjectListLink) Process(resource tab.GCPResource) error {
 	if resource.ResourceType != tab.GCPResourceOrganization {
 		return nil
 	}
-	orgName := resource.Name
-	listReq := g.resourceManagerService.Projects.List() // .Filter(fmt.Sprintf("parent.id:%s", orgName)) -- TODO: add this back if/when we introduce folder filter in CLI
+
+	orgID := resource.Name
+
+	listReq := g.resourceManagerService.Projects.List().Filter(fmt.Sprintf("parent.id:%s", orgID))
 	err := listReq.Pages(context.Background(), func(page *cloudresourcemanager.ListProjectsResponse) error {
 		for _, project := range page.Projects {
 			if g.FilterSysProjects && isSysProject(project) {
@@ -222,9 +224,61 @@ func (g *GcpOrgProjectListLink) Process(resource tab.GCPResource) error {
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to list projects in organization %s: %w", orgName, err)
+		slog.Warn("Failed to list projects directly under organization", "orgID", orgID, "error", err)
 	}
+
+	v2Service, err := cloudresourcemanagerv2.NewService(context.Background(), g.ClientOptions...)
+	if err != nil {
+		return fmt.Errorf("failed to create v2 resource manager service: %w", err)
+	}
+
+	folders, err := g.listAllFolders("organizations/"+orgID, v2Service)
+	if err != nil {
+		slog.Warn("Error during folder traversal", "orgID", orgID, "error", err)
+	}
+
+	for _, folderPath := range folders {
+		folderListReq := g.resourceManagerService.Projects.List().Filter(fmt.Sprintf("parent.id:%s", folderPath))
+		err := folderListReq.Pages(context.Background(), func(page *cloudresourcemanager.ListProjectsResponse) error {
+			for _, project := range page.Projects {
+				if g.FilterSysProjects && isSysProject(project) {
+					continue
+				}
+				gcpProject, err := createGcpProjectResource(project)
+				if err != nil {
+					slog.Error("Failed to create GCP project resource", "error", err, "projectId", project.ProjectId)
+					continue
+				}
+				g.Send(gcpProject)
+			}
+			return nil
+		})
+		if err != nil {
+			slog.Warn("Failed to list projects in folder", "folder", folderPath, "error", err)
+		}
+	}
+
 	return nil
+}
+
+func (g *GcpOrgProjectListLink) listAllFolders(parent string, v2Service *cloudresourcemanagerv2.Service) ([]string, error) {
+	var allFolders []string
+
+	listReq := v2Service.Folders.List().Parent(parent)
+	err := listReq.Pages(context.Background(), func(page *cloudresourcemanagerv2.ListFoldersResponse) error {
+		for _, folder := range page.Folders {
+			allFolders = append(allFolders, folder.Name)
+			subfolders, err := g.listAllFolders(folder.Name, v2Service)
+			if err != nil {
+				slog.Warn("Failed to list subfolders", "parent", folder.Name, "error", err)
+			} else {
+				allFolders = append(allFolders, subfolders...)
+			}
+		}
+		return nil
+	})
+
+	return allFolders, err
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

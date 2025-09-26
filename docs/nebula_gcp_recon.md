@@ -11,6 +11,7 @@ recon commands for gcp
 ### SEE ALSO
 
 * [nebula gcp](nebula_gcp.md)	 - gcp platform commands
+* [nebula gcp recon all-recon-org-scan](nebula_gcp_recon_all-recon-org-scan.md)	 - Scan all available resource types across all projects in a GCP organization.
 * [nebula gcp recon app-engine-list](nebula_gcp_recon_app-engine-list.md)	 - List all App Engine applications in a GCP project.
 * [nebula gcp recon artifactory-list](nebula_gcp_recon_artifactory-list.md)	 - List all Artifact Registry repositories and container images in a GCP project.
 * [nebula gcp recon buckets-list](nebula_gcp_recon_buckets-list.md)	 - List all storage buckets in a GCP project.

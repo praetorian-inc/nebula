@@ -198,10 +198,10 @@ func (j *RuntimeJSONOutputter) hasNetworkAccess(resource any) bool {
 // checkNetworkAccessGCP checks network access for GCP resources
 func (j *RuntimeJSONOutputter) checkNetworkAccessGCP(gcpRes *tab.GCPResource) bool {
 	// Check resource-level network fields
-	if len(gcpRes.IPs) > 0 {
+	if len(gcpRes.GetIPs()) > 0 {
 		return true
 	}
-	if len(gcpRes.URLs) > 0 {
+	if len(gcpRes.GetURLs()) > 0 {
 		return true
 	}
 	// Check properties for network access indicators

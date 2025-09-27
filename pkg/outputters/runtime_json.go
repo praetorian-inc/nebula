@@ -38,11 +38,11 @@ const defaultOutfile = "out.json"
 
 // OutputSections represents the structured output with resources and errors
 type OutputSections struct {
-	Resources                        []any                  `json:"resources"`
+	Resources                       []any                   `json:"resources"`
 	Errors                          []*common.ResourceError `json:"errors"`
-	PublicNetworkAccess             []any                  `json:"public_network_access"`
-	AnonymousAccess                 []any                  `json:"anonymous_access"`
-	PublicNetworkAndAnonymousAccess []any                  `json:"public_network_and_anonymous_access"`
+	PublicNetworkAccess             []any                   `json:"public_network_access"`
+	AnonymousAccess                 []any                   `json:"anonymous_access"`
+	PublicNetworkAndAnonymousAccess []any                   `json:"public_network_and_anonymous_access"`
 }
 
 // RuntimeJSONOutputter allows specifying the output file at runtime
@@ -58,7 +58,7 @@ type RuntimeJSONOutputter struct {
 func NewRuntimeJSONOutputter(configs ...cfg.Config) chain.Outputter {
 	j := &RuntimeJSONOutputter{
 		sections: &OutputSections{
-			Resources:                        make([]any, 0),
+			Resources:                       make([]any, 0),
 			Errors:                          make([]*common.ResourceError, 0),
 			PublicNetworkAccess:             make([]any, 0),
 			AnonymousAccess:                 make([]any, 0),
@@ -125,7 +125,7 @@ func (j *RuntimeJSONOutputter) Output(val any) error {
 	// Check if we received an OutputData structure
 	if outputData, ok := val.(NamedOutputData); ok {
 		// If filename is provided, update the output file
-		if outputData.OutputFilename != "" && j.outfile == defaultOutfile {
+		if outputData.OutputFilename != "" && filepath.Base(j.outfile) == defaultOutfile {
 			j.SetOutputFile(outputData.OutputFilename)
 		}
 		// Extract the actual data
@@ -534,7 +534,6 @@ func (j *RuntimeJSONOutputter) extractTenantFromMetadata() string {
 
 	return tenantID
 }
-
 
 // Params defines the parameters accepted by this outputter
 func (j *RuntimeJSONOutputter) Params() []cfg.Param {

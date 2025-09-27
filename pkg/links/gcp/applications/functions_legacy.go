@@ -20,7 +20,6 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/utils"
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 	"google.golang.org/api/cloudfunctions/v1"
-	"google.golang.org/api/iam/v1"
 )
 
 // FILE INFO:
@@ -95,7 +94,6 @@ func (g *GcpFunctionInfoLink) Process(functionName string) error {
 type GcpFunctionListLink struct {
 	*base.GcpBaseLink
 	functionsService *cloudfunctions.Service
-	iamService       *iam.Service
 }
 
 // creates a link to list all cloud functions in a project
@@ -113,10 +111,6 @@ func (g *GcpFunctionListLink) Initialize() error {
 	g.functionsService, err = cloudfunctions.NewService(context.Background(), g.ClientOptions...)
 	if err != nil {
 		return fmt.Errorf("failed to create cloud functions service: %w", err)
-	}
-	g.iamService, err = iam.NewService(context.Background(), g.ClientOptions...)
-	if err != nil {
-		return fmt.Errorf("failed to create iam service: %w", err)
 	}
 	return nil
 }

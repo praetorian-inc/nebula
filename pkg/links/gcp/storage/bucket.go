@@ -15,7 +15,6 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	"github.com/praetorian-inc/nebula/pkg/utils"
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
-	"google.golang.org/api/iam/v1"
 	"google.golang.org/api/storage/v1"
 )
 
@@ -84,7 +83,6 @@ func (g *GcpStorageBucketInfoLink) Process(bucketName string) error {
 type GcpStorageBucketListLink struct {
 	*base.GcpBaseLink
 	storageService *storage.Service
-	iamService     *iam.Service
 }
 
 // creates a link to list all storage buckets in a project
@@ -102,10 +100,6 @@ func (g *GcpStorageBucketListLink) Initialize() error {
 	g.storageService, err = storage.NewService(context.Background(), g.ClientOptions...)
 	if err != nil {
 		return fmt.Errorf("failed to create storage service: %w", err)
-	}
-	g.iamService, err = iam.NewService(context.Background(), g.ClientOptions...)
-	if err != nil {
-		return fmt.Errorf("failed to create iam service: %w", err)
 	}
 	return nil
 }

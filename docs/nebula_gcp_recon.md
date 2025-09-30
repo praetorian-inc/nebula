@@ -16,10 +16,12 @@ recon commands for gcp
 * [nebula gcp recon artifactory-list](nebula_gcp_recon_artifactory-list.md)	 - List all Artifact Registry repositories and container images in a GCP project.
 * [nebula gcp recon buckets-list](nebula_gcp_recon_buckets-list.md)	 - List all storage buckets in a GCP project.
 * [nebula gcp recon cloud-run-list](nebula_gcp_recon_cloud-run-list.md)	 - List all Cloud Run services in a GCP project.
+* [nebula gcp recon default-service-accounts](nebula_gcp_recon_default-service-accounts.md)	 - Detect default service accounts with excessive permissions across a GCP organization that should be replaced with custom service accounts following least privilege principles.
 * [nebula gcp recon folders-list](nebula_gcp_recon_folders-list.md)	 - List all folders in a GCP organization.
 * [nebula gcp recon functions-list](nebula_gcp_recon_functions-list.md)	 - List all Cloud Functions in a GCP project.
 * [nebula gcp recon instances-list](nebula_gcp_recon_instances-list.md)	 - List all instances in a GCP project.
 * [nebula gcp recon networking-list](nebula_gcp_recon_networking-list.md)	 - List all networking resources in a GCP project.
+* [nebula gcp recon primitive-roles](nebula_gcp_recon_primitive-roles.md)	 - Detect principals using primitive/basic IAM roles (Owner, Editor, Viewer) across a GCP organization that violate the principle of least privilege.
 * [nebula gcp recon projects-list](nebula_gcp_recon_projects-list.md)	 - List all projects in a GCP organization.
 * [nebula gcp recon sql-instances-list](nebula_gcp_recon_sql-instances-list.md)	 - List all SQL instances in a GCP project.
 

@@ -8,7 +8,7 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/base"
-	"github.com/praetorian-inc/nebula/pkg/utils"
+	"github.com/praetorian-inc/nebula/pkg/links/gcp/common"
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 	"google.golang.org/api/cloudresourcemanager/v1"
 )
@@ -18,11 +18,11 @@ import (
 
 // IAMPolicyData represents the IAM policy data for a project
 type IAMPolicyData struct {
-	ProjectId    string                              `json:"project_id"`
-	ProjectName  string                              `json:"project_name"`
-	Policy       *cloudresourcemanager.Policy        `json:"policy"`
-	Bindings     []*cloudresourcemanager.Binding     `json:"bindings"`
-	AccountRef   string                              `json:"account_ref"`
+	ProjectId   string                          `json:"project_id"`
+	ProjectName string                          `json:"project_name"`
+	Policy      *cloudresourcemanager.Policy    `json:"policy"`
+	Bindings    []*cloudresourcemanager.Binding `json:"bindings"`
+	AccountRef  string                          `json:"account_ref"`
 }
 
 type GcpProjectIamPolicyLink struct {
@@ -64,7 +64,7 @@ func (g *GcpProjectIamPolicyLink) Process(resource tab.GCPResource) error {
 	// Get IAM policy for the project
 	policy, err := g.resourceManagerService.Projects.GetIamPolicy(projectId, &cloudresourcemanager.GetIamPolicyRequest{}).Do()
 	if err != nil {
-		return utils.HandleGcpError(err, fmt.Sprintf("failed to get IAM policy for project %s", projectId))
+		return common.HandleGcpError(err, fmt.Sprintf("failed to get IAM policy for project %s", projectId))
 	}
 
 	// Create IAM policy data structure
@@ -81,7 +81,7 @@ func (g *GcpProjectIamPolicyLink) Process(resource tab.GCPResource) error {
 		fmt.Sprintf("%s-iam-policy", projectId), // resource name
 		resource.AccountRef,                     // accountRef (organization or parent)
 		tab.CloudResourceType("IAMPolicy"),      // custom resource type for IAM policies
-		map[string]any{                          // properties
+		map[string]any{ // properties
 			"project_id":   projectId,
 			"project_name": resource.DisplayName,
 			"policy_data":  policyData,

@@ -10,7 +10,7 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/base"
-	"github.com/praetorian-inc/nebula/pkg/utils"
+	"github.com/praetorian-inc/nebula/pkg/links/gcp/common"
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 	"google.golang.org/api/compute/v1"
 )
@@ -20,14 +20,14 @@ import (
 
 // ComputeServiceAccountData represents service account data for a compute instance
 type ComputeServiceAccountData struct {
-	InstanceId         string   `json:"instance_id"`
-	InstanceName       string   `json:"instance_name"`
-	ProjectId          string   `json:"project_id"`
-	Zone               string   `json:"zone"`
+	InstanceId          string   `json:"instance_id"`
+	InstanceName        string   `json:"instance_name"`
+	ProjectId           string   `json:"project_id"`
+	Zone                string   `json:"zone"`
 	ServiceAccountEmail string   `json:"service_account_email"`
-	Scopes             []string `json:"scopes"`
-	IsDefaultSA        bool     `json:"is_default_service_account"`
-	ServiceAccountType string   `json:"service_account_type"`
+	Scopes              []string `json:"scopes"`
+	IsDefaultSA         bool     `json:"is_default_service_account"`
+	ServiceAccountType  string   `json:"service_account_type"`
 }
 
 type GcpComputeServiceAccountLink struct {
@@ -48,7 +48,7 @@ func (g *GcpComputeServiceAccountLink) Initialize() error {
 	}
 	var err error
 	g.computeService, err = compute.NewService(context.Background(), g.ClientOptions...)
-	return utils.HandleGcpError(err, "failed to create compute service")
+	return common.HandleGcpError(err, "failed to create compute service")
 }
 
 func (g *GcpComputeServiceAccountLink) Process(resource tab.GCPResource) error {
@@ -97,7 +97,7 @@ func (g *GcpComputeServiceAccountLink) Process(resource tab.GCPResource) error {
 	// Get detailed instance information to extract service account data
 	instance, err := g.computeService.Instances.Get(projectId, zoneName, instanceName).Do()
 	if err != nil {
-		return utils.HandleGcpError(err, fmt.Sprintf("failed to get instance details for %s", instanceName))
+		return common.HandleGcpError(err, fmt.Sprintf("failed to get instance details for %s", instanceName))
 	}
 
 	// Process service accounts attached to the instance
@@ -119,15 +119,15 @@ func (g *GcpComputeServiceAccountLink) Process(resource tab.GCPResource) error {
 			resource.AccountRef,
 			tab.CloudResourceType("ComputeServiceAccount"),
 			map[string]any{
-				"instance_id":            saData.InstanceId,
-				"instance_name":          saData.InstanceName,
-				"project_id":             saData.ProjectId,
-				"zone":                   saData.Zone,
-				"service_account_email":  saData.ServiceAccountEmail,
-				"scopes":                 saData.Scopes,
-				"is_default_sa":          saData.IsDefaultSA,
-				"service_account_type":   saData.ServiceAccountType,
-				"sa_data":                saData,
+				"instance_id":           saData.InstanceId,
+				"instance_name":         saData.InstanceName,
+				"project_id":            saData.ProjectId,
+				"zone":                  saData.Zone,
+				"service_account_email": saData.ServiceAccountEmail,
+				"scopes":                saData.Scopes,
+				"is_default_sa":         saData.IsDefaultSA,
+				"service_account_type":  saData.ServiceAccountType,
+				"sa_data":               saData,
 			},
 		)
 		if err != nil {

@@ -7,7 +7,7 @@ import (
 // Janus Options
 
 func GcpCredentialsFile() cfg.Param {
-	return cfg.NewParam[string]("creds-file", "Path to GCP credentials JSON file").WithDefault("").WithShortcode("c").AsRequired()
+	return cfg.NewParam[string]("creds-file", "Path to GCP credentials JSON file").WithDefault("").WithShortcode("c")
 }
 
 func GcpProject() cfg.Param {

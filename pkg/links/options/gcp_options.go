@@ -26,10 +26,6 @@ func GcpFolder() cfg.Param {
 	return cfg.NewParam[[]string]("folder", "GCP folder ID").WithDefault([]string{}).WithShortcode("f")
 }
 
-func GcpResourceType() cfg.Param {
-	return cfg.NewParam[string]("resource-type", "GCP resource type").WithDefault("").WithShortcode("t")
-}
-
 func GcpZone() cfg.Param {
 	return cfg.NewParam[string]("zone", "GCP zone containing the resource").WithDefault("").WithShortcode("z")
 }
@@ -43,5 +39,5 @@ func GcpResource() cfg.Param {
 }
 
 func GcpResourceTypes() cfg.Param {
-	return cfg.NewParam[[]string]("type", "GCP resource types to list (default: all)").WithDefault([]string{"all"}).WithShortcode("t")
+	return cfg.NewParam[[]string]("type", "GCP resource types to list").WithDefault([]string{"all"}).WithShortcode("t")
 }

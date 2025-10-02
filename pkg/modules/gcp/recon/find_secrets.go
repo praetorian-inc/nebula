@@ -213,7 +213,6 @@ func (r *GcpSecretsRouter) scanProjectSecrets(project tab.GCPResource) error {
 	}
 	if err := multi.Error(); err != nil {
 		slog.Warn("Some secrets scanning failed for project (continuing with others)", "project", project.Name, "error", err)
-
 		resourceErrors := common.ParseAggregatedListError(project.Name, err.Error())
 		for _, resourceError := range resourceErrors {
 			r.Send(resourceError)

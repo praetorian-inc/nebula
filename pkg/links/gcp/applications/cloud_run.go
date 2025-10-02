@@ -12,8 +12,8 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	jtypes "github.com/praetorian-inc/janus-framework/pkg/types"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/base"
+	"github.com/praetorian-inc/nebula/pkg/links/gcp/common"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
-	"github.com/praetorian-inc/nebula/pkg/utils"
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 	"google.golang.org/api/compute/v1"
 	"google.golang.org/api/iam/v1"
@@ -73,7 +73,7 @@ func (g *GcpCloudRunServiceInfoLink) Process(serviceName string) error {
 	name := fmt.Sprintf("projects/%s/locations/%s/services/%s", g.ProjectId, g.Region, serviceName)
 	service, err := g.runService.Projects.Locations.Services.Get(name).Do()
 	if err != nil {
-		return utils.HandleGcpError(err, "failed to get Cloud Run service")
+		return common.HandleGcpError(err, "failed to get Cloud Run service")
 	}
 	gcpCloudRunService, err := tab.NewGCPResource(
 		service.Name,                            // resource name
@@ -131,7 +131,7 @@ func (g *GcpCloudRunServiceListLink) Process(resource tab.GCPResource) error {
 	regionsCall := g.regionService.Regions.List(projectId)
 	regionsResp, err := regionsCall.Do()
 	if err != nil {
-		return utils.HandleGcpError(err, "failed to list regions in project")
+		return common.HandleGcpError(err, "failed to list regions in project")
 	}
 	sem := make(chan struct{}, 10)
 	var wg sync.WaitGroup
@@ -212,7 +212,7 @@ func (g *GcpCloudRunSecretsLink) Process(input tab.GCPResource) error {
 	}
 	svc, err := g.runService.Projects.Locations.Services.Get(input.Name).Do()
 	if err != nil {
-		return utils.HandleGcpError(err, "failed to get cloud run service for secrets extraction")
+		return common.HandleGcpError(err, "failed to get cloud run service for secrets extraction")
 	}
 	if svc.Template != nil {
 		for _, container := range svc.Template.Containers {
@@ -267,18 +267,18 @@ func (g *GcpCloudRunSecretsLink) Process(input tab.GCPResource) error {
 type AnonymousAccessInfo struct {
 	HasAllUsers                bool     `json:"hasAllUsers"`
 	HasAllAuthenticatedUsers   bool     `json:"hasAllAuthenticatedUsers"`
-	AllUsersRoles             []string `json:"allUsersRoles"`
+	AllUsersRoles              []string `json:"allUsersRoles"`
 	AllAuthenticatedUsersRoles []string `json:"allAuthenticatedUsersRoles"`
-	TotalPublicBindings       int      `json:"totalPublicBindings"`
-	AccessMethods             []string `json:"accessMethods"`
+	TotalPublicBindings        int      `json:"totalPublicBindings"`
+	AccessMethods              []string `json:"accessMethods"`
 }
 
 // checkCloudRunAnonymousAccess checks if a Cloud Run service has anonymous access via IAM
 func checkCloudRunAnonymousAccess(policy *run.GoogleIamV1Policy) AnonymousAccessInfo {
 	info := AnonymousAccessInfo{
-		AllUsersRoles:             []string{},
+		AllUsersRoles:              []string{},
 		AllAuthenticatedUsersRoles: []string{},
-		AccessMethods:             []string{},
+		AccessMethods:              []string{},
 	}
 
 	if policy == nil || len(policy.Bindings) == 0 {

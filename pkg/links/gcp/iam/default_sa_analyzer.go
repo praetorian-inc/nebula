@@ -9,7 +9,7 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/base"
-	"github.com/praetorian-inc/nebula/pkg/utils"
+	"github.com/praetorian-inc/nebula/pkg/links/gcp/common"
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 	"google.golang.org/api/iam/v1"
 )
@@ -32,17 +32,17 @@ type DefaultServiceAccountFinding struct {
 		Title          string `json:"title"`
 		AttackCategory string `json:"attack_category"`
 	} `json:"finding_data"`
-	Violations  []DefaultServiceAccountViolation  `json:"violations"`
-	Summary     DefaultServiceAccountSummary      `json:"summary"`
+	Violations []DefaultServiceAccountViolation `json:"violations"`
+	Summary    DefaultServiceAccountSummary     `json:"summary"`
 }
 
 // DefaultServiceAccountSummary provides summary statistics
 type DefaultServiceAccountSummary struct {
-	TotalViolations           int `json:"total_violations"`
-	ComputeDefaultSAs         int `json:"compute_default_sas"`
-	AppEngineDefaultSAs       int `json:"appengine_default_sas"`
-	ActiveServiceAccounts     int `json:"active_service_accounts"`
-	ProjectsAffected          int `json:"projects_affected"`
+	TotalViolations       int `json:"total_violations"`
+	ComputeDefaultSAs     int `json:"compute_default_sas"`
+	AppEngineDefaultSAs   int `json:"appengine_default_sas"`
+	ActiveServiceAccounts int `json:"active_service_accounts"`
+	ProjectsAffected      int `json:"projects_affected"`
 }
 
 type GcpDefaultServiceAccountAnalyzer struct {
@@ -54,8 +54,8 @@ type GcpDefaultServiceAccountAnalyzer struct {
 
 // Default service account patterns that should be flagged
 var defaultServiceAccountPatterns = map[string]string{
-	"-compute@developer.gserviceaccount.com":    "compute-default",
-	"@appspot.gserviceaccount.com":              "appengine-default",
+	"-compute@developer.gserviceaccount.com": "compute-default",
+	"@appspot.gserviceaccount.com":           "appengine-default",
 }
 
 // NewGcpDefaultServiceAccountAnalyzer creates a link to analyze default service account violations
@@ -78,7 +78,7 @@ func (g *GcpDefaultServiceAccountAnalyzer) Initialize() error {
 	}
 	var err error
 	g.iamService, err = iam.NewService(context.Background(), g.ClientOptions...)
-	return utils.HandleGcpError(err, "failed to create IAM service")
+	return common.HandleGcpError(err, "failed to create IAM service")
 }
 
 func (g *GcpDefaultServiceAccountAnalyzer) Process(resource tab.GCPResource) error {
@@ -145,7 +145,6 @@ func (g *GcpDefaultServiceAccountAnalyzer) processIAMPolicy(resource tab.GCPReso
 	return nil
 }
 
-
 func (g *GcpDefaultServiceAccountAnalyzer) isDefaultServiceAccount(member string) bool {
 	// Handle serviceAccount: prefix
 	email := member
@@ -160,7 +159,6 @@ func (g *GcpDefaultServiceAccountAnalyzer) isDefaultServiceAccount(member string
 	}
 	return false
 }
-
 
 func (g *GcpDefaultServiceAccountAnalyzer) categorizeDefaultServiceAccount(member string) string {
 	// Handle serviceAccount: prefix
@@ -221,7 +219,6 @@ func (g *GcpDefaultServiceAccountAnalyzer) generateDescriptionFromRole(member, r
 	}
 }
 
-
 func (g *GcpDefaultServiceAccountAnalyzer) Complete() error {
 	// Generate the complete finding only if we have violations
 	if len(g.violations) == 0 {
@@ -274,4 +271,3 @@ func (g *GcpDefaultServiceAccountAnalyzer) calculateSummary() DefaultServiceAcco
 
 	return summary
 }
-

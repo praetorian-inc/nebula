@@ -49,7 +49,7 @@ var GcpFindSecrets = chain.NewModule(
 	options.GcpFilterSysProjects(),
 ).WithConfigs(
 	cfg.WithArg("module-name", "find-secrets"),
-).WithStrictness(chain.Lax)
+).WithStrictness(chain.Lax).WithAutoRun()
 
 // routes to chains based on scope and resource types
 type GcpSecretsRouter struct {
@@ -62,6 +62,12 @@ type GcpSecretsRouter struct {
 func NewGcpSecretsRouter(configs ...cfg.Config) chain.Link {
 	r := &GcpSecretsRouter{}
 	r.Base = chain.NewBase(r, configs...)
+	r.SetParams(
+		options.GcpProject(),
+		options.GcpOrg(),
+		options.GcpFolder(),
+		options.GcpResourceTypes(),
+	)
 	return r
 }
 
@@ -111,7 +117,7 @@ func (r *GcpSecretsRouter) Initialize() error {
 	return nil
 }
 
-func (r *GcpSecretsRouter) Process() error {
+func (r *GcpSecretsRouter) Process(input string) error {
 	switch r.scopeType {
 	case "org":
 		return r.processOrganization()

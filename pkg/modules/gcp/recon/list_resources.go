@@ -46,7 +46,7 @@ var GcpListResources = chain.NewModule(
 	options.GcpFilterSysProjects(),
 ).WithConfigs(
 	cfg.WithArg("module-name", "list-resources"),
-)
+).WithAutoRun()
 
 // routes to chains based on scope and resource types
 type GcpResourceListRouter struct {
@@ -59,6 +59,12 @@ type GcpResourceListRouter struct {
 func NewGcpResourceListRouter(configs ...cfg.Config) chain.Link {
 	r := &GcpResourceListRouter{}
 	r.Base = chain.NewBase(r, configs...)
+	r.SetParams(
+		options.GcpProject(),
+		options.GcpOrg(),
+		options.GcpFolder(),
+		options.GcpResourceTypes(),
+	)
 	return r
 }
 
@@ -107,7 +113,7 @@ func (r *GcpResourceListRouter) Initialize() error {
 	return nil
 }
 
-func (r *GcpResourceListRouter) Process() error {
+func (r *GcpResourceListRouter) Process(input string) error {
 	switch r.scopeType {
 	case "org":
 		return r.processOrganization()

@@ -79,8 +79,8 @@ The module provides detailed findings including CVSS scoring and specific remedi
 	options.GcpOrg(),
 ).WithParams(
 	cfg.NewParam[string]("module-name", "name of the module for dynamic file naming"),
-	cfg.NewParam[bool]("filter-sys-projects", "filter out system projects from analysis").WithDefault(true),
+	cfg.NewParam[bool]("include-sys-projects", "include system projects from analysis").WithDefault(true),
 ).WithConfigs(
 	cfg.WithArg("module-name", "default-service-accounts"),
-	cfg.WithArg("filter-sys-projects", true),
+	cfg.WithArg("include-sys-projects", true),
 )

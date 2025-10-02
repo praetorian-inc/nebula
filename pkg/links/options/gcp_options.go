@@ -14,8 +14,8 @@ func GcpProject() cfg.Param {
 	return cfg.NewParam[[]string]("project", "GCP project ID").WithDefault([]string{}).WithShortcode("p")
 }
 
-func GcpFilterSysProjects() cfg.Param {
-	return cfg.NewParam[bool]("filter-sys-projects", "Filter out system projects like Apps Script projects").WithDefault(true)
+func GcpIncludeSysProjects() cfg.Param {
+	return cfg.NewParam[bool]("include-sys-projects", "Include system projects like Apps Script projects").WithDefault(false)
 }
 
 func GcpOrg() cfg.Param {
@@ -27,19 +27,19 @@ func GcpFolder() cfg.Param {
 }
 
 func GcpResourceType() cfg.Param {
-	return cfg.NewParam[string]("resource-type", "GCP resource type").WithDefault("").AsRequired().WithShortcode("t")
+	return cfg.NewParam[string]("resource-type", "GCP resource type").WithDefault("").WithShortcode("t")
 }
 
 func GcpZone() cfg.Param {
-	return cfg.NewParam[string]("zone", "GCP zone containing the resource").WithDefault("").AsRequired().WithShortcode("z")
+	return cfg.NewParam[string]("zone", "GCP zone containing the resource").WithDefault("").WithShortcode("z")
 }
 
 func GcpRegion() cfg.Param {
-	return cfg.NewParam[string]("region", "GCP region containing the resource").WithDefault("").AsRequired().WithShortcode("r")
+	return cfg.NewParam[string]("region", "GCP region containing the resource").WithDefault("").WithShortcode("r")
 }
 
 func GcpResource() cfg.Param {
-	return cfg.NewParam[string]("resource", "GCP resource ID").WithDefault("").AsRequired().WithShortcode("r")
+	return cfg.NewParam[string]("resource", "GCP resource ID").WithDefault("").WithShortcode("r")
 }
 
 func GcpResourceTypes() cfg.Param {

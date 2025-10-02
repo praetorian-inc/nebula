@@ -46,7 +46,7 @@ var GcpFindSecrets = chain.NewModule(
 	options.GcpOrg(),
 	options.GcpFolder(),
 	options.GcpResourceTypes(),
-	options.GcpFilterSysProjects(),
+	options.GcpIncludeSysProjects(),
 ).WithConfigs(
 	cfg.WithArg("module-name", "find-secrets"),
 ).WithStrictness(chain.Lax).WithAutoRun()

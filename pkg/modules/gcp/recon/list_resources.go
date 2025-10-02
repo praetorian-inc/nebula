@@ -43,7 +43,7 @@ var GcpListResources = chain.NewModule(
 	options.GcpOrg(),
 	options.GcpFolder(),
 	options.GcpResourceTypes(),
-	options.GcpFilterSysProjects(),
+	options.GcpIncludeSysProjects(),
 ).WithConfigs(
 	cfg.WithArg("module-name", "list-resources"),
 ).WithAutoRun()

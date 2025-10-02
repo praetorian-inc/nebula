@@ -7,41 +7,75 @@ import (
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 )
 
-var supportedResourceMap = map[tab.CloudResourceType][]string{
-	tab.GCPResourceBucket:                {"bucket"},
-	tab.GCPResourceInstance:              {"vm", "instance"},
-	tab.GCPResourceSQLInstance:           {"sql"},
-	tab.GCPResourceFunction:              {"function", "functionv2"},
-	tab.GCPResourceFunctionV1:            {"functionv1", "cloudfunction"},
-	tab.GCPResourceCloudRunJob:           {"runjob", "cloudrunjob"},
-	tab.GCPResourceCloudRunService:       {"runservice", "cloudrunservice"},
-	tab.GCPResourceAppEngineApplication:  {"appengine"},
-	tab.GCPResourceAppEngineService:      {"appengineservice"},
-	tab.GCPResourceServiceAccount:        {"serviceaccount", "sa"},
-	tab.GCPResourceRole:                  {"role"},
-	tab.GCPResourcePolicy:                {"policy"},
-	tab.GCPResourceBinding:               {"binding"},
-	tab.GCPResourceMember:                {"member"},
-	tab.GCPResourceProject:               {"project"},
-	tab.GCPResourceProjectPolicy:         {"projectpolicy"},
-	tab.GCPResourceProjectIamPolicy:      {"projectiampolicy"},
-	tab.GCPResourceFolder:                {"folder"},
-	tab.GCPResourceFolderPolicy:          {"folderpolicy"},
-	tab.GCPResourceFolderIamPolicy:       {"folderiampolicy"},
-	tab.GCPResourceOrganization:          {"organization", "org"},
-	tab.GCPResourceOrganizationIamPolicy: {"orgiampolicy"},
-	tab.GCPResourceOrganizationPolicy:    {"orgpolicy"},
-	tab.GCPResourceForwardingRule:        {"forwardingrule"},
-	tab.GCPResourceGlobalForwardingRule:  {"globalforwardingrule", "globalforwarding"},
-	tab.GCPResourceDNSManagedZone:        {"dnszone", "managedzone"},
-	tab.GCPResourceAddress:               {"address"},
-	tab.GCRContainerImage:                {"containerimage"},
-	tab.GCRArtifactRepository:            {"artifactrepo"},
-	tab.GCRArtifactoryDockerImage:        {"dockerimage", "artifactoryimage"},
+// shows implemented resource types only for list resources links
+var listResourceMap = map[tab.CloudResourceType][]string{
+	// Storage
+	tab.GCPResourceBucket:      {"bucket"},
+	tab.GCPResourceSQLInstance: {"sql"},
+
+	// Compute
+	tab.GCPResourceInstance: {"vm", "instance"},
+
+	// Networking
+	tab.GCPResourceForwardingRule:       {"forwardingrule"},
+	tab.GCPResourceGlobalForwardingRule: {"globalforwardingrule", "globalforwarding"},
+	tab.GCPResourceDNSManagedZone:       {"dnszone", "managedzone"},
+	tab.GCPResourceAddress:              {"address"},
+
+	// Applications
+	tab.GCPResourceFunction:         {"function", "functionv2"},
+	tab.GCPResourceFunctionV1:       {"functionv1", "cloudfunction"},
+	tab.GCPResourceCloudRunService:  {"runservice", "cloudrunservice"},
+	tab.GCPResourceAppEngineService: {"appengineservice", "appengine"},
+
+	// Containers
+	tab.GCRArtifactRepository:     {"artifactrepo"},
+	tab.GCRContainerImage:         {"containerimage"},
+	tab.GCRArtifactoryDockerImage: {"dockerimage", "artifactoryimage"},
+
+	// Hierarchy (Info only - use hierarchy modules for listing)
+	tab.GCPResourceProject:      {"project"},
+	tab.GCPResourceFolder:       {"folder"},
+	tab.GCPResourceOrganization: {"organization", "org"},
+}
+
+// shows implemented resources only for secrets scanning links
+var secretsResourceMap = map[tab.CloudResourceType][]string{
+	// Storage - scans bucket objects
+	tab.GCPResourceBucket: {"bucket"},
+
+	// Compute - scans instance metadata and user data
+	tab.GCPResourceInstance: {"vm", "instance"},
+
+	// Applications - scans source code and environment variables
+	tab.GCPResourceFunction:         {"function", "functionv2"},
+	tab.GCPResourceFunctionV1:       {"functionv1", "cloudfunction"},
+	tab.GCPResourceCloudRunService:  {"runservice", "cloudrunservice"},
+	tab.GCPResourceAppEngineService: {"appengineservice", "appengine"},
+
+	// Containers - scans container image layers
+	tab.GCRContainerImage:         {"containerimage"},
+	tab.GCRArtifactoryDockerImage: {"dockerimage", "artifactoryimage"},
+}
+
+func GetListResourceMap() map[tab.CloudResourceType][]string {
+	return listResourceMap
+}
+
+func GetSecretsResourceMap() map[tab.CloudResourceType][]string {
+	return secretsResourceMap
 }
 
 func ResrouceIdentifier(s string) tab.CloudResourceType {
-	for k, v := range supportedResourceMap {
+	return resourceIdentifierFromMap(s, listResourceMap)
+}
+
+func SecretsResourceIdentifier(s string) tab.CloudResourceType {
+	return resourceIdentifierFromMap(s, secretsResourceMap)
+}
+
+func resourceIdentifierFromMap(s string, resourceMap map[tab.CloudResourceType][]string) tab.CloudResourceType {
+	for k, v := range resourceMap {
 		if slices.Contains(v, s) {
 			return k
 		} else if s == k.String() {

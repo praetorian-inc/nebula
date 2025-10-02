@@ -1,5 +1,10 @@
 package recon
 
+// NOTE: This module has been superseded by list_resources.go
+// Use: nebula gcp recon list --project <project> --type bucket
+// Use: nebula gcp recon list --project <project> --type sql
+
+/*
 import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
@@ -62,3 +67,4 @@ var GcpListSQLInstances = chain.NewModule(
 ).WithConfigs(
 	cfg.WithArg("module-name", "sql-instances-list"),
 )
+*/

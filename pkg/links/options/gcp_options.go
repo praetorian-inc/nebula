@@ -11,7 +11,7 @@ func GcpCredentialsFile() cfg.Param {
 }
 
 func GcpProject() cfg.Param {
-	return cfg.NewParam[[]string]("project", "GCP project ID").WithDefault([]string{}).AsRequired().WithShortcode("p")
+	return cfg.NewParam[[]string]("project", "GCP project ID").WithDefault([]string{}).WithShortcode("p")
 }
 
 func GcpFilterSysProjects() cfg.Param {
@@ -19,11 +19,11 @@ func GcpFilterSysProjects() cfg.Param {
 }
 
 func GcpOrg() cfg.Param {
-	return cfg.NewParam[[]string]("org", "GCP organization ID").WithDefault([]string{}).AsRequired().WithShortcode("o")
+	return cfg.NewParam[[]string]("org", "GCP organization ID").WithDefault([]string{}).WithShortcode("o")
 }
 
 func GcpFolder() cfg.Param {
-	return cfg.NewParam[[]string]("folder", "GCP folder ID").WithDefault([]string{}).AsRequired().WithShortcode("f")
+	return cfg.NewParam[[]string]("folder", "GCP folder ID").WithDefault([]string{}).WithShortcode("f")
 }
 
 func GcpResourceType() cfg.Param {
@@ -40,4 +40,8 @@ func GcpRegion() cfg.Param {
 
 func GcpResource() cfg.Param {
 	return cfg.NewParam[string]("resource", "GCP resource ID").WithDefault("").AsRequired().WithShortcode("r")
+}
+
+func GcpResourceTypes() cfg.Param {
+	return cfg.NewParam[[]string]("type", "GCP resource types to list (default: all)").WithDefault([]string{"all"}).WithShortcode("t")
 }

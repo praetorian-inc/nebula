@@ -1,5 +1,10 @@
 package recon
 
+// NOTE: This module has been superseded by list_resources.go
+// Use: nebula gcp recon list --project <project> --type forwardingrule
+// Or for all networking resources: nebula gcp recon list --project <project> --type address,forwardingrule,dnszone
+
+/*
 import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
@@ -37,3 +42,4 @@ var GcpListNetworking = chain.NewModule(
 ).WithConfigs(
 	cfg.WithArg("module-name", "networking-list"),
 )
+*/

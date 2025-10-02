@@ -1,5 +1,9 @@
 package secrets
 
+// NOTE: This module has been superseded by find_secrets.go
+// Use: nebula gcp secrets find-secrets --project <project> --type bucket
+
+/*
 import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
@@ -42,3 +46,4 @@ var GcpScanStorage = chain.NewModule(
 ).WithConfigs(
 	cfg.WithArg("module-name", "storage-secrets"),
 )
+*/

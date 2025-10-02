@@ -1,5 +1,9 @@
 package recon
 
+// NOTE: This module has been superseded by list_resources.go
+// Use: nebula gcp recon list --project <project> --type runservice
+
+/*
 import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
@@ -37,3 +41,4 @@ var GcpListCloudRun = chain.NewModule(
 ).WithConfigs(
 	cfg.WithArg("module-name", "cloud-run-list"),
 )
+*/

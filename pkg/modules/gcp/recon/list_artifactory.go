@@ -1,5 +1,9 @@
 package recon
 
+// NOTE: This module has been superseded by list_resources.go
+// Use: nebula gcp recon list --project <project> --type artifactrepo
+
+/*
 import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
@@ -38,3 +42,4 @@ var GcpListArtifactory = chain.NewModule(
 ).WithConfigs(
 	cfg.WithArg("module-name", "artifactory-list"),
 )
+*/

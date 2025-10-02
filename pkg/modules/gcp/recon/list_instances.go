@@ -1,5 +1,9 @@
 package recon
 
+// NOTE: This module has been superseded by list_resources.go
+// Use: nebula gcp recon list --project <project> --type instance
+
+/*
 import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
@@ -37,3 +41,4 @@ var GcpListInstances = chain.NewModule(
 ).WithConfigs(
 	cfg.WithArg("module-name", "instances-list"),
 )
+*/

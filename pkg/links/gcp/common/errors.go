@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"strings"
 	"time"
 
+	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 	"google.golang.org/api/googleapi"
 )
 
-// logs skips and returns nil if the error is a 403 and the reason is API disabled
-// NOTE: for use ONLY in GCP link Process() functions; DO NOT use in Initialize() functions
 func HandleGcpError(err error, msg string) error {
 	if err == nil {
 		return nil
@@ -35,7 +35,53 @@ func HandleGcpError(err error, msg string) error {
 	return fmt.Errorf("%s: %w", msg, err)
 }
 
-// ResourceError represents a failed resource discovery attempt
+func ParseAggregatedListError(projectName, errorText string) []*ResourceError {
+	var resourceErrors []*ResourceError
+	lines := strings.SplitSeq(errorText, "\n")
+	for line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, "SERVICE_DISABLED") || strings.Contains(line, "BILLING_DISABLED") {
+			slog.Debug("Skipping already handled error", "error", line) // ideally handled by individual links
+			continue
+		}
+		if resourceError := parsePermissionDeniedError(projectName, line); resourceError != nil {
+			resourceErrors = append(resourceErrors, resourceError)
+		}
+	}
+	return resourceErrors
+}
+
+func parsePermissionDeniedError(projectName, line string) *ResourceError {
+	if !strings.Contains(line, "does not have") || !strings.Contains(line, "access") {
+		return nil
+	}
+	permissionMappings := map[string]tab.CloudResourceType{
+		"storage.buckets.list":               tab.GCPResourceBucket,
+		"cloudsql.instances.list":            tab.GCPResourceSQLInstance,
+		"compute.instances.list":             tab.GCPResourceInstance,
+		"compute.zones.list":                 tab.GCPResourceInstance,
+		"compute.regions.list":               tab.GCPResourceInstance,
+		"cloudfunctions.functions.list":      tab.GCPResourceFunction,
+		"run.services.list":                  tab.GCPResourceCloudRunService,
+		"appengine.applications.get":         tab.GCPResourceAppEngineApplication,
+		"artifactregistry.repositories.list": tab.GCRArtifactRepository,
+		"compute.globalForwardingRules.list": tab.GCPResourceGlobalForwardingRule,
+		"compute.globalAddresses.list":       tab.GCPResourceAddress,
+		"dns.managedZones.list":              tab.GCPResourceDNSManagedZone,
+	}
+	for permission, resourceType := range permissionMappings {
+		if strings.Contains(line, permission) {
+			return NewResourceError(projectName, resourceType.String(), "list", "Permission denied").
+				WithErrorCode(403).
+				WithDetails(line)
+		}
+	}
+	return nil
+}
+
 type ResourceError struct {
 	Timestamp    string `json:"timestamp"`
 	Project      string `json:"project"`
@@ -46,7 +92,6 @@ type ResourceError struct {
 	Details      string `json:"details,omitempty"`
 }
 
-// NewResourceError creates a new ResourceError instance
 func NewResourceError(project, resourceType, operation, errorMessage string) *ResourceError {
 	return &ResourceError{
 		Timestamp:    time.Now().UTC().Format(time.RFC3339),
@@ -57,13 +102,11 @@ func NewResourceError(project, resourceType, operation, errorMessage string) *Re
 	}
 }
 
-// WithErrorCode adds an HTTP error code to the ResourceError
 func (re *ResourceError) WithErrorCode(code int) *ResourceError {
 	re.ErrorCode = code
 	return re
 }
 
-// WithDetails adds additional error details to the ResourceError
 func (re *ResourceError) WithDetails(details string) *ResourceError {
 	re.Details = details
 	return re

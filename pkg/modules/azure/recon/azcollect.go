@@ -31,7 +31,6 @@ var AzureGraphCollect = chain.NewModule(
 ).WithLinks(
 	azgraph.NewAzureAuthManagerLink,
 	azgraph.NewAzureCollectorRegistryLink,
-	azgraph.NewAzureNeo4jWriterLink,
 ).WithOutputters(
 	outputters.NewRuntimeJSONOutputter,
-)
+).WithAutoRun()

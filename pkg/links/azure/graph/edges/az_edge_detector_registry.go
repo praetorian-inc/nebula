@@ -1,8 +1,10 @@
 package edges
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/pkg/links/azure/graph/storage"
@@ -11,6 +13,7 @@ import (
 // AzureEdgeDetectorRegistryLink runs edge detectors to create privilege escalation edges
 type AzureEdgeDetectorRegistryLink struct {
 	*chain.Base
+	writer *storage.AZNeo4jWriter
 }
 
 func NewAzureEdgeDetectorRegistryLink(configs ...cfg.Config) chain.Link {
@@ -22,6 +25,10 @@ func NewAzureEdgeDetectorRegistryLink(configs ...cfg.Config) chain.Link {
 func (l *AzureEdgeDetectorRegistryLink) Params() []cfg.Param {
 	return []cfg.Param{
 		cfg.NewParam[[]string]("detectors", "List of edge detectors to run").WithDefault([]string{"all"}),
+		cfg.NewParam[string]("neo4j_uri", "Neo4j connection URI").WithDefault("neo4j://localhost:7687"),
+		cfg.NewParam[string]("neo4j_username", "Neo4j username").WithDefault("neo4j"),
+		cfg.NewParam[string]("neo4j_password", "Neo4j password").WithDefault("neo4j"),
+		cfg.NewParam[string]("neo4j_database", "Neo4j database").WithDefault("neo4j"),
 	}
 }
 
@@ -31,8 +38,12 @@ func (l *AzureEdgeDetectorRegistryLink) Process(data any) error {
 		return fmt.Errorf("expected NodeData, got %T", data)
 	}
 
-	// Get Neo4j writer from context
-	writer := l.Context().Value("neo4j_writer").(*storage.AZNeo4jWriter)
+	// Initialize Neo4j writer if not already done
+	if l.writer == nil {
+		if err := l.initWriter(); err != nil {
+			return err
+		}
+	}
 
 	// Get detectors to run
 	detectorsToRun, _ := cfg.As[[]string](l.Arg("detectors"))
@@ -52,11 +63,11 @@ func (l *AzureEdgeDetectorRegistryLink) Process(data any) error {
 	// In a full implementation, each detector would be a separate struct with its own logic
 
 	if runAll || contains(detectorsToRun, "role-based") {
-		l.detectRoleBasedEscalation(nodeData, writer)
+		l.detectRoleBasedEscalation(nodeData, l.writer)
 	}
 
 	if runAll || contains(detectorsToRun, "ownership") {
-		l.detectOwnershipEscalation(nodeData, writer)
+		l.detectOwnershipEscalation(nodeData, l.writer)
 	}
 
 	l.Logger.Info("Edge detection complete")
@@ -111,6 +122,40 @@ func (l *AzureEdgeDetectorRegistryLink) detectOwnershipEscalation(nodeData *stor
 				}
 			}
 		}
+	}
+}
+
+func (l *AzureEdgeDetectorRegistryLink) initWriter() error {
+	uri, _ := cfg.As[string](l.Arg("neo4j_uri"))
+	username, _ := cfg.As[string](l.Arg("neo4j_username"))
+	password, _ := cfg.As[string](l.Arg("neo4j_password"))
+	database, _ := cfg.As[string](l.Arg("neo4j_database"))
+
+	l.Logger.Info("Connecting to Neo4j for edge detection", "uri", uri, "database", database)
+
+	// Create Neo4j driver
+	driver, err := neo4j.NewDriverWithContext(uri, neo4j.BasicAuth(username, password, ""))
+	if err != nil {
+		return fmt.Errorf("failed to create Neo4j driver: %w", err)
+	}
+
+	// Verify connection
+	err = driver.VerifyConnectivity(l.Context())
+	if err != nil {
+		return fmt.Errorf("failed to connect to Neo4j: %w", err)
+	}
+
+	l.writer = &storage.AZNeo4jWriter{
+		Driver:   driver,
+		Database: database,
+	}
+
+	return nil
+}
+
+func (l *AzureEdgeDetectorRegistryLink) Close() {
+	if l.writer != nil && l.writer.Driver != nil {
+		l.writer.Driver.Close(context.Background())
 	}
 }
 

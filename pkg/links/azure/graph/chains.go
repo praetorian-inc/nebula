@@ -24,16 +24,15 @@ func NewAzureGraphEdgeChain(config cfg.Config) chain.Chain {
 		storage.NewAZNeo4jReaderLink(),
 		edges.NewAzureRelationshipBuilderLink(),
 		edges.NewAzureEdgeDetectorRegistryLink(),
-		storage.NewAZNeo4jWriterLink(),
 	).WithConfigs(config)
 }
 
 // Export link constructors for module usage
 var (
-	NewAzureAuthManagerLink        = client.NewAzureAuthManagerLink
-	NewAzureCollectorRegistryLink  = collectors.NewAzureCollectorRegistryLink
-	NewAzureNeo4jWriterLink        = storage.NewAZNeo4jWriterLink
-	NewAzureNeo4jReaderLink        = storage.NewAZNeo4jReaderLink
-	NewAzureRelationshipBuilderLink = edges.NewAzureRelationshipBuilderLink
+	NewAzureAuthManagerLink          = client.NewAzureAuthManagerLink
+	NewAzureCollectorRegistryLink    = collectors.NewAzureCollectorRegistryLink
+	NewAzureNeo4jWriterLink          = storage.NewAZNeo4jWriterLink
+	NewAzureNeo4jReaderLink          = storage.NewAZNeo4jReaderLink
+	NewAzureRelationshipBuilderLink  = edges.NewAzureRelationshipBuilderLink
 	NewAzureEdgeDetectorRegistryLink = edges.NewAzureEdgeDetectorRegistryLink
 )

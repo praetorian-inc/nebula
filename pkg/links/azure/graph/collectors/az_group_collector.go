@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
-	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/groups"
+	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	graphmodels "github.com/praetorian-inc/nebula/pkg/links/azure/graph/models"
 	"github.com/praetorian-inc/nebula/pkg/links/azure/graph/storage"
 )
@@ -23,15 +23,14 @@ func (c *AZGroupCollector) Priority() int {
 }
 
 func (c *AZGroupCollector) Collect(ctx context.Context, client *msgraphsdk.GraphServiceClient, writer *storage.AZNeo4jWriter) error {
-	// Request specific properties and expand owners/members
+	// Request specific properties without expanding (will fetch members/owners separately)
 	requestConfig := &groups.GroupsRequestBuilderGetRequestConfiguration{
 		QueryParameters: &groups.GroupsRequestBuilderGetQueryParameters{
 			Select: []string{
 				"id", "displayName", "description", "securityEnabled",
 				"mailEnabled", "groupTypes",
 			},
-			Expand: []string{"owners", "members"},
-			Top:    int32Ptr(999), // Max page size
+			Top: int32Ptr(999), // Max page size
 		},
 	}
 
@@ -42,7 +41,7 @@ func (c *AZGroupCollector) Collect(ctx context.Context, client *msgraphsdk.Graph
 
 	// Process groups
 	for _, group := range result.GetValue() {
-		if err := c.processGroup(ctx, group, writer); err != nil {
+		if err := c.processGroup(ctx, group, writer, client); err != nil {
 			// Log but continue
 			continue
 		}
@@ -56,33 +55,31 @@ func (c *AZGroupCollector) Collect(ctx context.Context, client *msgraphsdk.Graph
 	return nil
 }
 
-func (c *AZGroupCollector) processGroup(ctx context.Context, group models.Groupable, writer *storage.AZNeo4jWriter) error {
-	// Extract owners
+func (c *AZGroupCollector) processGroup(ctx context.Context, group models.Groupable, writer *storage.AZNeo4jWriter, client *msgraphsdk.GraphServiceClient) error {
+	// Get group ID
+	groupId := stringValue(group.GetId())
+	if groupId == "" {
+		return fmt.Errorf("group has no ID")
+	}
+
+	// Fetch owners separately
 	var owners []string
-	if group.GetOwners() != nil {
-		for _, owner := range group.GetOwners() {
-			if user, ok := owner.(models.Userable); ok {
-				if user.GetId() != nil {
-					owners = append(owners, *user.GetId())
-				}
-			}
-			if sp, ok := owner.(models.ServicePrincipalable); ok {
-				if sp.GetId() != nil {
-					owners = append(owners, *sp.GetId())
-				}
+	ownersResult, err := client.Groups().ByGroupId(groupId).Owners().Get(ctx, nil)
+	if err == nil && ownersResult != nil {
+		for _, owner := range ownersResult.GetValue() {
+			if owner.GetId() != nil {
+				owners = append(owners, *owner.GetId())
 			}
 		}
 	}
 
-	// Extract members
+	// Fetch members separately
 	var members []string
-	if group.GetMembers() != nil {
-		for _, member := range group.GetMembers() {
-			// Members can be users, groups, service principals, etc.
-			if dirObj, ok := member.(models.DirectoryObjectable); ok {
-				if dirObj.GetId() != nil {
-					members = append(members, *dirObj.GetId())
-				}
+	membersResult, err := client.Groups().ByGroupId(groupId).Members().Get(ctx, nil)
+	if err == nil && membersResult != nil {
+		for _, member := range membersResult.GetValue() {
+			if member.GetId() != nil {
+				members = append(members, *member.GetId())
 			}
 		}
 	}

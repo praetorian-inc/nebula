@@ -32,7 +32,6 @@ var AzureGraphEdge = chain.NewModule(
 	azgraph.NewAzureNeo4jReaderLink,
 	azgraph.NewAzureRelationshipBuilderLink,
 	azgraph.NewAzureEdgeDetectorRegistryLink,
-	azgraph.NewAzureNeo4jWriterLink,
 ).WithOutputters(
 	outputters.NewRuntimeJSONOutputter,
-)
+).WithAutoRun()

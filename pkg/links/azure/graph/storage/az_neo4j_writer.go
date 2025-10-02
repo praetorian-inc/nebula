@@ -14,8 +14,8 @@ import (
 
 // AZNeo4jWriter writes Azure Graph entities to Neo4j
 type AZNeo4jWriter struct {
-	driver    neo4j.DriverWithContext
-	database  string
+	Driver    neo4j.DriverWithContext
+	Database  string
 	nodeCount int
 	mu        sync.Mutex
 }
@@ -62,8 +62,8 @@ func (l *AZNeo4jWriterLink) Process(data any) error {
 	}
 
 	l.writer = &AZNeo4jWriter{
-		driver:   driver,
-		database: database,
+		Driver:   driver,
+		Database: database,
 	}
 
 	// Create indexes for performance
@@ -82,8 +82,8 @@ func (l *AZNeo4jWriterLink) Process(data any) error {
 }
 
 func (l *AZNeo4jWriterLink) Close() {
-	if l.writer != nil && l.writer.driver != nil {
-		l.writer.driver.Close(context.Background())
+	if l.writer != nil && l.writer.Driver != nil {
+		l.writer.Driver.Close(context.Background())
 	}
 }
 
@@ -101,9 +101,9 @@ func (w *AZNeo4jWriter) CreateIndexes(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS FOR (n:AZTenant) ON (n.id)",
 	}
 
-	session := w.driver.NewSession(ctx, neo4j.SessionConfig{
+	session := w.Driver.NewSession(ctx, neo4j.SessionConfig{
 		AccessMode:   neo4j.AccessModeWrite,
-		DatabaseName: w.database,
+		DatabaseName: w.Database,
 	})
 	defer session.Close(ctx)
 
@@ -123,9 +123,9 @@ func (w *AZNeo4jWriter) CreateNode(ctx context.Context, node any) error {
 	w.nodeCount++
 	w.mu.Unlock()
 
-	session := w.driver.NewSession(ctx, neo4j.SessionConfig{
+	session := w.Driver.NewSession(ctx, neo4j.SessionConfig{
 		AccessMode:   neo4j.AccessModeWrite,
-		DatabaseName: w.database,
+		DatabaseName: w.Database,
 	})
 	defer session.Close(ctx)
 
@@ -213,9 +213,9 @@ func (w *AZNeo4jWriter) CreateNode(ctx context.Context, node any) error {
 
 // CreateEdge creates an edge in Neo4j
 func (w *AZNeo4jWriter) CreateEdge(ctx context.Context, fromID, toID, edgeType string, fromLabel, toLabel string) error {
-	session := w.driver.NewSession(ctx, neo4j.SessionConfig{
+	session := w.Driver.NewSession(ctx, neo4j.SessionConfig{
 		AccessMode:   neo4j.AccessModeWrite,
-		DatabaseName: w.database,
+		DatabaseName: w.Database,
 	})
 	defer session.Close(ctx)
 

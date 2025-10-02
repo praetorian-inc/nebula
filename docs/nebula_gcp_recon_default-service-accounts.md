@@ -9,14 +9,14 @@ nebula gcp recon default-service-accounts [flags]
 ### Options
 
 ```
-  -c, --creds-file string     Path to GCP credentials JSON file (required)
-      --filter-sys-projects   filter out system projects from analysis (default true)
-  -h, --help                  help for default-service-accounts
-      --indent int            the number of spaces to use for JSON indentation (default 2)
-      --module-name string    name of the module for dynamic file naming
-  -o, --org strings           GCP organization ID (required)
-      --outfile string        the file to write security findings to (default "security-findings.json")
-      --output string         output directory (default "nebula-output")
+  -c, --creds-file string      Path to GCP credentials JSON file
+  -h, --help                   help for default-service-accounts
+      --include-sys-projects   include system projects from analysis (default true)
+      --indent int             the number of spaces to use for JSON indentation (default 2)
+      --module-name string     name of the module for dynamic file naming
+  -o, --org strings            GCP organization ID
+      --outfile string         the file to write security findings to (default "security-findings.json")
+      --output string          output directory (default "nebula-output")
 ```
 
 ### SEE ALSO

@@ -9,13 +9,13 @@ nebula gcp recon primitive-roles [flags]
 ### Options
 
 ```
-  -c, --creds-file string                  Path to GCP credentials JSON file (required)
+  -c, --creds-file string                  Path to GCP credentials JSON file
       --exclude-default-service-accounts   exclude default service accounts from primitive role detection
-      --filter-sys-projects                filter out system projects from analysis (default true)
   -h, --help                               help for primitive-roles
+      --include-sys-projects               include system projects from analysis (default true)
       --indent int                         the number of spaces to use for JSON indentation (default 2)
       --module-name string                 name of the module for dynamic file naming
-  -o, --org strings                        GCP organization ID (required)
+  -o, --org strings                        GCP organization ID
       --outfile string                     the file to write security findings to (default "security-findings.json")
       --output string                      output directory (default "nebula-output")
 ```

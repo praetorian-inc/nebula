@@ -64,6 +64,7 @@ func NewGcpResourceListRouter(configs ...cfg.Config) chain.Link {
 		options.GcpOrg(),
 		options.GcpFolder(),
 		options.GcpResourceTypes(),
+		options.GcpIncludeSysProjects(),
 	)
 	return r
 }

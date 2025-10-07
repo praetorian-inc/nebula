@@ -41,3 +41,7 @@ func GcpResource() cfg.Param {
 func GcpResourceTypes() cfg.Param {
 	return cfg.NewParam[[]string]("type", "GCP resource types to list").WithDefault([]string{"all"}).WithShortcode("t")
 }
+
+func GcpAssetAPIProject() cfg.Param {
+	return cfg.NewParam[string]("asset-api-project", "GCP project ID where Asset API is enabled (defaults to ADC project for org/folder, scoped project otherwise)").WithDefault("")
+}

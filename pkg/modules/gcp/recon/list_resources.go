@@ -48,12 +48,10 @@ var GcpListResources = chain.NewModule(
 	cfg.WithArg("module-name", "list-resources"),
 ).WithAutoRun()
 
-// routes to chains based on scope and resource types
 type GcpResourceListRouter struct {
 	*chain.Base
 	resourceTypes []string
-	scopeType     string
-	scopeValue    string
+	scope         *common.ScopeConfig
 }
 
 func NewGcpResourceListRouter(configs ...cfg.Config) chain.Link {
@@ -78,39 +76,14 @@ func (r *GcpResourceListRouter) Initialize() error {
 		return fmt.Errorf("failed to get resource types: %w", err)
 	}
 	r.resourceTypes = resourceTypes
-	if len(r.resourceTypes) > 0 && r.resourceTypes[0] != "all" {
-		for _, rt := range r.resourceTypes {
-			if common.ResrouceIdentifier(rt) == tab.ResourceTypeUnknown {
-				return fmt.Errorf("unsupported resource type: %s", rt)
-			}
-		}
+	if err := common.ValidateResourceTypes(r.resourceTypes, common.ResrouceIdentifier); err != nil {
+		return err
 	}
-	// one of org/folder/project needed
-	orgList, _ := cfg.As[[]string](r.Arg("org"))
-	folderList, _ := cfg.As[[]string](r.Arg("folder"))
-	projectList, _ := cfg.As[[]string](r.Arg("project"))
-	scopeCount := 0
-	if len(orgList) > 0 {
-		scopeCount++
-		r.scopeType = "org"
-		r.scopeValue = orgList[0]
+	scope, err := common.ParseScopeArgs(r.Args())
+	if err != nil {
+		return err
 	}
-	if len(folderList) > 0 {
-		scopeCount++
-		r.scopeType = "folder"
-		r.scopeValue = folderList[0]
-	}
-	if len(projectList) > 0 {
-		scopeCount++
-		r.scopeType = "project"
-		r.scopeValue = projectList[0]
-	}
-	if scopeCount == 0 {
-		return fmt.Errorf("must provide exactly one of --org, --folder, or --project")
-	}
-	if scopeCount > 1 {
-		return fmt.Errorf("must provide exactly one of --org, --folder, or --project (got %d)", scopeCount)
-	}
+	r.scope = scope
 	return nil
 }
 
@@ -129,7 +102,6 @@ func (r *GcpResourceListRouter) shouldSendResource(resourceType tab.CloudResourc
 	return false
 }
 
-// check if we should fan out to resources in projects (skip if only hierarchy types requested)
 func (r *GcpResourceListRouter) shouldFanOutToResources() bool {
 	if len(r.resourceTypes) == 0 || r.resourceTypes[0] == "all" {
 		return true
@@ -139,14 +111,14 @@ func (r *GcpResourceListRouter) shouldFanOutToResources() bool {
 		if resType != tab.GCPResourceOrganization &&
 			resType != tab.GCPResourceFolder &&
 			resType != tab.GCPResourceProject {
-			return true // found a non-hierarchy type, so we should fan out
+			return true
 		}
 	}
 	return false
 }
 
 func (r *GcpResourceListRouter) Process(input string) error {
-	switch r.scopeType {
+	switch r.scope.Type {
 	case "org":
 		return r.processOrganization()
 	case "folder":
@@ -154,14 +126,14 @@ func (r *GcpResourceListRouter) Process(input string) error {
 	case "project":
 		return r.processProject()
 	default:
-		return fmt.Errorf("invalid scope type: %s", r.scopeType)
+		return fmt.Errorf("invalid scope type: %s", r.scope.Type)
 	}
 }
 
 func (r *GcpResourceListRouter) processOrganization() error {
 	orgChain := chain.NewChain(hierarchy.NewGcpOrgInfoLink())
 	orgChain.WithConfigs(cfg.WithArgs(r.Args()))
-	orgChain.Send(r.scopeValue)
+	orgChain.Send(r.scope.Value)
 	orgChain.Close()
 	var orgResource *tab.GCPResource
 	for result, ok := chain.RecvAs[*tab.GCPResource](orgChain); ok; result, ok = chain.RecvAs[*tab.GCPResource](orgChain) {
@@ -174,10 +146,9 @@ func (r *GcpResourceListRouter) processOrganization() error {
 		return fmt.Errorf("failed to get organization info: %w", err)
 	}
 	if orgResource == nil {
-		return fmt.Errorf("organization not found: %s", r.scopeValue)
+		return fmt.Errorf("organization not found: %s", r.scope.Value)
 	}
 
-	// List folders if requested
 	if r.shouldSendResource(tab.GCPResourceFolder) {
 		folderChain := chain.NewChain(hierarchy.NewGcpOrgFolderListLink())
 		folderChain.WithConfigs(cfg.WithArgs(r.Args()))
@@ -191,7 +162,6 @@ func (r *GcpResourceListRouter) processOrganization() error {
 		}
 	}
 
-	// Fan out to projects in org hierarchy
 	projectChain := chain.NewChain(hierarchy.NewGcpOrgProjectListLink())
 	projectChain.WithConfigs(cfg.WithArgs(r.Args()))
 	projectChain.Send(*orgResource)
@@ -210,7 +180,7 @@ func (r *GcpResourceListRouter) processOrganization() error {
 func (r *GcpResourceListRouter) processFolder() error {
 	folderChain := chain.NewChain(hierarchy.NewGcpFolderInfoLink())
 	folderChain.WithConfigs(cfg.WithArgs(r.Args()))
-	folderChain.Send(r.scopeValue)
+	folderChain.Send(r.scope.Value)
 	folderChain.Close()
 	var folderResource *tab.GCPResource
 	for result, ok := chain.RecvAs[*tab.GCPResource](folderChain); ok; result, ok = chain.RecvAs[*tab.GCPResource](folderChain) {
@@ -223,10 +193,9 @@ func (r *GcpResourceListRouter) processFolder() error {
 		return fmt.Errorf("failed to get folder info: %w", err)
 	}
 	if folderResource == nil {
-		return fmt.Errorf("folder not found: %s", r.scopeValue)
+		return fmt.Errorf("folder not found: %s", r.scope.Value)
 	}
 
-	// List subfolders if requested
 	if r.shouldSendResource(tab.GCPResourceFolder) {
 		subfolderChain := chain.NewChain(hierarchy.NewGcpFolderSubFolderListLink())
 		subfolderChain.WithConfigs(cfg.WithArgs(r.Args()))
@@ -240,7 +209,6 @@ func (r *GcpResourceListRouter) processFolder() error {
 		}
 	}
 
-	// Fan out to projects in folder
 	projectChain := chain.NewChain(hierarchy.NewGcpFolderProjectListLink())
 	projectChain.WithConfigs(cfg.WithArgs(r.Args()))
 	projectChain.Send(*folderResource)
@@ -259,7 +227,7 @@ func (r *GcpResourceListRouter) processFolder() error {
 func (r *GcpResourceListRouter) processProject() error {
 	projectChain := chain.NewChain(hierarchy.NewGcpProjectInfoLink())
 	projectChain.WithConfigs(cfg.WithArgs(r.Args()))
-	projectChain.Send(r.scopeValue)
+	projectChain.Send(r.scope.Value)
 	projectChain.Close()
 	var projectResource *tab.GCPResource
 	for result, ok := chain.RecvAs[*tab.GCPResource](projectChain); ok; result, ok = chain.RecvAs[*tab.GCPResource](projectChain) {
@@ -272,9 +240,8 @@ func (r *GcpResourceListRouter) processProject() error {
 		return fmt.Errorf("failed to get project info: %w", err)
 	}
 	if projectResource == nil {
-		return fmt.Errorf("project not found: %s", r.scopeValue)
+		return fmt.Errorf("project not found: %s", r.scope.Value)
 	}
-	// Fan out to resources in project
 	if r.shouldFanOutToResources() {
 		return r.fanOutToResources(*projectResource)
 	}
@@ -285,12 +252,11 @@ func (r *GcpResourceListRouter) fanOutToResources(project tab.GCPResource) error
 	if project.ResourceType != tab.GCPResourceProject {
 		return fmt.Errorf("expected project resource, got %s", project.ResourceType)
 	}
-	chains := r.buildResourceChains()
+	chains := buildResourceChains(r.resourceTypes)
 	if len(chains) == 0 {
 		slog.Debug("No resource types to scan", "project", project.Name)
 		return nil
 	}
-	// multi-chain for given resource types
 	multi := chain.NewMulti(chains...)
 	multi.WithConfigs(cfg.WithArgs(r.Args()))
 	multi.WithStrictness(chain.Lax)
@@ -309,15 +275,14 @@ func (r *GcpResourceListRouter) fanOutToResources(project tab.GCPResource) error
 	return nil
 }
 
-// build chains based on resource types
-func (r *GcpResourceListRouter) buildResourceChains() []chain.Link {
+func buildResourceChains(resourceTypes []string) []chain.Link {
 	var chains []chain.Link
-	includeAll := len(r.resourceTypes) == 0 || r.resourceTypes[0] == "all"
+	includeAll := len(resourceTypes) == 0 || resourceTypes[0] == "all"
 	shouldInclude := func(resourceType string) bool {
 		if includeAll {
 			return true
 		}
-		for _, rt := range r.resourceTypes {
+		for _, rt := range resourceTypes {
 			if rt == resourceType {
 				return true
 			}
@@ -328,7 +293,6 @@ func (r *GcpResourceListRouter) buildResourceChains() []chain.Link {
 		return false
 	}
 
-	// Storage resources
 	if shouldInclude("bucket") {
 		chains = append(chains, chain.NewChain(storage.NewGcpStorageBucketListLink()))
 	}
@@ -336,18 +300,15 @@ func (r *GcpResourceListRouter) buildResourceChains() []chain.Link {
 		chains = append(chains, chain.NewChain(storage.NewGcpSQLInstanceListLink()))
 	}
 
-	// Compute resources
 	if shouldInclude("instance") || shouldInclude("vm") {
 		chains = append(chains, chain.NewChain(compute.NewGcpInstanceListLink()))
 	}
 
-	// Networking resources (has its own fanout)
 	if shouldInclude("forwardingrule") || shouldInclude("globalforwardingrule") ||
 		shouldInclude("address") || shouldInclude("dnszone") || shouldInclude("managedzone") {
 		chains = append(chains, chain.NewChain(compute.NewGCPNetworkingFanOut()))
 	}
 
-	// Application resources
 	if shouldInclude("function") || shouldInclude("functionv2") || shouldInclude("functionv1") || shouldInclude("cloudfunction") {
 		chains = append(chains, chain.NewChain(applications.NewGcpFunctionListLink()))
 	}
@@ -358,7 +319,6 @@ func (r *GcpResourceListRouter) buildResourceChains() []chain.Link {
 		chains = append(chains, chain.NewChain(applications.NewGcpAppEngineApplicationListLink()))
 	}
 
-	// Container resources - chained together
 	if shouldInclude("artifactrepo") || shouldInclude("containerimage") ||
 		shouldInclude("dockerimage") || shouldInclude("artifactoryimage") {
 		chains = append(chains, chain.NewChain(

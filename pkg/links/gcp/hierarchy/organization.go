@@ -224,60 +224,6 @@ func (g *GcpOrgProjectListLink) Process(resource tab.GCPResource) error {
 		return fmt.Errorf("failed to list projects in organization %s: %w", orgID, err)
 	}
 	return nil
-
-	// TODO: check the need for this recursion (probably not needed)
-
-	// // list only projects directly under organization
-	// err = listReq.Pages(context.Background(), func(page *cloudresourcemanager.ListProjectsResponse) error {
-	// 	for _, project := range page.Projects {
-	// 		if g.FilterSysProjects && isSysProject(project) {
-	// 			continue
-	// 		}
-	// 		gcpProject, err := createGcpProjectResource(project)
-	// 		if err != nil {
-	// 			slog.Error("Failed to create GCP project resource", "error", err, "projectId", project.ProjectId)
-	// 			continue
-	// 		}
-	// 		g.Send(gcpProject)
-	// 	}
-	// 	return nil
-	// })
-	// if err != nil {
-	// 	slog.Warn("Failed to list projects directly under organization", "orgID", orgID, "error", err)
-	// }
-
-	// // list projects in all folders under organization
-	// v2Service, err := cloudresourcemanagerv2.NewService(context.Background(), g.ClientOptions...)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to create v2 resource manager service: %w", err)
-	// }
-	// folders, err := listAllFolders("organizations/"+orgID, v2Service)
-	// if err != nil {
-	// 	slog.Warn("Error during folder traversal", "orgID", orgID, "error", err)
-	// }
-	// for _, folderPath := range folders {
-	// 	folderID := strings.TrimPrefix(folderPath, "folders/") // strip "folders/" to get folder ID
-	// 	folderListReq := g.resourceManagerService.Projects.List().Filter(fmt.Sprintf("parent.id:%s", folderID))
-	// 	err := folderListReq.Pages(context.Background(), func(page *cloudresourcemanager.ListProjectsResponse) error {
-	// 		for _, project := range page.Projects {
-	// 			if g.FilterSysProjects && isSysProject(project) {
-	// 				continue
-	// 			}
-	// 			gcpProject, err := createGcpProjectResource(project)
-	// 			if err != nil {
-	// 				slog.Error("Failed to create GCP project resource", "error", err, "projectId", project.ProjectId)
-	// 				continue
-	// 			}
-	// 			g.Send(gcpProject)
-	// 		}
-	// 		return nil
-	// 	})
-	// 	if err != nil {
-	// 		slog.Warn("Failed to list projects in folder", "folder", folderPath, "error", err)
-	// 	}
-	// }
-
-	// return nil
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -346,21 +292,4 @@ func traverseFolders(parent string, v2Service *cloudresourcemanagerv2.Service, c
 		return nil
 	})
 	return err
-}
-
-// TODO: remove this function (probably not needed)
-// list all folders recursively under a parent
-func listAllFolders(parent string, v2Service *cloudresourcemanagerv2.Service) ([]string, error) {
-	var allFolders []string
-	err := traverseFolders(parent, v2Service, func(folder *cloudresourcemanagerv2.Folder) error {
-		allFolders = append(allFolders, folder.Name)
-		subfolders, err := listAllFolders(folder.Name, v2Service)
-		if err != nil {
-			slog.Warn("Failed to list subfolders", "parent", folder.Name, "error", err)
-		} else {
-			allFolders = append(allFolders, subfolders...)
-		}
-		return nil
-	})
-	return allFolders, err
 }

@@ -1,6 +1,7 @@
 package common
 
 import (
+	"fmt"
 	"log/slog"
 	"slices"
 
@@ -84,4 +85,15 @@ func resourceIdentifierFromMap(s string, resourceMap map[tab.CloudResourceType][
 	}
 	slog.Error("Unsupported or unknown resource type", "resource", s)
 	return tab.ResourceTypeUnknown
+}
+
+func ValidateResourceTypes(resourceTypes []string, validatorFunc func(string) tab.CloudResourceType) error {
+	if len(resourceTypes) > 0 && resourceTypes[0] != "all" {
+		for _, rt := range resourceTypes {
+			if validatorFunc(rt) == tab.ResourceTypeUnknown {
+				return fmt.Errorf("unsupported resource type: %s", rt)
+			}
+		}
+	}
+	return nil
 }

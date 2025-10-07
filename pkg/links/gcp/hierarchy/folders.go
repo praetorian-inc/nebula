@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
@@ -92,7 +93,8 @@ func (g *GcpFolderSubFolderListLink) Process(resource tab.GCPResource) error {
 		return nil
 	}
 	folderName := resource.Name
-	listReq := g.resourceManagerService.Folders.List().Parent(folderName)
+	folderID := strings.TrimPrefix(folderName, "folders/") // expects ID here
+	listReq := g.resourceManagerService.Folders.List().Parent(folderID)
 	err := listReq.Pages(context.Background(), func(page *cloudresourcemanagerv2.ListFoldersResponse) error {
 		for _, folder := range page.Folders {
 			gcpFolder, err := createGcpFolderResource(folder)
@@ -105,7 +107,7 @@ func (g *GcpFolderSubFolderListLink) Process(resource tab.GCPResource) error {
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to list folders in folder %s: %w", folderName, err)
+		return fmt.Errorf("failed to list folders in folder %s: %w", folderID, err)
 	}
 	return nil
 }
@@ -152,7 +154,8 @@ func (g *GcpFolderProjectListLink) Process(resource tab.GCPResource) error {
 		return nil
 	}
 	folderName := resource.Name
-	listReq := g.resourceManagerService.Projects.List().Filter(fmt.Sprintf("parent.id:%s", folderName))
+	folderID := strings.TrimPrefix(folderName, "folders/") // expects ID here
+	listReq := g.resourceManagerService.Projects.List().Filter(fmt.Sprintf("parent.id:%s", folderID))
 	err := listReq.Pages(context.Background(), func(page *cloudresourcemanager.ListProjectsResponse) error {
 		for _, project := range page.Projects {
 			if !g.IncludeSysProjects && isSysProject(project) {
@@ -168,7 +171,7 @@ func (g *GcpFolderProjectListLink) Process(resource tab.GCPResource) error {
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to list projects in folder %s: %w", folderName, err)
+		return fmt.Errorf("failed to list projects in folder %s: %w", folderID, err)
 	}
 	return nil
 }

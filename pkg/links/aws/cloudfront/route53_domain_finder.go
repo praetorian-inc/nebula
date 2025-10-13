@@ -163,6 +163,12 @@ func (r *Route53DomainFinder) findRoute53Records(client *route53.Client, cloudfr
 				continue
 			}
 
+			// Skip private hosted zones - they're only accessible within VPCs
+			if zone.Config != nil && zone.Config.PrivateZone != nil && *zone.Config.PrivateZone {
+				message.Info("Skipping private hosted zone %s", *zone.Name)
+				continue
+			}
+
 			zoneID := strings.TrimPrefix(*zone.Id, "/hostedzone/")
 			zoneName := strings.TrimSuffix(*zone.Name, ".")
 

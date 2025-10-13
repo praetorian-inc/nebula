@@ -64,7 +64,14 @@ func (c *CloudFrontS3OriginChecker) Process(resource any) error {
 		return nil
 	}
 
-	message.Info("Checking S3 origins for distribution %s (%d origins)", distInfo.ID, len(distInfo.Origins))
+	// Skip distributions that are not enabled
+	if !distInfo.Enabled {
+		message.Info("Skipping disabled distribution %s", distInfo.ID)
+		return nil
+	}
+
+	message.Info("Checking S3 origins for distribution %s (enabled: %t, origins: %d)",
+		distInfo.ID, distInfo.Enabled, len(distInfo.Origins))
 
 	// Check each S3 origin
 	for _, origin := range distInfo.Origins {

@@ -28,6 +28,7 @@ type CloudFrontDistributionInfo struct {
 	Region     string       `json:"region"`
 	AccountID  string       `json:"account_id"`
 	Origins    []OriginInfo `json:"origins"`
+	Enabled    bool         `json:"enabled"`
 }
 
 // OriginInfo contains information about a CloudFront origin
@@ -113,6 +114,11 @@ func (c *CloudFrontDistributionEnumerator) Process(resource any) error {
 				DomainName: *distSummary.DomainName,
 				Region:     region,
 				AccountID:  accountID,
+			}
+
+			// Get enabled status from config
+			if config.Enabled != nil {
+				info.Enabled = *config.Enabled
 			}
 
 			// Get aliases

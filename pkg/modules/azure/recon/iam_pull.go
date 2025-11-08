@@ -4,7 +4,7 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/internal/registry"
-	"github.com/praetorian-inc/nebula/pkg/links/azure"
+	"github.com/praetorian-inc/nebula/pkg/links/azure/iam"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	"github.com/praetorian-inc/nebula/pkg/outputters"
 )
@@ -12,14 +12,14 @@ import (
 var AzureIAMPull = chain.NewModule(
 	cfg.NewMetadata(
 		"Azure IAM Pull - Comprehensive Identity & Access Management Enumeration",
-		"Collects Azure AD, PIM, and Azure Resource Manager data in AzureHunter format. Requires refresh token authentication.",
+		"Collects Azure AD, PIM, and Azure Resource Manager data. Requires refresh token authentication.",
 	).WithProperties(map[string]any{
 		"id":          "iam-pull",
 		"platform":    "azure",
 		"opsec_level": "moderate",
 		"authors":     []string{"Praetorian"},
 		"references":  []string{
-			"https://github.com/praetorian-inc/AzureHunter",
+			"https://learn.microsoft.com/en-us/azure/active-directory/privileged-identity-management/",
 			"https://learn.microsoft.com/en-us/graph/api/overview",
 			"https://learn.microsoft.com/en-us/azure/role-based-access-control/role-assignments-rest",
 		},
@@ -27,7 +27,7 @@ var AzureIAMPull = chain.NewModule(
 ).WithLinks(
 	// Collect ALL Azure data (Graph, PIM, AzureRM) in one comprehensive link
 	// Subscription discovery is handled internally by this link
-	azure.NewIAMComprehensiveCollectorLink,
+	iam.NewIAMComprehensiveCollectorLink,
 ).WithInputParam(
 	options.AzureSubscription(),
 ).WithParams(

@@ -1531,6 +1531,42 @@ func (l *Neo4jImporterLink) createApplicationToServicePrincipalContains(session 
 
 // createPermissionEdges creates HAS_PERMISSION edges for Entra ID directory role assignments
 func (l *Neo4jImporterLink) createPermissionEdges() bool {
+	message.Info("Creating HAS_PERMISSION edges for both Entra ID and Azure RBAC permissions...")
+
+	// Store initial edge count
+	initialEdgeCount := l.edgeCounts["HAS_PERMISSION"]
+
+	// Process Entra ID permissions (existing logic)
+	entraIDEdgesCreated := l.createEntraIDPermissionEdges()
+	entraIDEdgeCount := 0
+	if entraIDEdgesCreated {
+		entraIDEdgeCount = l.edgeCounts["HAS_PERMISSION"] - initialEdgeCount
+	}
+
+	// Process Azure RBAC permissions (new logic)
+	rbacEdgesCreated := l.createRBACPermissionEdges()
+	rbacEdgeCount := 0
+	if rbacEdgesCreated {
+		rbacEdgeCount = l.edgeCounts["HAS_PERMISSION"] - initialEdgeCount - entraIDEdgeCount
+	}
+
+	// Update final total edge count
+	totalEdgesCreated := entraIDEdgeCount + rbacEdgeCount
+	l.edgeCounts["HAS_PERMISSION"] = initialEdgeCount + totalEdgesCreated
+
+	success := entraIDEdgesCreated || rbacEdgesCreated
+	if success {
+		message.Info("✅ Permission edge creation completed successfully!")
+		message.Info("📊 Summary: %d Entra ID edges + %d RBAC edges = %d total HAS_PERMISSION edges", entraIDEdgeCount, rbacEdgeCount, totalEdgesCreated)
+	} else {
+		message.Info("⚠️  No permission edges were created")
+	}
+
+	return success
+}
+
+// createEntraIDPermissionEdges creates HAS_PERMISSION edges for Entra ID directory role assignments
+func (l *Neo4jImporterLink) createEntraIDPermissionEdges() bool {
 	message.Info("Creating HAS_PERMISSION edges for Entra ID roles...")
 
 	// Get Azure AD data
@@ -1649,25 +1685,190 @@ func (l *Neo4jImporterLink) createPermissionEdges() bool {
 		session.Close(ctx)
 
 		if err != nil {
-			l.Logger.Error("Error creating HAS_PERMISSION edges for batch", "error", err, "batch", i/batchSize+1)
+			l.Logger.Error("Error creating Entra ID HAS_PERMISSION edges for batch", "error", err, "batch", i/batchSize+1)
 			continue
 		}
 
 		if edgesCreated, ok := l.convertToInt64(result); ok {
 			totalEdgesCreated += int(edgesCreated)
-			message.Info("Batch %d/%d: Created %d HAS_PERMISSION edges", i/batchSize+1, (len(permissions)+batchSize-1)/batchSize, edgesCreated)
+			message.Info("Batch %d/%d: Created %d Entra ID HAS_PERMISSION edges", i/batchSize+1, (len(permissions)+batchSize-1)/batchSize, edgesCreated)
 		}
 	}
 
 	l.edgeCounts["HAS_PERMISSION"] = totalEdgesCreated
-	message.Info("Created %d total HAS_PERMISSION edges", totalEdgesCreated)
+	message.Info("Created %d total Entra ID HAS_PERMISSION edges", totalEdgesCreated)
 
 	return totalEdgesCreated > 0
 }
 
+// createRBACPermissionEdges creates HAS_PERMISSION edges for Azure RBAC role assignments
+func (l *Neo4jImporterLink) createRBACPermissionEdges() bool {
+	message.Info("Creating HAS_PERMISSION edges for Azure RBAC roles...")
 
+	// Get Azure resources data
+	azureResources := l.getMapValue(l.consolidatedData, "azure_resources")
+	if azureResources == nil {
+		message.Info("No azure_resources data found")
+		return false
+	}
 
-// buildRoleDefinitionsCache builds a cache of role definitions mapped by templateId for permission expansion
+	// Collect all RBAC assignments from all subscriptions
+	var allRBACAssignments []interface{}
+
+	for subscriptionId, subscriptionData := range azureResources {
+		if subData, ok := subscriptionData.(map[string]interface{}); ok {
+			// Process subscription-level RBAC assignments
+			if subRBACAssignments := l.getArrayValue(subData, "subscriptionRoleAssignments"); len(subRBACAssignments) > 0 {
+				allRBACAssignments = append(allRBACAssignments, subRBACAssignments...)
+				l.Logger.Debug("Found subscription RBAC assignments", "subscriptionId", subscriptionId, "count", len(subRBACAssignments))
+			}
+
+			// Process resource group-level RBAC assignments
+			if rgRBACAssignments := l.getArrayValue(subData, "resourceGroupRoleAssignments"); len(rgRBACAssignments) > 0 {
+				allRBACAssignments = append(allRBACAssignments, rgRBACAssignments...)
+				l.Logger.Debug("Found resource group RBAC assignments", "subscriptionId", subscriptionId, "count", len(rgRBACAssignments))
+			}
+
+			// Process resource-level RBAC assignments
+			if resourceRBACAssignments := l.getArrayValue(subData, "resourceLevelRoleAssignments"); len(resourceRBACAssignments) > 0 {
+				allRBACAssignments = append(allRBACAssignments, resourceRBACAssignments...)
+				l.Logger.Debug("Found resource-level RBAC assignments", "subscriptionId", subscriptionId, "count", len(resourceRBACAssignments))
+			}
+		}
+	}
+
+	if len(allRBACAssignments) == 0 {
+		message.Info("No Azure RBAC role assignments found")
+		return false
+	}
+
+	message.Info("Processing %d Azure RBAC role assignments", len(allRBACAssignments))
+
+	// Process RBAC assignments
+	var permissions []map[string]interface{}
+
+	for _, assignment := range allRBACAssignments {
+		assignmentMap, ok := assignment.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Extract assignment properties
+		properties := l.getMapValue(assignmentMap, "properties")
+		if properties == nil {
+			continue
+		}
+
+		principalId := l.getStringValue(properties, "principalId")
+		roleDefinitionId := l.getStringValue(properties, "roleDefinitionId")
+		scope := l.getStringValue(properties, "scope")
+		principalType := l.getStringValue(properties, "principalType")
+
+		if principalId == "" || roleDefinitionId == "" || scope == "" {
+			continue
+		}
+
+		// Expand RBAC role to individual permissions using roleDefinitionId
+		expandedPermissions := l.expandRBACRoleToPermissions(roleDefinitionId)
+
+		// Only process if we have expanded permissions
+		if len(expandedPermissions) > 0 {
+			l.Logger.Debug("Found expanded RBAC permissions", "roleDefinitionId", roleDefinitionId, "permissionCount", len(expandedPermissions))
+			// Create edges for each dangerous permission
+			for _, permission := range expandedPermissions {
+				if l.isDangerousPermission(permission) {
+					l.Logger.Debug("Found dangerous RBAC permission", "roleDefinitionId", roleDefinitionId, "permission", permission, "principalId", principalId)
+					permissions = append(permissions, map[string]interface{}{
+						"principalId":       principalId,
+						"permission":        permission,
+						"scope":             scope,
+						"roleDefinitionId":  roleDefinitionId,
+						"principalType":     principalType,
+						"source":            "Azure RBAC",
+					})
+				}
+			}
+		} else {
+			l.Logger.Debug("No expanded permissions found - skipping RBAC role assignment", "roleDefinitionId", roleDefinitionId)
+		}
+	}
+
+	if len(permissions) == 0 {
+		message.Info("No dangerous Azure RBAC permissions found")
+		return false
+	}
+
+	message.Info("Found %d dangerous Azure RBAC permissions", len(permissions))
+
+	// Process in batches (same as Entra ID)
+	batchSize := 10000
+	totalEdgesCreated := 0
+
+	for i := 0; i < len(permissions); i += batchSize {
+		end := i + batchSize
+		if end > len(permissions) {
+			end = len(permissions)
+		}
+
+		batch := permissions[i:end]
+
+		cypher := `
+		UNWIND $permissions AS perm
+		WITH perm
+		WHERE perm.principalId IS NOT NULL AND perm.permission IS NOT NULL AND perm.scope IS NOT NULL
+		MATCH (principal:Resource {id: perm.principalId})
+		MATCH (target:Resource)
+		WHERE target.id = perm.scope
+		   OR target.id STARTS WITH perm.scope + "/"
+		   OR perm.scope STARTS WITH target.id + "/"
+		CREATE (principal)-[r:HAS_PERMISSION]->(target)
+		SET r.roleDefinitionId = perm.roleDefinitionId,
+			r.permission = perm.permission,
+			r.principalType = perm.principalType,
+			r.source = perm.source,
+			r.scope = perm.scope,
+			r.createdAt = datetime()
+		`
+
+		ctx := context.Background()
+		session := l.driver.NewSession(ctx, neo4j.SessionConfig{})
+
+		result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+			result, err := tx.Run(ctx, cypher, map[string]interface{}{"permissions": batch})
+			if err != nil {
+				return nil, err
+			}
+
+			summary, err := result.Consume(ctx)
+			if err != nil {
+				return nil, err
+			}
+
+			return summary.Counters().RelationshipsCreated(), nil
+		})
+
+		session.Close(ctx)
+
+		if err != nil {
+			l.Logger.Error("Error creating RBAC HAS_PERMISSION edges for batch", "error", err, "batch", i/batchSize+1)
+			continue
+		}
+
+		if edgesCreated, ok := l.convertToInt64(result); ok {
+			totalEdgesCreated += int(edgesCreated)
+			message.Info("Batch %d/%d: Created %d RBAC HAS_PERMISSION edges", i/batchSize+1, (len(permissions)+batchSize-1)/batchSize, edgesCreated)
+		}
+	}
+
+	// Add RBAC edges to the existing HAS_PERMISSION count
+	currentCount := l.edgeCounts["HAS_PERMISSION"]
+	l.edgeCounts["HAS_PERMISSION"] = currentCount + totalEdgesCreated
+
+	message.Info("Created %d total RBAC HAS_PERMISSION edges", totalEdgesCreated)
+	return totalEdgesCreated > 0
+}
+
+// buildRoleDefinitionsCache builds a cache of role definitions mapped by templateId/roleDefinitionId for permission expansion
 func (l *Neo4jImporterLink) buildRoleDefinitionsCache() error {
 	azureAD := l.getMapValue(l.consolidatedData, "azure_ad")
 	if azureAD == nil {
@@ -1675,13 +1876,14 @@ func (l *Neo4jImporterLink) buildRoleDefinitionsCache() error {
 		return fmt.Errorf("❌ No azure_ad section found - cannot perform permission analysis\n💡 Run 'iam-pull' to collect Azure AD data including roleDefinitions")
 	}
 
-	roleDefinitions := l.getArrayValue(azureAD, "roleDefinitions")
-	if len(roleDefinitions) == 0 {
+	// Cache Entra ID role definitions (existing logic)
+	entaaRoleDefinitions := l.getArrayValue(azureAD, "roleDefinitions")
+	if len(entaaRoleDefinitions) == 0 {
 		l.Logger.Error("No roleDefinitions found in data")
 		return fmt.Errorf("❌ No roleDefinitions found in azure_ad data - permission analysis requires roleDefinitions\n💡 Run 'iam-pull' again to collect roleDefinitions with the updated collector")
 	}
 
-	for _, roleDef := range roleDefinitions {
+	for _, roleDef := range entaaRoleDefinitions {
 		if roleDefMap, ok := roleDef.(map[string]interface{}); ok {
 			templateId := l.getStringValue(roleDefMap, "templateId")
 			if templateId != "" {
@@ -1690,7 +1892,28 @@ func (l *Neo4jImporterLink) buildRoleDefinitionsCache() error {
 		}
 	}
 
-	message.Info("Built roleDefinitions cache with %d role definitions", len(l.roleDefinitionsMap))
+	// Cache Azure RBAC role definitions (new)
+	azureResources := l.getMapValue(l.consolidatedData, "azure_resources")
+	if azureResources != nil {
+		rbacRoleCount := 0
+		for _, subscriptionData := range azureResources {
+			if subData, ok := subscriptionData.(map[string]interface{}); ok {
+				rbacRoleDefinitions := l.getArrayValue(subData, "azureRoleDefinitions")
+				for _, roleDef := range rbacRoleDefinitions {
+					if roleDefMap, ok := roleDef.(map[string]interface{}); ok {
+						roleDefinitionId := l.getStringValue(roleDefMap, "name") // RBAC uses "name" field as ID
+						if roleDefinitionId != "" {
+							l.roleDefinitionsMap[roleDefinitionId] = roleDefMap
+							rbacRoleCount++
+						}
+					}
+				}
+			}
+		}
+		l.Logger.Info("Cached %d Azure RBAC role definitions", rbacRoleCount)
+	}
+
+	message.Info("Built roleDefinitions cache with %d total role definitions", len(l.roleDefinitionsMap))
 	return nil
 }
 
@@ -1729,10 +1952,51 @@ func (l *Neo4jImporterLink) expandRoleToPermissions(roleTemplateId string) []str
 	return permissions
 }
 
+// expandRBACRoleToPermissions expands an RBAC role definition to its individual permissions
+func (l *Neo4jImporterLink) expandRBACRoleToPermissions(roleDefinitionId string) []string {
+	var permissions []string
+
+	// Look up role definition by roleDefinitionId
+	roleDef, exists := l.roleDefinitionsMap[roleDefinitionId]
+	if !exists {
+		l.Logger.Debug("RBAC role definition not found", "roleDefinitionId", roleDefinitionId)
+		return permissions
+	}
+
+	roleDefMap, ok := roleDef.(map[string]interface{})
+	if !ok {
+		l.Logger.Debug("Invalid RBAC role definition format", "roleDefinitionId", roleDefinitionId)
+		return permissions
+	}
+
+	// Extract properties.permissions array (RBAC structure differs from Entra ID)
+	properties := l.getMapValue(roleDefMap, "properties")
+	if properties == nil {
+		l.Logger.Debug("No properties found in RBAC role definition", "roleDefinitionId", roleDefinitionId)
+		return permissions
+	}
+
+	rbacPermissions := l.getArrayValue(properties, "permissions")
+	for _, permSet := range rbacPermissions {
+		if permSetMap, ok := permSet.(map[string]interface{}); ok {
+			// Get actions array (RBAC uses "actions" instead of "allowedResourceActions")
+			actions := l.getArrayValue(permSetMap, "actions")
+			for _, action := range actions {
+				if actionStr, ok := action.(string); ok {
+					permissions = append(permissions, actionStr)
+				}
+			}
+		}
+	}
+
+	l.Logger.Debug("Expanded RBAC role to permissions", "roleDefinitionId", roleDefinitionId, "permissionCount", len(permissions))
+	return permissions
+}
+
 // isDangerousPermission checks if a permission is considered dangerous/interesting for security analysis
 func (l *Neo4jImporterLink) isDangerousPermission(permission string) bool {
-	// Define dangerous permissions
-	dangerousPermissions := map[string]bool{
+	// Define dangerous Entra ID permissions
+	entraDangerousPermissions := map[string]bool{
 		// Critical write permissions
 		"microsoft.directory/users/password/update":                       true,
 		"microsoft.directory/users/userPrincipalName/update":              true,
@@ -1768,8 +2032,83 @@ func (l *Neo4jImporterLink) isDangerousPermission(permission string) bool {
 		"microsoft.directory/administrativeUnits/members/update":          true,
 	}
 
-	// Check if explicitly listed as dangerous
-	return dangerousPermissions[permission]
+	// Define dangerous RBAC permissions
+	rbacDangerousPermissions := map[string]bool{
+		// Identity & Access Management - High Priority
+		"Microsoft.Authorization/roleAssignments/write":                   true, // Can grant RBAC permissions
+		"Microsoft.Authorization/roleAssignments/delete":                  true, // Can remove RBAC permissions
+		"Microsoft.Authorization/roleDefinitions/write":                   true, // Can create custom roles
+		"Microsoft.Authorization/roleDefinitions/delete":                  true, // Can delete role definitions
+		"Microsoft.ManagedIdentity/userAssignedIdentities/write":         true, // Can modify managed identities
+		"Microsoft.ManagedIdentity/userAssignedIdentities/assign/action": true, // Can assign managed identities
+
+		// Compute - Direct System Access
+		"Microsoft.Compute/virtualMachines/write":                         true, // Can modify VMs
+		"Microsoft.Compute/virtualMachines/runCommand/action":             true, // Can execute commands on VMs
+		"Microsoft.Compute/virtualMachines/extensions/write":              true, // Can install VM extensions
+		"Microsoft.Compute/virtualMachines/restart/action":                true, // Can restart VMs
+		"Microsoft.Compute/virtualMachines/start/action":                  true, // Can start VMs
+		"Microsoft.Compute/virtualMachineScaleSets/write":                 true, // Can modify VMSS
+		"Microsoft.Compute/virtualMachineScaleSets/extensions/write":      true, // Can install VMSS extensions
+
+		// Storage - Data Access
+		"Microsoft.Storage/storageAccounts/write":                         true, // Can modify storage accounts
+		"Microsoft.Storage/storageAccounts/listKeys/action":               true, // Can list storage keys
+		"Microsoft.Storage/storageAccounts/regeneratekey/action":          true, // Can regenerate storage keys
+		"Microsoft.Storage/storageAccounts/blobServices/containers/write": true, // Can modify containers
+		"Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey/action": true, // Can generate delegation keys
+
+		// Key Vault - Secrets Access
+		"Microsoft.KeyVault/vaults/write":                                 true, // Can modify Key Vault
+		"Microsoft.KeyVault/vaults/delete":                                true, // Can delete Key Vault
+		"Microsoft.KeyVault/vaults/secrets/write":                         true, // Can write secrets
+		"Microsoft.KeyVault/vaults/secrets/delete":                        true, // Can delete secrets
+		"Microsoft.KeyVault/vaults/keys/write":                            true, // Can write keys
+		"Microsoft.KeyVault/vaults/keys/delete":                           true, // Can delete keys
+		"Microsoft.KeyVault/vaults/certificates/write":                    true, // Can write certificates
+		"Microsoft.KeyVault/vaults/accessPolicies/write":                  true, // Can modify access policies
+
+		// Database Access
+		"Microsoft.Sql/servers/write":                                     true, // Can modify SQL servers
+		"Microsoft.Sql/servers/databases/write":                           true, // Can modify databases
+		"Microsoft.Sql/servers/firewallRules/write":                       true, // Can modify firewall rules
+		"Microsoft.Sql/servers/administrators/write":                      true, // Can modify administrators
+		"Microsoft.DocumentDB/databaseAccounts/write":                     true, // Can modify Cosmos DB
+		"Microsoft.DocumentDB/databaseAccounts/listKeys/action":           true, // Can list Cosmos DB keys
+
+		// Networking - Security Controls
+		"Microsoft.Network/networkSecurityGroups/write":                   true, // Can modify NSGs
+		"Microsoft.Network/networkSecurityGroups/securityRules/write":     true, // Can modify NSG rules
+		"Microsoft.Network/routeTables/write":                             true, // Can modify route tables
+		"Microsoft.Network/routeTables/routes/write":                      true, // Can modify routes
+		"Microsoft.Network/virtualNetworks/write":                         true, // Can modify VNets
+		"Microsoft.Network/publicIPAddresses/write":                       true, // Can modify public IPs
+		"Microsoft.Network/azureFirewalls/write":                          true, // Can modify Azure Firewall
+		"Microsoft.Network/applicationGateways/write":                     true, // Can modify App Gateway
+
+		// Container & Kubernetes
+		"Microsoft.ContainerService/managedClusters/write":                true, // Can modify AKS clusters
+		"Microsoft.ContainerService/managedClusters/accessProfiles/listCredential/action": true, // Can get AKS credentials
+		"Microsoft.ContainerRegistry/registries/write":                    true, // Can modify ACR
+		"Microsoft.ContainerRegistry/registries/artifacts/delete":         true, // Can delete container images
+
+		// Resource Management
+		"Microsoft.Resources/subscriptions/write":                         true, // Can modify subscriptions
+		"Microsoft.Resources/subscriptions/resourceGroups/write":          true, // Can modify resource groups
+		"Microsoft.Resources/deployments/write":                           true, // Can deploy ARM templates
+		"Microsoft.Resources/deployments/delete":                          true, // Can delete deployments
+
+		// Privileged Operations
+		"Microsoft.Automation/automationAccounts/write":                   true, // Can modify automation accounts
+		"Microsoft.Automation/automationAccounts/runbooks/write":          true, // Can modify runbooks
+		"Microsoft.Logic/workflows/write":                                 true, // Can modify logic apps
+		"Microsoft.Web/sites/write":                                       true, // Can modify web apps
+		"Microsoft.Web/sites/config/write":                                true, // Can modify web app config
+		"Microsoft.Web/sites/functions/write":                             true, // Can modify functions
+	}
+
+	// Check both Entra ID and RBAC dangerous permissions
+	return entraDangerousPermissions[permission] || rbacDangerousPermissions[permission]
 }
 
 // toJSONString safely converts a map to JSON string with proper escaping

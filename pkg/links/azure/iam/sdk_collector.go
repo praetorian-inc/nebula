@@ -660,23 +660,29 @@ func (l *SDKComprehensiveCollectorLink) collectAllAzureRMDataSDK(subscriptionID 
 
 	// Collection 2: Role Assignments via Authorization SDK (CRITICAL for iam-push compatibility)
 	l.Logger.Info("Collecting role assignments via Authorization SDK")
-	subscriptionRoleAssignments, resourceGroupRoleAssignments, resourceLevelRoleAssignments, err := l.collectAllRoleAssignmentsSDK(subscriptionID)
+	subscriptionRoleAssignments, resourceGroupRoleAssignments, resourceLevelRoleAssignments, managementGroupRoleAssignments, tenantRoleAssignments, err := l.collectAllRoleAssignmentsSDK(subscriptionID)
 	if err != nil {
 		l.Logger.Error("Failed to collect role assignments via SDK", "error", err)
 		// Set empty arrays on error but continue
 		azurermData["subscriptionRoleAssignments"] = []interface{}{}
 		azurermData["resourceGroupRoleAssignments"] = []interface{}{}
 		azurermData["resourceLevelRoleAssignments"] = []interface{}{}
+		azurermData["managementGroupRoleAssignments"] = []interface{}{}
+		azurermData["tenantRoleAssignments"] = []interface{}{}
 	} else {
 		azurermData["subscriptionRoleAssignments"] = subscriptionRoleAssignments
 		azurermData["resourceGroupRoleAssignments"] = resourceGroupRoleAssignments
 		azurermData["resourceLevelRoleAssignments"] = resourceLevelRoleAssignments
+		azurermData["managementGroupRoleAssignments"] = managementGroupRoleAssignments
+		azurermData["tenantRoleAssignments"] = tenantRoleAssignments
 
-		totalCount := len(subscriptionRoleAssignments) + len(resourceGroupRoleAssignments) + len(resourceLevelRoleAssignments)
+		totalCount := len(subscriptionRoleAssignments) + len(resourceGroupRoleAssignments) + len(resourceLevelRoleAssignments) + len(managementGroupRoleAssignments) + len(tenantRoleAssignments)
 		l.Logger.Info("Collected role assignments via SDK", "total", totalCount,
 			"subscription", len(subscriptionRoleAssignments),
 			"resourceGroup", len(resourceGroupRoleAssignments),
-			"resource", len(resourceLevelRoleAssignments))
+			"resource", len(resourceLevelRoleAssignments),
+			"managementGroup", len(managementGroupRoleAssignments),
+			"tenant", len(tenantRoleAssignments))
 	}
 
 	// Collection 3: Role Definitions via Authorization SDK
@@ -704,45 +710,28 @@ func (l *SDKComprehensiveCollectorLink) collectAzureResourcesViaGraphSDK(subscri
 		| project id, name, type, location, resourceGroup, subscriptionId, tags, identity, properties, zones, kind, sku, plan
 		| order by type asc`, subscriptionID)
 
+	resultFormat := armresourcegraph.ResultFormatObjectArray
 	queryRequest := armresourcegraph.QueryRequest{
-		Query: &query,
+		Query:         &query,
 		Subscriptions: []*string{&subscriptionID},
+		Options:       &armresourcegraph.QueryRequestOptions{ResultFormat: &resultFormat},
 	}
 
-	response, err := l.resourceGraphClient.Resources(ctx, queryRequest, nil)
-	if err != nil {
-		return nil, fmt.Errorf("Resource Graph SDK query failed: %v", err)
-	}
-
-	// Convert response to interface{} slice for compatibility
 	var resources []interface{}
-	if response.Data != nil {
-		// The response.Data is typically a map or slice - convert appropriately
-		if dataSlice, ok := response.Data.([]interface{}); ok {
-			resources = dataSlice
-		} else if dataMap, ok := response.Data.(map[string]interface{}); ok {
-			if rows, exists := dataMap["rows"]; exists {
-				if rowsSlice, ok := rows.([]interface{}); ok {
-					// Convert rows to structured objects if needed
-					for _, row := range rowsSlice {
-						if rowSlice, ok := row.([]interface{}); ok && len(rowSlice) > 0 {
-							// Create resource object from row data
-							// This is a simplified conversion - may need refinement
-							resourceObj := map[string]interface{}{
-								"id": rowSlice[0],
-							}
-							if len(rowSlice) > 1 { resourceObj["name"] = rowSlice[1] }
-							if len(rowSlice) > 2 { resourceObj["type"] = rowSlice[2] }
-							if len(rowSlice) > 3 { resourceObj["location"] = rowSlice[3] }
-							if len(rowSlice) > 4 { resourceObj["resourceGroup"] = rowSlice[4] }
-							if len(rowSlice) > 5 { resourceObj["subscriptionId"] = rowSlice[5] }
-
-							resources = append(resources, resourceObj)
-						}
-					}
-				}
-			}
+	for {
+		response, err := l.resourceGraphClient.Resources(ctx, queryRequest, nil)
+		if err != nil {
+			return nil, fmt.Errorf("Resource Graph SDK query failed: %v", err)
 		}
+
+		if response.Data != nil {
+			decodeResourceGraphData(response.Data, &resources)
+		}
+
+		if response.SkipToken == nil || len(*response.SkipToken) == 0 {
+			break
+		}
+		queryRequest.Options.SkipToken = response.SkipToken
 	}
 
 	return resources, nil
@@ -760,38 +749,28 @@ func (l *SDKComprehensiveCollectorLink) collectAzureResourceGroupsSDK(subscripti
 		| project id, name, type, location, subscriptionId, tags, properties
 		| order by name asc`, subscriptionID)
 
+	resultFormat := armresourcegraph.ResultFormatObjectArray
 	queryRequest := armresourcegraph.QueryRequest{
 		Query:         &query,
 		Subscriptions: []*string{&subscriptionID},
+		Options:       &armresourcegraph.QueryRequestOptions{ResultFormat: &resultFormat},
 	}
 
-	response, err := l.resourceGraphClient.Resources(ctx, queryRequest, nil)
-	if err != nil {
-		return nil, fmt.Errorf("Resource Graph SDK query failed for resource groups: %v", err)
-	}
-
-	// Convert response to interface{} slice for compatibility
 	var resourceGroups []interface{}
-
-	if response.Data != nil {
-		if dataSlice, ok := response.Data.([]interface{}); ok {
-			for _, row := range dataSlice {
-				if rowMap, ok := row.(map[string]interface{}); ok {
-					resourceGroups = append(resourceGroups, rowMap)
-				} else if rowSlice, ok := row.([]interface{}); ok && len(rowSlice) > 0 {
-					// Create resource group object from row data
-					rgObj := map[string]interface{}{
-						"id": rowSlice[0],
-					}
-					if len(rowSlice) > 1 { rgObj["name"] = rowSlice[1] }
-					if len(rowSlice) > 2 { rgObj["type"] = rowSlice[2] }
-					if len(rowSlice) > 3 { rgObj["location"] = rowSlice[3] }
-					if len(rowSlice) > 4 { rgObj["subscriptionId"] = rowSlice[4] }
-
-					resourceGroups = append(resourceGroups, rgObj)
-				}
-			}
+	for {
+		response, err := l.resourceGraphClient.Resources(ctx, queryRequest, nil)
+		if err != nil {
+			return nil, fmt.Errorf("Resource Graph SDK query failed for resource groups: %v", err)
 		}
+
+		if response.Data != nil {
+			decodeResourceGraphData(response.Data, &resourceGroups)
+		}
+
+		if response.SkipToken == nil || len(*response.SkipToken) == 0 {
+			break
+		}
+		queryRequest.Options.SkipToken = response.SkipToken
 	}
 
 	return resourceGroups, nil
@@ -813,40 +792,28 @@ func (l *SDKComprehensiveCollectorLink) collectKeyVaultAccessPoliciesSDK(subscri
 		| project id, name, type, location, resourceGroup, subscriptionId, policy
 		| order by name asc`, subscriptionID)
 
+	resultFormat := armresourcegraph.ResultFormatObjectArray
 	queryRequest := armresourcegraph.QueryRequest{
 		Query:         &query,
 		Subscriptions: []*string{&subscriptionID},
+		Options:       &armresourcegraph.QueryRequestOptions{ResultFormat: &resultFormat},
 	}
 
-	response, err := l.resourceGraphClient.Resources(ctx, queryRequest, nil)
-	if err != nil {
-		return nil, fmt.Errorf("Resource Graph SDK query failed for Key Vault access policies: %v", err)
-	}
-
-	// Convert response to interface{} slice for compatibility
 	var accessPolicies []interface{}
-
-	if response.Data != nil {
-		if dataSlice, ok := response.Data.([]interface{}); ok {
-			for _, row := range dataSlice {
-				if rowMap, ok := row.(map[string]interface{}); ok {
-					accessPolicies = append(accessPolicies, rowMap)
-				} else if rowSlice, ok := row.([]interface{}); ok && len(rowSlice) > 0 {
-					// Create access policy object from row data
-					policyObj := map[string]interface{}{
-						"id": rowSlice[0],
-					}
-					if len(rowSlice) > 1 { policyObj["vaultName"] = rowSlice[1] }
-					if len(rowSlice) > 2 { policyObj["type"] = rowSlice[2] }
-					if len(rowSlice) > 3 { policyObj["location"] = rowSlice[3] }
-					if len(rowSlice) > 4 { policyObj["resourceGroup"] = rowSlice[4] }
-					if len(rowSlice) > 5 { policyObj["subscriptionId"] = rowSlice[5] }
-					if len(rowSlice) > 6 { policyObj["policy"] = rowSlice[6] }
-
-					accessPolicies = append(accessPolicies, policyObj)
-				}
-			}
+	for {
+		response, err := l.resourceGraphClient.Resources(ctx, queryRequest, nil)
+		if err != nil {
+			return nil, fmt.Errorf("Resource Graph SDK query failed for Key Vault access policies: %v", err)
 		}
+
+		if response.Data != nil {
+			decodeResourceGraphData(response.Data, &accessPolicies)
+		}
+
+		if response.SkipToken == nil || len(*response.SkipToken) == 0 {
+			break
+		}
+		queryRequest.Options.SkipToken = response.SkipToken
 	}
 
 	return accessPolicies, nil
@@ -954,11 +921,13 @@ func (l *SDKComprehensiveCollectorLink) collectRoleDefinitionsViaSDK(subscriptio
 */
 
 // collectAllRoleAssignmentsSDK collects all role assignments for a subscription using Authorization SDK
-func (l *SDKComprehensiveCollectorLink) collectAllRoleAssignmentsSDK(subscriptionID string) ([]interface{}, []interface{}, []interface{}, error) {
+func (l *SDKComprehensiveCollectorLink) collectAllRoleAssignmentsSDK(subscriptionID string) ([]interface{}, []interface{}, []interface{}, []interface{}, []interface{}, error) {
 	ctx := l.Context()
 	var subscriptionRoleAssignments []interface{}
 	var resourceGroupRoleAssignments []interface{}
 	var resourceLevelRoleAssignments []interface{}
+	var managementGroupRoleAssignments []interface{}
+	var tenantRoleAssignments []interface{}
 
 	l.Logger.Info("Starting role assignments collection via SDK", "subscription", subscriptionID)
 
@@ -1001,7 +970,14 @@ func (l *SDKComprehensiveCollectorLink) collectAllRoleAssignmentsSDK(subscriptio
 			}
 
 			// Determine scope type based on the scope string structure
-			if strings.Contains(scope, "/subscriptions/") {
+			switch {
+			case strings.HasPrefix(scope, "/providers/Microsoft.Management/managementGroups/"):
+				// Management group-level: /providers/Microsoft.Management/managementGroups/{mg-id}
+				managementGroupRoleAssignments = append(managementGroupRoleAssignments, assignmentMap)
+			case scope == "/" || scope == "":
+				// Tenant root-level: / or empty scope
+				tenantRoleAssignments = append(tenantRoleAssignments, assignmentMap)
+			case strings.Contains(scope, "/subscriptions/"):
 				if strings.Count(scope, "/") == 2 {
 					// Subscription-level: /subscriptions/{subscription-id}
 					subscriptionRoleAssignments = append(subscriptionRoleAssignments, assignmentMap)
@@ -1023,9 +999,11 @@ func (l *SDKComprehensiveCollectorLink) collectAllRoleAssignmentsSDK(subscriptio
 		"total", totalCount,
 		"subscriptionLevel", len(subscriptionRoleAssignments),
 		"resourceGroupLevel", len(resourceGroupRoleAssignments),
-		"resourceLevel", len(resourceLevelRoleAssignments))
+		"resourceLevel", len(resourceLevelRoleAssignments),
+		"managementGroupLevel", len(managementGroupRoleAssignments),
+		"tenantLevel", len(tenantRoleAssignments))
 
-	return subscriptionRoleAssignments, resourceGroupRoleAssignments, resourceLevelRoleAssignments, nil
+	return subscriptionRoleAssignments, resourceGroupRoleAssignments, resourceLevelRoleAssignments, managementGroupRoleAssignments, tenantRoleAssignments, nil
 }
 
 // collectAllRoleDefinitionsSDK collects all role definitions for a subscription using Authorization SDK
@@ -1826,5 +1804,39 @@ func (l *SDKComprehensiveCollectorLink) collectAllConditionalAccessPoliciesWithP
 
 	l.Logger.Info("Completed paginated conditional access policy collection", "totalPages", pageCount, "totalObjects", totalObjects)
 	return allPolicies, nil
+}
+
+// decodeResourceGraphData extracts resource data from Resource Graph response and appends to resources slice
+func decodeResourceGraphData(responseData interface{}, resources *[]interface{}) {
+	if responseData == nil {
+		return
+	}
+
+	// The response.Data is typically a map or slice - convert appropriately
+	if dataSlice, ok := responseData.([]interface{}); ok {
+		*resources = append(*resources, dataSlice...)
+	} else if dataMap, ok := responseData.(map[string]interface{}); ok {
+		if rows, exists := dataMap["rows"]; exists {
+			if rowsSlice, ok := rows.([]interface{}); ok {
+				// Convert rows to structured objects if needed
+				for _, row := range rowsSlice {
+					if rowSlice, ok := row.([]interface{}); ok && len(rowSlice) > 0 {
+						// Create resource object from row data
+						// This is a simplified conversion - may need refinement
+						resourceObj := map[string]interface{}{
+							"id": rowSlice[0],
+						}
+						if len(rowSlice) > 1 { resourceObj["name"] = rowSlice[1] }
+						if len(rowSlice) > 2 { resourceObj["type"] = rowSlice[2] }
+						if len(rowSlice) > 3 { resourceObj["location"] = rowSlice[3] }
+						if len(rowSlice) > 4 { resourceObj["resourceGroup"] = rowSlice[4] }
+						if len(rowSlice) > 5 { resourceObj["subscriptionId"] = rowSlice[5] }
+
+						*resources = append(*resources, resourceObj)
+					}
+				}
+			}
+		}
+	}
 }
 

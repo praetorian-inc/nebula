@@ -1743,6 +1743,22 @@ func (l *Neo4jImporterLink) createRBACPermissionEdges() bool {
 				totalAssignments += len(resourceRBACAssignments)
 				l.Logger.Debug("Found resource-level RBAC assignments", "subscriptionId", subscriptionId, "count", len(resourceRBACAssignments))
 			}
+
+			// Process management group-level RBAC assignments
+			if mgRBACAssignments := l.getArrayValue(subData, "managementGroupRoleAssignments"); len(mgRBACAssignments) > 0 {
+				scopePermissions := l.processScopedRBACAssignments(mgRBACAssignments, "managementGroup")
+				permissions = append(permissions, scopePermissions...)
+				totalAssignments += len(mgRBACAssignments)
+				l.Logger.Debug("Found management group RBAC assignments", "subscriptionId", subscriptionId, "count", len(mgRBACAssignments))
+			}
+
+			// Process tenant-level RBAC assignments
+			if tenantRBACAssignments := l.getArrayValue(subData, "tenantRoleAssignments"); len(tenantRBACAssignments) > 0 {
+				scopePermissions := l.processScopedRBACAssignments(tenantRBACAssignments, "tenant")
+				permissions = append(permissions, scopePermissions...)
+				totalAssignments += len(tenantRBACAssignments)
+				l.Logger.Debug("Found tenant-level RBAC assignments", "subscriptionId", subscriptionId, "count", len(tenantRBACAssignments))
+			}
 		}
 	}
 

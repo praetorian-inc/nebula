@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -33,19 +34,19 @@ type ARGScanOutput struct {
 
 // ARGScanMetadata contains information about the scan and template details
 type ARGScanMetadata struct {
-	ScanDate    time.Time                                `json:"scanDate"`
-	TotalCount  int                                      `json:"totalFindings"`
-	Templates   map[string]*templates.ARGQueryTemplate   `json:"templates"`
+	ScanDate   time.Time                              `json:"scanDate"`
+	TotalCount int                                    `json:"totalFindings"`
+	Templates  map[string]*templates.ARGQueryTemplate `json:"templates"`
 }
 
 // ARGScanJSONOutputter is specialized for ARG scan results with template metadata
 type ARGScanJSONOutputter struct {
 	*BaseFileOutputter
-	indent     int
-	findings   []any
-	templates  map[string]*templates.ARGQueryTemplate
-	outfile    string
-	scanDate   time.Time
+	indent    int
+	findings  []any
+	templates map[string]*templates.ARGQueryTemplate
+	outfile   string
+	scanDate  time.Time
 }
 
 // NewARGScanJSONOutputter creates a new ARGScanJSONOutputter
@@ -370,11 +371,28 @@ func (j *ARGScanJSONOutputter) writeTemplateSectionDetail(writer *os.File, templ
 
 	// Findings table
 	fmt.Fprintf(writer, "### Findings\n\n")
+	fmt.Fprintf(writer, "| Resource Name | Resource Type | Location | Subscription | Details | Automated Triage |\n")
+	fmt.Fprintf(writer, "|---------------|---------------|----------|--------------|---------|------------------|\n")
 
-	if hasEnricherCommands {
-		j.writeEnrichedFindingsTable(writer, findings)
-	} else {
-		j.writeStandardFindingsTable(writer, findings)
+	for _, finding := range findings {
+		if finding == nil {
+			continue
+		}
+		resourceName := finding.Name
+		resourceType := string(finding.ResourceType)
+		location := finding.Region
+		subscription := finding.AccountRef
+
+		// Build details string from relevant properties
+		details := j.buildDetailsString(finding.Properties)
+
+		// Format automated triage information from enricher commands
+		automatedTriage := j.formatAutomatedTriage(finding.Properties)
+
+		fmt.Fprintf(writer, "| %s | %s | %s | %s | %s | %s |\n",
+			escapeForMarkdownTable(resourceName), escapeForMarkdownTable(resourceType),
+			escapeForMarkdownTable(location), escapeForMarkdownTable(subscription),
+			details, automatedTriage)
 	}
 
 
@@ -400,40 +418,42 @@ func (j *ARGScanJSONOutputter) writeTemplateSectionDetail(writer *os.File, templ
 func (j *ARGScanJSONOutputter) buildDetailsString(properties map[string]any) string {
 	var details []string
 
-	// Common interesting properties to include
-	interestingProps := []string{
-		"publicNetworkAccess", "publicAccess", "sku", "kind",
-		"minimumTlsVersion", "enableNonSslPort", "hostname",
-		"defaultAction", "bypass", "tags",
-		"publicNetworkAccessForIngestion", "publicNetworkAccessForQuery",
-		"accessType", "authorizedIPs", "publicIPs", "privateIPs",
+	// Include all properties from the ARG query results
+	// Skip internal/noise properties that aren't useful in markdown output
+	skipProps := map[string]bool{
+		"templateID": true, // Internal tracking, not user-relevant
+		"commands":   true, // Commands are displayed separately in Automated Triage column
 	}
 
-	for _, prop := range interestingProps {
-		// Skip enricher commands as they are handled in the enriched table
-		if prop == "commands" {
+	for prop, value := range properties {
+		if skipProps[prop] {
 			continue
 		}
 
-		if value, exists := properties[prop]; exists {
-			// Format the value appropriately
-			switch v := value.(type) {
-			case string:
-				if v != "" {
-					details = append(details, fmt.Sprintf("%s: %s", prop, v))
-				}
-			case bool:
-				details = append(details, fmt.Sprintf("%s: %t", prop, v))
-			case map[string]any:
-				// For complex objects, just indicate presence
-				details = append(details, fmt.Sprintf("%s: [object]", prop))
-			case []any:
-				if len(v) > 0 {
-					details = append(details, fmt.Sprintf("%s: [%d items]", prop, len(v)))
-				}
-			default:
-				details = append(details, fmt.Sprintf("%s: %v", prop, v))
+		// Format the value appropriately
+		switch v := value.(type) {
+		case string:
+			if v != "" {
+				details = append(details, fmt.Sprintf("%s: %s", escapeForMarkdownTable(prop), escapeForMarkdownTable(v)))
 			}
+		case bool:
+			details = append(details, fmt.Sprintf("%s: %t", escapeForMarkdownTable(prop), v))
+		case map[string]any:
+			// For complex objects, just indicate presence
+			details = append(details, fmt.Sprintf("%s: [object]", escapeForMarkdownTable(prop)))
+		case []any:
+			if len(v) == 0 {
+				details = append(details, fmt.Sprintf("%s: none", escapeForMarkdownTable(prop)))
+			} else {
+				// Format array values as comma-separated list
+				var items []string
+				for _, item := range v {
+					items = append(items, escapeForMarkdownTable(fmt.Sprintf("%v", item)))
+				}
+				details = append(details, fmt.Sprintf("%s: %s", escapeForMarkdownTable(prop), strings.Join(items, ", ")))
+			}
+		default:
+			details = append(details, fmt.Sprintf("%s: %v", escapeForMarkdownTable(prop), escapeForMarkdownTable(fmt.Sprintf("%v", v))))
 		}
 	}
 
@@ -467,238 +487,148 @@ func (j *ARGScanJSONOutputter) buildDetailsString(properties map[string]any) str
 	}
 
 	// Limit to reasonable length for table cell
-	result := strings.Join(details, "; ")
-	if len(result) > 200 {
-		result = result[:197] + "..."
-	}
+	result := strings.Join(details, "<br>")
 
 	return result
 }
 
-// findingsHaveEnricherCommands checks if any findings contain enricher commands
-func (j *ARGScanJSONOutputter) findingsHaveEnricherCommands(findings []*model.AzureResource) bool {
-	for _, finding := range findings {
-		if finding != nil && finding.Properties != nil {
-			if commands, exists := finding.Properties["commands"]; exists {
-				if commandSlice, ok := commands.([]any); ok && len(commandSlice) > 0 {
-					return true
+// formatAutomatedTriage formats the commands from enrichers for display in markdown table
+func (j *ARGScanJSONOutputter) formatAutomatedTriage(properties map[string]any) string {
+	// Commands could be either Command structs slice or []any from JSON
+	commandsAny, exists := properties["commands"]
+	if !exists {
+		return "" // Empty cell if no commands
+	}
+
+	var formattedCommands []string
+
+	// Use reflection to handle the Command struct slice
+	commandsValue := reflect.ValueOf(commandsAny)
+	if commandsValue.Kind() == reflect.Slice {
+		for i := 0; i < commandsValue.Len(); i++ {
+			cmd := commandsValue.Index(i)
+			var parts []string
+
+			// Use reflection to get field values from the struct
+			if cmd.Kind() == reflect.Struct {
+				// Handle struct fields using reflection
+				if commandField := cmd.FieldByName("Command"); commandField.IsValid() && commandField.Kind() == reflect.String {
+					if commandVal := commandField.String(); commandVal != "" {
+						// Escape pipe characters and newlines for markdown tables
+						commandVal = escapeForMarkdownTable(commandVal)
+						parts = append(parts, fmt.Sprintf("**Command:** %s", commandVal))
+					}
+				}
+				if descField := cmd.FieldByName("Description"); descField.IsValid() && descField.Kind() == reflect.String {
+					if descVal := descField.String(); descVal != "" {
+						descVal = escapeForMarkdownTable(descVal)
+						parts = append(parts, fmt.Sprintf("**Description:** %s", descVal))
+					}
+				}
+				if expectedField := cmd.FieldByName("ExpectedOutputDescription"); expectedField.IsValid() && expectedField.Kind() == reflect.String {
+					if expectedVal := expectedField.String(); expectedVal != "" {
+						expectedVal = escapeForMarkdownTable(expectedVal)
+						parts = append(parts, fmt.Sprintf("**Expected:** %s", expectedVal))
+					}
+				}
+				if actualField := cmd.FieldByName("ActualOutput"); actualField.IsValid() && actualField.Kind() == reflect.String {
+					if actualVal := actualField.String(); actualVal != "" {
+						// Truncate very long output and escape
+						if len(actualVal) > 1000 {
+							actualVal = actualVal[:997] + "..."
+						}
+						actualVal = escapeForMarkdownTable(actualVal)
+						parts = append(parts, fmt.Sprintf("**Actual:** %s", actualVal))
+					}
+				}
+				if exitCodeField := cmd.FieldByName("ExitCode"); exitCodeField.IsValid() && exitCodeField.Kind() == reflect.Int {
+					parts = append(parts, fmt.Sprintf("**Exit Code:** %d", exitCodeField.Int()))
+				}
+				if errorField := cmd.FieldByName("Error"); errorField.IsValid() && errorField.Kind() == reflect.String {
+					if errorVal := errorField.String(); errorVal != "" {
+						errorVal = escapeForMarkdownTable(errorVal)
+						parts = append(parts, fmt.Sprintf("**Error:** %s", errorVal))
+					}
+				}
+			} else if cmdInterface := cmd.Interface(); cmdInterface != nil {
+				// Handle as map[string]any (from JSON unmarshalling)
+				if cmdMap, ok := cmdInterface.(map[string]any); ok {
+					// Format each field if present
+					if command, ok := cmdMap["command"].(string); ok && command != "" {
+						command = escapeForMarkdownTable(command)
+						parts = append(parts, fmt.Sprintf("**Command:** %s", command))
+					}
+					if desc, ok := cmdMap["description"].(string); ok && desc != "" {
+						desc = escapeForMarkdownTable(desc)
+						parts = append(parts, fmt.Sprintf("**Description:** %s", desc))
+					}
+					if expected, ok := cmdMap["expected_output_description"].(string); ok && expected != "" {
+						expected = escapeForMarkdownTable(expected)
+						parts = append(parts, fmt.Sprintf("**Expected:** %s", expected))
+					}
+					if actual, ok := cmdMap["actual_output"].(string); ok && actual != "" {
+						// Truncate very long output and escape
+						if len(actual) > 1000 {
+							actual = actual[:997] + "..."
+						}
+						actual = escapeForMarkdownTable(actual)
+						parts = append(parts, fmt.Sprintf("**Actual:** %s", actual))
+					}
+					// Handle exit_code which could be int or float64 from JSON
+					if exitCodeRaw, exists := cmdMap["exit_code"]; exists {
+						switch v := exitCodeRaw.(type) {
+						case int:
+							parts = append(parts, fmt.Sprintf("**Exit Code:** %d", v))
+						case float64:
+							parts = append(parts, fmt.Sprintf("**Exit Code:** %d", int(v)))
+						}
+					}
+					if error, ok := cmdMap["error"].(string); ok && error != "" {
+						error = escapeForMarkdownTable(error)
+						parts = append(parts, fmt.Sprintf("**Error:** %s", error))
+					}
 				}
 			}
+
+			// Join with <br> for line breaks within table cell
+			if len(parts) > 0 {
+				formattedCommands = append(formattedCommands, strings.Join(parts, "<br>"))
+			}
 		}
 	}
-	return false
+
+	// Join multiple commands with double line break separator
+	if len(formattedCommands) > 0 {
+		return strings.Join(formattedCommands, "<br><br>")
+	}
+	return ""
 }
 
-// writeStandardFindingsTable writes the traditional findings table format
-func (j *ARGScanJSONOutputter) writeStandardFindingsTable(writer *os.File, findings []*model.AzureResource) {
-	fmt.Fprintf(writer, "| Resource Name | Resource Type | Location | Subscription | Details |\n")
-	fmt.Fprintf(writer, "|---------------|---------------|----------|--------------|----------|\n")
+// escapeForMarkdownTable escapes special characters that break markdown tables
+func escapeForMarkdownTable(s string) string {
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		`*`, `\*`,
+		`_`, `\_`,
+		"`", "\\`",
+		`[`, `\[`,
+		`]`, `\]`,
+		`(`, `\(`,
+		`)`, `\)`,
+		`#`, `\#`,
+		`+`, `\+`,
+		`-`, `\-`,
+		`.`, `\.`,
+		`!`, `\!`,
+		`{`, `\{`,
+		`}`, `\}`,
+		`|`, `\|`,
+		`>`, `\>`,
+	)
 
-	for _, finding := range findings {
-		if finding == nil {
-			continue
-		}
-		resourceName := finding.Name
-		resourceType := string(finding.ResourceType)
-		location := finding.Region
-		subscription := finding.AccountRef
-
-		// Build details string from relevant properties (excluding commands)
-		details := j.buildDetailsString(finding.Properties)
-
-		fmt.Fprintf(writer, "| %s | %s | %s | %s | %s |\n",
-			resourceName, resourceType, location, subscription, details)
-	}
-}
-
-// writeEnrichedFindingsTable writes the enhanced findings table with enricher commands
-func (j *ARGScanJSONOutputter) writeEnrichedFindingsTable(writer *os.File, findings []*model.AzureResource) {
-	fmt.Fprintf(writer, "| Resource Name | Type | Location | Test Command | Expected Result | Actual Result | Status |\n")
-	fmt.Fprintf(writer, "|---------------|------|----------|--------------|-----------------|---------------|--------|\n")
-
-	var additionalCommands []struct {
-		resourceName string
-		commands     []any
-	}
-
-	for _, finding := range findings {
-		if finding == nil {
-			continue
-		}
-
-		resourceName := finding.Name
-		resourceType := string(finding.ResourceType)
-		location := finding.Region
-
-		// Check for enricher commands
-		if commands, exists := finding.Properties["commands"]; exists {
-			if commandSlice, ok := commands.([]any); ok && len(commandSlice) > 0 {
-				// Use the first command for the main table
-				firstCommand := j.extractCommandInfo(commandSlice[0])
-				status := j.interpretTestStatus(firstCommand)
-
-				fmt.Fprintf(writer, "| %s | %s | %s | `%s` | %s | %s | %s |\n",
-					resourceName, resourceType, location,
-					j.truncateCommand(firstCommand.Command),
-					firstCommand.ExpectedOutputDescription,
-					j.summarizeActualOutput(firstCommand.ActualOutput),
-					status)
-
-				// Store additional commands if there are more than one
-				if len(commandSlice) > 1 {
-					additionalCommands = append(additionalCommands, struct {
-						resourceName string
-						commands     []any
-					}{resourceName, commandSlice[1:]})
-				}
-			}
-		} else {
-			// No enricher commands, use basic info with standard details
-			details := j.buildDetailsString(finding.Properties)
-			fmt.Fprintf(writer, "| %s | %s | %s | No test available | Manual review required | %s | ⚠ |\n",
-				resourceName, resourceType, location, details)
-		}
-	}
-
-	// Write additional commands section if any exist
-	if len(additionalCommands) > 0 {
-		fmt.Fprintf(writer, "\n### Additional Test Commands\n\n")
-		for _, resource := range additionalCommands {
-			fmt.Fprintf(writer, "#### %s\n\n", resource.resourceName)
-			for i, cmd := range resource.commands {
-				commandInfo := j.extractCommandInfo(cmd)
-				fmt.Fprintf(writer, "```bash\n# Command %d: %s\n%s\n# Expected: %s\n```\n\n",
-					i+2, commandInfo.Description, commandInfo.Command, commandInfo.ExpectedOutputDescription)
-			}
-		}
-	}
-}
-
-// extractCommandInfo converts command interface{} to Command struct
-func (j *ARGScanJSONOutputter) extractCommandInfo(cmdInterface any) Command {
-	var cmd Command
-
-	if cmdMap, ok := cmdInterface.(map[string]any); ok {
-		if command, exists := cmdMap["command"]; exists {
-			if commandStr, ok := command.(string); ok {
-				cmd.Command = commandStr
-			}
-		}
-		if description, exists := cmdMap["description"]; exists {
-			if descStr, ok := description.(string); ok {
-				cmd.Description = descStr
-			}
-		}
-		if expected, exists := cmdMap["expected_output_description"]; exists {
-			if expectedStr, ok := expected.(string); ok {
-				cmd.ExpectedOutputDescription = expectedStr
-			}
-		}
-		if actualOutput, exists := cmdMap["actual_output"]; exists {
-			if actualStr, ok := actualOutput.(string); ok {
-				cmd.ActualOutput = actualStr
-			}
-		}
-		if exitCode, exists := cmdMap["exit_code"]; exists {
-			if exitCodeInt, ok := exitCode.(int); ok {
-				cmd.ExitCode = exitCodeInt
-			} else if exitCodeFloat, ok := exitCode.(float64); ok {
-				cmd.ExitCode = int(exitCodeFloat)
-			}
-		}
-		if errorMsg, exists := cmdMap["error"]; exists {
-			if errorStr, ok := errorMsg.(string); ok {
-				cmd.Error = errorStr
-			}
-		}
-	}
-
-	return cmd
-}
-
-// interpretTestStatus determines the status symbol based on command results
-func (j *ARGScanJSONOutputter) interpretTestStatus(cmd Command) string {
-	if cmd.Error != "" {
-		return "⚠" // Warning - error occurred
-	}
-
-	if cmd.ActualOutput == "Manual execution required" || cmd.Command == "" {
-		return "⚠" // Warning - manual verification needed
-	}
-
-	// HTTP status code interpretation for web services
-	if cmd.ExitCode > 0 {
-		switch cmd.ExitCode {
-		case 401, 403: // Unauthorized/Forbidden - good for security
-			return "✓"
-		case 200: // OK - potentially bad if anonymous access expected to be blocked
-			if strings.Contains(strings.ToLower(cmd.ExpectedOutputDescription), "anonymous access") {
-				return "✗" // Fail - anonymous access is working
-			}
-			return "✓"
-		case 404: // Not found - could be good or bad depending on context
-			if strings.Contains(strings.ToLower(cmd.ExpectedOutputDescription), "404") {
-				return "✓" // Expected 404
-			}
-			return "⚠"
-		case 409: // Conflict - often means public access disabled
-			if strings.Contains(strings.ToLower(cmd.ActualOutput), "public access") {
-				return "✓" // Public access is disabled
-			}
-			return "⚠"
-		default:
-			return "⚠" // Unknown status
-		}
-	}
-
-	return "⚠" // Default to warning for unknown cases
-}
-
-// truncateCommand shortens long commands for table display
-func (j *ARGScanJSONOutputter) truncateCommand(command string) string {
-	if len(command) <= 60 {
-		return command
-	}
-	return command[:57] + "..."
-}
-
-// summarizeActualOutput creates a brief summary of the actual output
-func (j *ARGScanJSONOutputter) summarizeActualOutput(actualOutput string) string {
-	if actualOutput == "" {
-		return "No output"
-	}
-
-	if actualOutput == "Manual execution required" {
-		return "Manual execution required"
-	}
-
-	// Extract key information from output
-	if strings.Contains(actualOutput, "Body:") {
-		// For HTTP responses, extract status-like information
-		if strings.Contains(actualOutput, "Unauthorized") {
-			return "Unauthorized (401)"
-		}
-		if strings.Contains(actualOutput, "Forbidden") {
-			return "Forbidden (403)"
-		}
-		if strings.Contains(actualOutput, "Not Found") {
-			return "Not Found (404)"
-		}
-		if strings.Contains(actualOutput, "public access") {
-			if strings.Contains(strings.ToLower(actualOutput), "not permitted") ||
-			   strings.Contains(strings.ToLower(actualOutput), "disabled") {
-				return "Public access disabled"
-			}
-			return "Public access enabled"
-		}
-	}
-
-	// Truncate long outputs
-	if len(actualOutput) > 80 {
-		return actualOutput[:77] + "..."
-	}
-
-	return actualOutput
+	// Collapse multiple spaces
+	s = strings.Join(strings.Fields(replacer.Replace(s)), " ")
+	return s
 }
 
 // Params defines the parameters accepted by this outputter

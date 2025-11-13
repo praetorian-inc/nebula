@@ -366,8 +366,6 @@ func (j *ARGScanJSONOutputter) writeTemplateSectionDetail(writer *os.File, templ
 	fmt.Fprintf(writer, "**Severity:** %s\n\n", template.Severity)
 	fmt.Fprintf(writer, "**Template ID:** %s\n\n", template.ID)
 
-	// Check if any findings have enricher commands
-	hasEnricherCommands := j.findingsHaveEnricherCommands(findings)
 
 	// Findings table
 	fmt.Fprintf(writer, "### Findings\n\n")
@@ -457,34 +455,6 @@ func (j *ARGScanJSONOutputter) buildDetailsString(properties map[string]any) str
 		}
 	}
 
-	// Also skip the commands property if it exists in properties but not in interestingProps
-	for prop, value := range properties {
-		if prop == "commands" || prop == "templateID" {
-			continue // Skip enricher-specific properties
-		}
-
-		// Only add if not already in interestingProps to avoid duplication
-		alreadyIncluded := false
-		for _, intProp := range interestingProps {
-			if prop == intProp {
-				alreadyIncluded = true
-				break
-			}
-		}
-
-		if !alreadyIncluded && len(details) < 10 { // Limit additional properties
-			switch v := value.(type) {
-			case string:
-				if v != "" && len(v) < 50 { // Keep short strings only
-					details = append(details, fmt.Sprintf("%s: %s", prop, v))
-				}
-			case bool:
-				details = append(details, fmt.Sprintf("%s: %t", prop, v))
-			case int, int64, float64:
-				details = append(details, fmt.Sprintf("%s: %v", prop, v))
-			}
-		}
-	}
 
 	// Limit to reasonable length for table cell
 	result := strings.Join(details, "<br>")

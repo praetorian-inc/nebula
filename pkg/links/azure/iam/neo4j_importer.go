@@ -1613,8 +1613,8 @@ func (l *Neo4jImporterLink) createEntraIDPermissionEdges() bool {
 			l.Logger.Debug("Found expanded permissions", "roleName", roleName, "permissionCount", len(expandedPermissions))
 			// Create edges for each dangerous permission
 			for _, permission := range expandedPermissions {
-				if l.isDangerousPermission(permission) {
-					l.Logger.Debug("Found dangerous permission", "roleName", roleName, "permission", permission, "principalId", principalId)
+				if l.isDangerousEntraPermission(permission) {
+					l.Logger.Debug("Found dangerous Entra permission", "roleName", roleName, "permission", permission, "principalId", principalId)
 					permissions = append(permissions, map[string]interface{}{
 						"principalId":   principalId,
 						"permission":    permission,
@@ -1712,86 +1712,46 @@ func (l *Neo4jImporterLink) createRBACPermissionEdges() bool {
 		return false
 	}
 
-	// Collect all RBAC assignments from all subscriptions
-	var allRBACAssignments []interface{}
+	// Process RBAC assignments by scope (no flattening - maintain hierarchy)
+	var permissions []map[string]interface{}
+	totalAssignments := 0
 
 	for subscriptionId, subscriptionData := range azureResources {
 		if subData, ok := subscriptionData.(map[string]interface{}); ok {
+			// Process each scope type separately to create edges only at granted level
+
 			// Process subscription-level RBAC assignments
 			if subRBACAssignments := l.getArrayValue(subData, "subscriptionRoleAssignments"); len(subRBACAssignments) > 0 {
-				allRBACAssignments = append(allRBACAssignments, subRBACAssignments...)
+				scopePermissions := l.processScopedRBACAssignments(subRBACAssignments, "subscription")
+				permissions = append(permissions, scopePermissions...)
+				totalAssignments += len(subRBACAssignments)
 				l.Logger.Debug("Found subscription RBAC assignments", "subscriptionId", subscriptionId, "count", len(subRBACAssignments))
 			}
 
 			// Process resource group-level RBAC assignments
 			if rgRBACAssignments := l.getArrayValue(subData, "resourceGroupRoleAssignments"); len(rgRBACAssignments) > 0 {
-				allRBACAssignments = append(allRBACAssignments, rgRBACAssignments...)
+				scopePermissions := l.processScopedRBACAssignments(rgRBACAssignments, "resourceGroup")
+				permissions = append(permissions, scopePermissions...)
+				totalAssignments += len(rgRBACAssignments)
 				l.Logger.Debug("Found resource group RBAC assignments", "subscriptionId", subscriptionId, "count", len(rgRBACAssignments))
 			}
 
 			// Process resource-level RBAC assignments
 			if resourceRBACAssignments := l.getArrayValue(subData, "resourceLevelRoleAssignments"); len(resourceRBACAssignments) > 0 {
-				allRBACAssignments = append(allRBACAssignments, resourceRBACAssignments...)
+				scopePermissions := l.processScopedRBACAssignments(resourceRBACAssignments, "resource")
+				permissions = append(permissions, scopePermissions...)
+				totalAssignments += len(resourceRBACAssignments)
 				l.Logger.Debug("Found resource-level RBAC assignments", "subscriptionId", subscriptionId, "count", len(resourceRBACAssignments))
 			}
 		}
 	}
 
-	if len(allRBACAssignments) == 0 {
+	if totalAssignments == 0 {
 		message.Info("No Azure RBAC role assignments found")
 		return false
 	}
 
-	message.Info("Processing %d Azure RBAC role assignments", len(allRBACAssignments))
-
-	// Process RBAC assignments
-	var permissions []map[string]interface{}
-
-	for _, assignment := range allRBACAssignments {
-		assignmentMap, ok := assignment.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		// Extract assignment properties
-		properties := l.getMapValue(assignmentMap, "properties")
-		if properties == nil {
-			continue
-		}
-
-		principalId := l.getStringValue(properties, "principalId")
-		roleDefinitionId := l.getStringValue(properties, "roleDefinitionId")
-		scope := l.getStringValue(properties, "scope")
-		principalType := l.getStringValue(properties, "principalType")
-
-		if principalId == "" || roleDefinitionId == "" || scope == "" {
-			continue
-		}
-
-		// Expand RBAC role to individual permissions using roleDefinitionId
-		expandedPermissions := l.expandRBACRoleToPermissions(roleDefinitionId)
-
-		// Only process if we have expanded permissions
-		if len(expandedPermissions) > 0 {
-			l.Logger.Debug("Found expanded RBAC permissions", "roleDefinitionId", roleDefinitionId, "permissionCount", len(expandedPermissions))
-			// Create edges for each dangerous permission
-			for _, permission := range expandedPermissions {
-				if l.isDangerousPermission(permission) {
-					l.Logger.Debug("Found dangerous RBAC permission", "roleDefinitionId", roleDefinitionId, "permission", permission, "principalId", principalId)
-					permissions = append(permissions, map[string]interface{}{
-						"principalId":       principalId,
-						"permission":        permission,
-						"scope":             scope,
-						"roleDefinitionId":  roleDefinitionId,
-						"principalType":     principalType,
-						"source":            "Azure RBAC",
-					})
-				}
-			}
-		} else {
-			l.Logger.Debug("No expanded permissions found - skipping RBAC role assignment", "roleDefinitionId", roleDefinitionId)
-		}
-	}
+	message.Info("Found %d dangerous Azure RBAC permissions", len(permissions))
 
 	if len(permissions) == 0 {
 		message.Info("No dangerous Azure RBAC permissions found")
@@ -1815,18 +1775,16 @@ func (l *Neo4jImporterLink) createRBACPermissionEdges() bool {
 		cypher := `
 		UNWIND $permissions AS perm
 		WITH perm
-		WHERE perm.principalId IS NOT NULL AND perm.permission IS NOT NULL AND perm.scope IS NOT NULL
+		WHERE perm.principalId IS NOT NULL AND perm.permission IS NOT NULL AND perm.targetResourceId IS NOT NULL
 		MATCH (principal:Resource {id: perm.principalId})
-		MATCH (target:Resource)
-		WHERE target.id = perm.scope
-		   OR target.id STARTS WITH perm.scope + "/"
-		   OR perm.scope STARTS WITH target.id + "/"
+		MATCH (target:Resource {id: perm.targetResourceId})
 		CREATE (principal)-[r:HAS_PERMISSION]->(target)
 		SET r.roleDefinitionId = perm.roleDefinitionId,
 			r.permission = perm.permission,
 			r.principalType = perm.principalType,
 			r.source = perm.source,
-			r.scope = perm.scope,
+			r.grantedAt = perm.grantedAt,
+			r.targetResourceType = perm.targetResourceType,
 			r.createdAt = datetime()
 		`
 
@@ -1901,7 +1859,7 @@ func (l *Neo4jImporterLink) buildRoleDefinitionsCache() error {
 				rbacRoleDefinitions := l.getArrayValue(subData, "azureRoleDefinitions")
 				for _, roleDef := range rbacRoleDefinitions {
 					if roleDefMap, ok := roleDef.(map[string]interface{}); ok {
-						roleDefinitionId := l.getStringValue(roleDefMap, "name") // RBAC uses "name" field as ID
+						roleDefinitionId := l.getStringValue(roleDefMap, "id") // RBAC uses "id" field as full path ID
 						if roleDefinitionId != "" {
 							l.roleDefinitionsMap[roleDefinitionId] = roleDefMap
 							rbacRoleCount++
@@ -1956,6 +1914,8 @@ func (l *Neo4jImporterLink) expandRoleToPermissions(roleTemplateId string) []str
 func (l *Neo4jImporterLink) expandRBACRoleToPermissions(roleDefinitionId string) []string {
 	var permissions []string
 
+	l.Logger.Debug("Attempting to expand RBAC role", "roleDefinitionId", roleDefinitionId)
+
 	// Look up role definition by roleDefinitionId
 	roleDef, exists := l.roleDefinitionsMap[roleDefinitionId]
 	if !exists {
@@ -1963,34 +1923,60 @@ func (l *Neo4jImporterLink) expandRBACRoleToPermissions(roleDefinitionId string)
 		return permissions
 	}
 
+	l.Logger.Debug("Found RBAC role definition", "roleDefinitionId", roleDefinitionId)
+
 	roleDefMap, ok := roleDef.(map[string]interface{})
 	if !ok {
 		l.Logger.Debug("Invalid RBAC role definition format", "roleDefinitionId", roleDefinitionId)
 		return permissions
 	}
 
-	// Extract properties.permissions array (RBAC structure differs from Entra ID)
-	properties := l.getMapValue(roleDefMap, "properties")
-	if properties == nil {
-		l.Logger.Debug("No properties found in RBAC role definition", "roleDefinitionId", roleDefinitionId)
-		return permissions
+	// Handle both SDK collector format (direct permissions array) and legacy Azure REST API format (properties.permissions)
+	var rbacPermissions []interface{}
+
+	// Try SDK collector format first: permissions[] directly on role definition
+	if directPermissions := l.getArrayValue(roleDefMap, "permissions"); len(directPermissions) > 0 {
+		l.Logger.Debug("Using SDK collector format for RBAC permissions", "roleDefinitionId", roleDefinitionId)
+		rbacPermissions = directPermissions
+	} else {
+		// Fallback to Azure REST API format: properties.permissions[]
+		l.Logger.Debug("Using Azure REST API format for RBAC permissions", "roleDefinitionId", roleDefinitionId)
+		properties := l.getMapValue(roleDefMap, "properties")
+		if properties == nil {
+			l.Logger.Debug("No properties found in RBAC role definition", "roleDefinitionId", roleDefinitionId)
+			return permissions
+		}
+		rbacPermissions = l.getArrayValue(properties, "permissions")
 	}
 
-	rbacPermissions := l.getArrayValue(properties, "permissions")
+	// Process permissions array
 	for _, permSet := range rbacPermissions {
 		if permSetMap, ok := permSet.(map[string]interface{}); ok {
-			// Get actions array (RBAC uses "actions" instead of "allowedResourceActions")
+			// Get actions array (RBAC uses "actions" for both formats)
 			actions := l.getArrayValue(permSetMap, "actions")
+			l.Logger.Debug("Processing RBAC permission set", "roleDefinitionId", roleDefinitionId, "actionCount", len(actions))
 			for _, action := range actions {
 				if actionStr, ok := action.(string); ok {
 					permissions = append(permissions, actionStr)
+					l.Logger.Debug("Found RBAC action", "roleDefinitionId", roleDefinitionId, "action", actionStr)
 				}
 			}
 		}
 	}
 
 	l.Logger.Debug("Expanded RBAC role to permissions", "roleDefinitionId", roleDefinitionId, "permissionCount", len(permissions))
+	if len(permissions) > 0 {
+		l.Logger.Debug("Sample RBAC permissions", "roleDefinitionId", roleDefinitionId, "first5Permissions", l.getSamplePermissions(permissions, 5))
+	}
 	return permissions
+}
+
+// getSamplePermissions returns first n permissions for debugging
+func (l *Neo4jImporterLink) getSamplePermissions(permissions []string, n int) []string {
+	if len(permissions) <= n {
+		return permissions
+	}
+	return permissions[:n]
 }
 
 // isDangerousPermission checks if a permission is considered dangerous/interesting for security analysis
@@ -2109,6 +2095,381 @@ func (l *Neo4jImporterLink) isDangerousPermission(permission string) bool {
 
 	// Check both Entra ID and RBAC dangerous permissions
 	return entraDangerousPermissions[permission] || rbacDangerousPermissions[permission]
+}
+
+// isDangerousEntraPermission checks if an Entra ID permission is considered dangerous
+func (l *Neo4jImporterLink) isDangerousEntraPermission(permission string) bool {
+	// Define dangerous Entra ID permissions
+	entraDangerousPermissions := map[string]bool{
+		// Critical write permissions
+		"microsoft.directory/users/password/update":                       true,
+		"microsoft.directory/users/userPrincipalName/update":              true,
+		"microsoft.directory/users/allProperties/allTasks":                true,  // Global Admin has this
+		"microsoft.directory/applications/credentials/update":             true,
+		"microsoft.directory/applications/allProperties/allTasks":         true,  // Global Admin has this
+		"microsoft.directory/servicePrincipals/credentials/update":        true,
+		"microsoft.directory/servicePrincipals/allProperties/allTasks":    true,  // Global Admin has this
+		"microsoft.directory/domains/federation/update":                   true,
+
+		// Role management
+		"microsoft.directory/roles/allProperties/allTasks":                true,
+		"microsoft.directory/roleAssignments/allProperties/allTasks":      true,
+		"microsoft.directory/directoryRoles/allProperties/allTasks":       true,
+
+		// Group management
+		"microsoft.directory/groups/allProperties/allTasks":               true,
+		"microsoft.directory/groups/members/update":                       true,
+
+		// Device management
+		"microsoft.directory/devices/allProperties/allTasks":              true,
+		"microsoft.directory/bitlockerKeys/key/read":                      true,
+
+		// Conditional access
+		"microsoft.directory/policies/conditionalAccess/allProperties/allTasks": true,
+
+		// Administrative units
+		"microsoft.directory/administrativeUnits/allProperties/allTasks":  true,
+		"microsoft.directory/administrativeUnits/members/update":          true,
+	}
+
+	return entraDangerousPermissions[permission]
+}
+
+// isDangerousRBACPermission checks if an Azure RBAC permission is considered dangerous
+func (l *Neo4jImporterLink) isDangerousRBACPermission(permission string) bool {
+	l.Logger.Debug("Checking if RBAC permission is dangerous", "permission", permission)
+	// Define dangerous RBAC permissions
+	rbacDangerousPermissions := map[string]bool{
+		// Identity & Access Management - High Priority
+		"Microsoft.Authorization/roleAssignments/write":                   true, // Can grant RBAC permissions
+		"Microsoft.Authorization/roleAssignments/delete":                  true, // Can remove RBAC permissions
+		"Microsoft.Authorization/roleDefinitions/write":                   true, // Can create custom roles
+		"Microsoft.Authorization/roleDefinitions/delete":                  true, // Can delete role definitions
+		"Microsoft.ManagedIdentity/userAssignedIdentities/write":         true, // Can modify managed identities
+		"Microsoft.ManagedIdentity/userAssignedIdentities/assign/action": true, // Can assign managed identities
+
+		// Compute - Direct System Access
+		"Microsoft.Compute/virtualMachines/write":                         true, // Can modify VMs
+		"Microsoft.Compute/virtualMachines/runCommand/action":             true, // Can execute commands on VMs
+		"Microsoft.Compute/virtualMachines/extensions/write":              true, // Can install VM extensions
+		"Microsoft.Compute/virtualMachines/restart/action":                true, // Can restart VMs
+		"Microsoft.Compute/virtualMachines/start/action":                  true, // Can start VMs
+		"Microsoft.Compute/virtualMachineScaleSets/write":                 true, // Can modify VMSS
+		"Microsoft.Compute/virtualMachineScaleSets/extensions/write":      true, // Can install VMSS extensions
+
+		// Storage - Data Access
+		"Microsoft.Storage/storageAccounts/write":                         true, // Can modify storage accounts
+		"Microsoft.Storage/storageAccounts/listKeys/action":               true, // Can list storage keys
+		"Microsoft.Storage/storageAccounts/regeneratekey/action":          true, // Can regenerate storage keys
+		"Microsoft.Storage/storageAccounts/blobServices/containers/write": true, // Can modify containers
+		"Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey/action": true, // Can generate delegation keys
+
+		// Key Vault - Secrets Access
+		"Microsoft.KeyVault/vaults/write":                                 true, // Can modify Key Vault
+		"Microsoft.KeyVault/vaults/delete":                                true, // Can delete Key Vault
+		"Microsoft.KeyVault/vaults/secrets/write":                         true, // Can write secrets
+		"Microsoft.KeyVault/vaults/secrets/delete":                        true, // Can delete secrets
+		"Microsoft.KeyVault/vaults/keys/write":                            true, // Can write keys
+		"Microsoft.KeyVault/vaults/keys/delete":                           true, // Can delete keys
+		"Microsoft.KeyVault/vaults/certificates/write":                    true, // Can write certificates
+		"Microsoft.KeyVault/vaults/accessPolicies/write":                  true, // Can modify access policies
+
+		// Database Access
+		"Microsoft.Sql/servers/write":                                     true, // Can modify SQL servers
+		"Microsoft.Sql/servers/databases/write":                           true, // Can modify databases
+		"Microsoft.Sql/servers/firewallRules/write":                       true, // Can modify firewall rules
+		"Microsoft.Sql/servers/administrators/write":                      true, // Can modify administrators
+		"Microsoft.DocumentDB/databaseAccounts/write":                     true, // Can modify Cosmos DB
+		"Microsoft.DocumentDB/databaseAccounts/listKeys/action":           true, // Can list Cosmos DB keys
+
+		// Networking - Security Controls
+		"Microsoft.Network/networkSecurityGroups/write":                   true, // Can modify NSGs
+		"Microsoft.Network/networkSecurityGroups/securityRules/write":     true, // Can modify NSG rules
+		"Microsoft.Network/virtualNetworks/write":                         true, // Can modify VNets
+		"Microsoft.Network/publicIPAddresses/write":                       true, // Can modify public IPs
+		"Microsoft.Network/loadBalancers/write":                           true, // Can modify load balancers
+
+		// Container Services
+		"Microsoft.ContainerService/managedClusters/write":                true, // Can modify AKS clusters
+		"Microsoft.ContainerService/managedClusters/accessProfiles/listCredential/action": true, // Can get AKS credentials
+		"Microsoft.ContainerRegistry/registries/write":                    true, // Can modify ACR
+		"Microsoft.ContainerRegistry/registries/artifacts/delete":         true, // Can delete container images
+
+		// Resource Management
+		"Microsoft.Resources/subscriptions/write":                         true, // Can modify subscriptions
+		"Microsoft.Resources/subscriptions/resourceGroups/write":          true, // Can modify resource groups
+		"Microsoft.Resources/deployments/write":                           true, // Can deploy ARM templates
+		"Microsoft.Resources/deployments/delete":                          true, // Can delete deployments
+
+		// Privileged Operations
+		"Microsoft.Automation/automationAccounts/write":                   true, // Can modify automation accounts
+		"Microsoft.Automation/automationAccounts/runbooks/write":          true, // Can modify runbooks
+		"Microsoft.Logic/workflows/write":                                 true, // Can modify logic apps
+		"Microsoft.Web/sites/write":                                       true, // Can modify web apps
+		"Microsoft.Web/sites/config/write":                                true, // Can modify web app config
+		"Microsoft.Web/sites/functions/write":                             true, // Can modify functions
+	}
+
+	// Check exact matches first
+	if rbacDangerousPermissions[permission] {
+		l.Logger.Debug("RBAC permission matched exact dangerous permission", "permission", permission)
+		return true
+	}
+
+	// Check if this wildcard permission covers any dangerous permissions
+	if strings.Contains(permission, "*") {
+		l.Logger.Debug("RBAC permission contains wildcard, checking matches", "permission", permission)
+		matchCount := 0
+		for dangerousPermission := range rbacDangerousPermissions {
+			if l.matchesRBACWildcard(permission, dangerousPermission) {
+				matchCount++
+				l.Logger.Debug("RBAC wildcard covers dangerous permission",
+					"pattern", permission, "dangerousPermission", dangerousPermission)
+			}
+		}
+		if matchCount > 0 {
+			l.Logger.Debug("RBAC wildcard permission is dangerous", "permission", permission, "matchedDangerousPermissions", matchCount)
+			return true
+		} else {
+			l.Logger.Debug("RBAC wildcard permission matched no dangerous permissions", "permission", permission)
+		}
+	} else {
+		l.Logger.Debug("RBAC permission contains no wildcards", "permission", permission)
+	}
+
+	l.Logger.Debug("RBAC permission is not dangerous", "permission", permission)
+	return false
+}
+
+// expandRBACWildcardToDangerousPermissions expands a wildcard permission to all dangerous permissions it covers
+func (l *Neo4jImporterLink) expandRBACWildcardToDangerousPermissions(permission string) []string {
+	// Define dangerous RBAC permissions (same list as in isDangerousRBACPermission)
+	rbacDangerousPermissions := map[string]bool{
+		// Identity & Access Management - High Priority
+		"Microsoft.Authorization/roleAssignments/write":                   true,
+		"Microsoft.Authorization/roleAssignments/delete":                  true,
+		"Microsoft.Authorization/roleDefinitions/write":                   true,
+		"Microsoft.Authorization/roleDefinitions/delete":                  true,
+		"Microsoft.ManagedIdentity/userAssignedIdentities/write":         true,
+		"Microsoft.ManagedIdentity/userAssignedIdentities/assign/action": true,
+
+		// Compute - Direct System Access
+		"Microsoft.Compute/virtualMachines/write":                         true,
+		"Microsoft.Compute/virtualMachines/runCommand/action":             true,
+		"Microsoft.Compute/virtualMachines/extensions/write":              true,
+		"Microsoft.Compute/virtualMachines/restart/action":                true,
+		"Microsoft.Compute/virtualMachines/start/action":                  true,
+		"Microsoft.Compute/virtualMachineScaleSets/write":                 true,
+		"Microsoft.Compute/virtualMachineScaleSets/extensions/write":      true,
+
+		// Storage - Data Access
+		"Microsoft.Storage/storageAccounts/write":                         true,
+		"Microsoft.Storage/storageAccounts/listKeys/action":               true,
+		"Microsoft.Storage/storageAccounts/regeneratekey/action":          true,
+		"Microsoft.Storage/storageAccounts/blobServices/containers/write": true,
+		"Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey/action": true,
+
+		// Key Vault - Secrets Access
+		"Microsoft.KeyVault/vaults/write":                                 true,
+		"Microsoft.KeyVault/vaults/delete":                                true,
+		"Microsoft.KeyVault/vaults/secrets/write":                         true,
+		"Microsoft.KeyVault/vaults/secrets/delete":                        true,
+		"Microsoft.KeyVault/vaults/keys/write":                            true,
+		"Microsoft.KeyVault/vaults/keys/delete":                           true,
+		"Microsoft.KeyVault/vaults/certificates/write":                    true,
+		"Microsoft.KeyVault/vaults/accessPolicies/write":                  true,
+
+		// Database Access
+		"Microsoft.Sql/servers/write":                                     true,
+		"Microsoft.Sql/servers/databases/write":                           true,
+		"Microsoft.Sql/servers/firewallRules/write":                       true,
+		"Microsoft.Sql/servers/administrators/write":                      true,
+		"Microsoft.DocumentDB/databaseAccounts/write":                     true,
+		"Microsoft.DocumentDB/databaseAccounts/listKeys/action":           true,
+
+		// Networking - Security Controls
+		"Microsoft.Network/networkSecurityGroups/write":                   true,
+		"Microsoft.Network/networkSecurityGroups/securityRules/write":     true,
+		"Microsoft.Network/virtualNetworks/write":                         true,
+		"Microsoft.Network/publicIPAddresses/write":                       true,
+		"Microsoft.Network/loadBalancers/write":                           true,
+
+		// Container Services
+		"Microsoft.ContainerService/managedClusters/write":                true,
+		"Microsoft.ContainerService/managedClusters/accessProfiles/listCredential/action": true,
+		"Microsoft.ContainerRegistry/registries/write":                    true,
+		"Microsoft.ContainerRegistry/registries/artifacts/delete":         true,
+
+		// Resource Management
+		"Microsoft.Resources/subscriptions/write":                         true,
+		"Microsoft.Resources/subscriptions/resourceGroups/write":          true,
+		"Microsoft.Resources/deployments/write":                           true,
+		"Microsoft.Resources/deployments/delete":                          true,
+
+		// Privileged Operations
+		"Microsoft.Automation/automationAccounts/write":                   true,
+		"Microsoft.Automation/automationAccounts/runbooks/write":          true,
+		"Microsoft.Logic/workflows/write":                                 true,
+		"Microsoft.Web/sites/write":                                       true,
+		"Microsoft.Web/sites/config/write":                                true,
+		"Microsoft.Web/sites/functions/write":                             true,
+	}
+
+	var result []string
+
+	// Check if it's an exact match first
+	if rbacDangerousPermissions[permission] {
+		result = append(result, permission)
+		return result
+	}
+
+	// If it contains wildcards, expand to matching dangerous permissions
+	if strings.Contains(permission, "*") {
+		for dangerousPermission := range rbacDangerousPermissions {
+			if l.matchesRBACWildcard(permission, dangerousPermission) {
+				result = append(result, dangerousPermission)
+			}
+		}
+	}
+
+	return result
+}
+
+// processScopedRBACAssignments processes RBAC assignments for a specific scope type and creates HAS_PERMISSION edges
+func (l *Neo4jImporterLink) processScopedRBACAssignments(assignments []interface{}, scopeType string) []map[string]interface{} {
+	var permissions []map[string]interface{}
+
+	for _, assignment := range assignments {
+		assignmentMap, ok := assignment.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Extract assignment properties - handle both SDK collector format (direct fields) and REST API format (properties wrapper)
+		var principalId, roleDefinitionId, scope, principalType string
+
+		// Check if this has direct fields (SDK collector format) or properties wrapper (REST API format)
+		if directPrincipalId := l.getStringValue(assignmentMap, "principalId"); directPrincipalId != "" {
+			// SDK collector format with direct fields
+			principalId = directPrincipalId
+			roleDefinitionId = l.getStringValue(assignmentMap, "roleDefinitionId")
+			scope = l.getStringValue(assignmentMap, "scope")
+			principalType = l.getStringValue(assignmentMap, "principalType")
+		} else if properties := l.getMapValue(assignmentMap, "properties"); properties != nil {
+			// Azure REST API format with properties wrapper
+			principalId = l.getStringValue(properties, "principalId")
+			roleDefinitionId = l.getStringValue(properties, "roleDefinitionId")
+			scope = l.getStringValue(properties, "scope")
+			principalType = l.getStringValue(properties, "principalType")
+		} else {
+			continue
+		}
+
+		if principalId == "" || roleDefinitionId == "" || scope == "" {
+			continue
+		}
+
+		// Parse scope to identify target resource
+		targetResourceType, targetResourceId := l.parseAssignmentScope(scope)
+		if targetResourceType == "" || targetResourceId == "" {
+			l.Logger.Debug("Could not parse assignment scope - skipping", "scope", scope)
+			continue
+		}
+
+		// Expand RBAC role to individual permissions using roleDefinitionId
+		expandedPermissions := l.expandRBACRoleToPermissions(roleDefinitionId)
+
+		// Only process if we have expanded permissions
+		if len(expandedPermissions) > 0 {
+			l.Logger.Debug("Found expanded RBAC permissions", "roleDefinitionId", roleDefinitionId, "permissionCount", len(expandedPermissions), "scopeType", scopeType)
+			// Create edges for each dangerous permission at the granted scope only
+			for _, permission := range expandedPermissions {
+				// Expand wildcards to specific dangerous permissions
+				dangerousPerms := l.expandRBACWildcardToDangerousPermissions(permission)
+				for _, dangPerm := range dangerousPerms {
+					l.Logger.Debug("Found dangerous RBAC permission at granted scope", "roleDefinitionId", roleDefinitionId, "permission", dangPerm, "principalId", principalId, "targetResource", targetResourceId, "scopeType", scopeType)
+					permissions = append(permissions, map[string]interface{}{
+						"principalId":        principalId,
+						"permission":         dangPerm,
+						"targetResourceId":   targetResourceId,
+						"targetResourceType": targetResourceType,
+						"grantedAt":          scopeType,
+						"roleDefinitionId":   roleDefinitionId,
+						"principalType":      principalType,
+						"source":             "Azure RBAC",
+					})
+				}
+			}
+		}
+	}
+
+	return permissions
+}
+
+// parseAssignmentScope parses an Azure RBAC assignment scope to determine the target resource
+func (l *Neo4jImporterLink) parseAssignmentScope(scope string) (resourceType, resourceId string) {
+	// Handle different Azure scope formats:
+	// /subscriptions/{subscription-id}
+	// /subscriptions/{subscription-id}/resourceGroups/{resource-group-name}
+	// /subscriptions/{subscription-id}/resourceGroups/{resource-group-name}/providers/{resource-provider}/{resource-type}/{resource-name}
+	// /subscriptions/{subscription-id}/providers/{resource-provider}/{resource-type}/{resource-name}
+
+	if scope == "" {
+		return "", ""
+	}
+
+	// Split scope into parts, removing empty elements
+	parts := make([]string, 0)
+	for _, part := range strings.Split(scope, "/") {
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+
+	if len(parts) < 2 {
+		return "", ""
+	}
+
+	// Check if it's a subscription-level scope
+	if len(parts) == 2 && parts[0] == "subscriptions" {
+		return "Subscription", parts[1]
+	}
+
+	// Check if it's a resource group-level scope
+	if len(parts) == 4 && parts[0] == "subscriptions" && parts[2] == "resourceGroups" {
+		// For resource groups, we need to construct the resource ID
+		subscriptionId := parts[1]
+		resourceGroupName := parts[3]
+		resourceId := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s", subscriptionId, resourceGroupName)
+		return "ResourceGroup", resourceId
+	}
+
+	// Check if it's a resource-level scope
+	if len(parts) >= 6 && parts[0] == "subscriptions" {
+		// For individual resources, use the full scope as the resource ID
+		return "Resource", scope
+	}
+
+	// Fallback: treat as generic resource
+	return "Resource", scope
+}
+
+// matchesRBACWildcard checks if an Azure RBAC wildcard pattern matches a specific permission
+func (l *Neo4jImporterLink) matchesRBACWildcard(pattern, permission string) bool {
+	// Handle the universal wildcard
+	if pattern == "*" {
+		return true
+	}
+
+	// Handle patterns ending with /* (e.g., "Microsoft.Authorization/*")
+	// This matches any permission that starts with the prefix, regardless of nesting depth
+	if strings.HasSuffix(pattern, "/*") {
+		prefix := strings.TrimSuffix(pattern, "/*")
+		return strings.HasPrefix(permission, prefix+"/")
+	}
+
+	// No wildcards - exact match (should have been caught earlier, but handle defensively)
+	return pattern == permission
 }
 
 // toJSONString safely converts a map to JSON string with proper escaping

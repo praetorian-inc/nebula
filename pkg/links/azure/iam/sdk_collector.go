@@ -934,7 +934,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllRoleAssignmentsSDK(subscriptio
 	// Create role assignments client with specific subscription ID
 	authClient, err := armauthorization.NewRoleAssignmentsClient(subscriptionID, &l.credential, nil)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create role assignments client for subscription %s: %v", subscriptionID, err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to create role assignments client for subscription %s: %v", subscriptionID, err)
 	}
 
 	// Get all role assignments for the subscription with pagination
@@ -944,7 +944,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllRoleAssignmentsSDK(subscriptio
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("failed to get role assignments page: %v", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("failed to get role assignments page: %v", err)
 		}
 
 		for _, assignment := range page.Value {

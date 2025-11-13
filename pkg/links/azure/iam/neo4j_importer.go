@@ -2429,9 +2429,18 @@ func (l *Neo4jImporterLink) parseAssignmentScope(scope string) (resourceType, re
 	// /subscriptions/{subscription-id}/resourceGroups/{resource-group-name}
 	// /subscriptions/{subscription-id}/resourceGroups/{resource-group-name}/providers/{resource-provider}/{resource-type}/{resource-name}
 	// /subscriptions/{subscription-id}/providers/{resource-provider}/{resource-type}/{resource-name}
+	// /providers/Microsoft.Management/managementGroups/{management-group-id}
+	// / (tenant root)
 
-	if scope == "" {
-		return "", ""
+	// Handle tenant root scope - map to Tenant Root Management Group
+	if scope == "/" || scope == "" {
+		// Get tenant ID from metadata to construct the proper management group resource ID
+		metadata := l.getMapValue(l.consolidatedData, "collection_metadata")
+		tenantID := l.getStringValue(metadata, "tenant_id")
+		if tenantID != "" {
+			return "ManagementGroup", fmt.Sprintf("/providers/Microsoft.Management/managementGroups/%s", tenantID)
+		}
+		return "Tenant", "/"
 	}
 
 	// Split scope into parts, removing empty elements
@@ -2444,6 +2453,13 @@ func (l *Neo4jImporterLink) parseAssignmentScope(scope string) (resourceType, re
 
 	if len(parts) < 2 {
 		return "", ""
+	}
+
+	// Check if it's a management group scope
+	// Format: /providers/Microsoft.Management/managementGroups/{management-group-id}
+	if len(parts) >= 4 && parts[0] == "providers" && parts[1] == "Microsoft.Management" && parts[2] == "managementGroups" {
+		managementGroupId := parts[3]
+		return "ManagementGroup", fmt.Sprintf("/providers/Microsoft.Management/managementGroups/%s", managementGroupId)
 	}
 
 	// Check if it's a subscription-level scope

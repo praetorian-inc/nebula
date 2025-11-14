@@ -187,6 +187,48 @@ func AzureDisableEnrichment() cfg.Param {
 		WithDefault(false)
 }
 
+// Azure IAM Pull parameters
+func AzureRefreshToken() cfg.Param {
+	return cfg.NewParam[string]("refresh-token", "Azure refresh token for authentication").
+		AsRequired()
+}
+
+func AzureTenantID() cfg.Param {
+	return cfg.NewParam[string]("tenant", "Azure AD tenant ID").
+		AsRequired()
+}
+
+func AzureProxy() cfg.Param {
+	return cfg.NewParam[string]("proxy", "Proxy URL for requests (e.g., http://127.0.0.1:8080)")
+}
+
+// Azure IAM Push (Neo4j) parameters
+func AzureNeo4jURL() cfg.Param {
+	return cfg.NewParam[string]("neo4j-url", "Neo4j database URL").
+		WithDefault("bolt://localhost:7687")
+}
+
+func AzureNeo4jUser() cfg.Param {
+	return cfg.NewParam[string]("neo4j-user", "Neo4j username").
+		WithDefault("neo4j").
+		AsRequired()
+}
+
+func AzureNeo4jPassword() cfg.Param {
+	return cfg.NewParam[string]("neo4j-password", "Neo4j password").
+		AsRequired()
+}
+
+func AzureDataFile() cfg.Param {
+	return cfg.NewParam[string]("data-file", "Path to consolidated AzureHunter JSON file").
+		AsRequired()
+}
+
+func AzureClearDB() cfg.Param {
+	return cfg.NewParam[bool]("clear-db", "Clear existing data before import").
+		WithDefault(false)
+}
+
 // AzureReconBaseOptions provides common options for Azure reconnaissance modules
 func AzureReconBaseOptions() []cfg.Param {
 	return []cfg.Param{

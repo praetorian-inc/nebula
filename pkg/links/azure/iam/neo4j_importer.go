@@ -2034,79 +2034,64 @@ func (l *Neo4jImporterLink) isDangerousPermission(permission string) bool {
 		"microsoft.directory/administrativeUnits/members/update":          true,
 	}
 
-	// Define dangerous RBAC permissions
+	// Define dangerous RBAC permissions - focused BloodHound/AzureHound aligned list
 	rbacDangerousPermissions := map[string]bool{
-		// Identity & Access Management - High Priority
-		"Microsoft.Authorization/roleAssignments/write":                   true, // Can grant RBAC permissions
-		"Microsoft.Authorization/roleAssignments/delete":                  true, // Can remove RBAC permissions
-		"Microsoft.Authorization/roleDefinitions/write":                   true, // Can create custom roles
-		"Microsoft.Authorization/roleDefinitions/delete":                  true, // Can delete role definitions
-		"Microsoft.ManagedIdentity/userAssignedIdentities/write":         true, // Can modify managed identities
-		"Microsoft.ManagedIdentity/userAssignedIdentities/assign/action": true, // Can assign managed identities
+		// Identity & Access Management (Privilege Escalation)
+		"Microsoft.Authorization/roleAssignments/write":                   true,
+		"Microsoft.Authorization/roleDefinitions/write":                   true,
+		"Microsoft.ManagedIdentity/userAssignedIdentities/write":         true,
+		"Microsoft.ManagedIdentity/userAssignedIdentities/assign/action": true,
 
-		// Compute - Direct System Access
-		"Microsoft.Compute/virtualMachines/write":                         true, // Can modify VMs
-		"Microsoft.Compute/virtualMachines/runCommand/action":             true, // Can execute commands on VMs
-		"Microsoft.Compute/virtualMachines/extensions/write":              true, // Can install VM extensions
-		"Microsoft.Compute/virtualMachines/restart/action":                true, // Can restart VMs
-		"Microsoft.Compute/virtualMachines/start/action":                  true, // Can start VMs
-		"Microsoft.Compute/virtualMachineScaleSets/write":                 true, // Can modify VMSS
-		"Microsoft.Compute/virtualMachineScaleSets/extensions/write":      true, // Can install VMSS extensions
+		// Application/Service Principal Control (Backdoor Access)
+		"Microsoft.Graph/applications/credentials/update":                 true,
+		"Microsoft.Graph/servicePrincipals/credentials/update":           true,
+		"Microsoft.Directory/applications/credentials/update":            true,
+		"Microsoft.Directory/servicePrincipals/credentials/update":       true,
 
-		// Storage - Data Access
-		"Microsoft.Storage/storageAccounts/write":                         true, // Can modify storage accounts
-		"Microsoft.Storage/storageAccounts/listKeys/action":               true, // Can list storage keys
-		"Microsoft.Storage/storageAccounts/regeneratekey/action":          true, // Can regenerate storage keys
-		"Microsoft.Storage/storageAccounts/blobServices/containers/write": true, // Can modify containers
-		"Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey/action": true, // Can generate delegation keys
+		// Code Execution (Direct System Access)
+		"Microsoft.Compute/virtualMachines/runCommand/action":            true,
+		"Microsoft.Compute/virtualMachines/write":                        true,
+		"Microsoft.Compute/virtualMachines/extensions/write":             true,
+		"Microsoft.Compute/virtualMachineScaleSets/write":                true,
+		"Microsoft.Compute/virtualMachineScaleSets/extensions/write":     true,
+		"Microsoft.Automation/automationAccounts/write":                  true,
+		"Microsoft.Automation/automationAccounts/runbooks/write":         true,
+		"Microsoft.Logic/workflows/write":                                true,
+		"Microsoft.Web/sites/write":                                      true,
+		"Microsoft.Web/sites/config/write":                               true,
+		"Microsoft.Web/sites/functions/write":                            true,
 
-		// Key Vault - Secrets Access
-		"Microsoft.KeyVault/vaults/write":                                 true, // Can modify Key Vault
-		"Microsoft.KeyVault/vaults/delete":                                true, // Can delete Key Vault
-		"Microsoft.KeyVault/vaults/secrets/write":                         true, // Can write secrets
-		"Microsoft.KeyVault/vaults/secrets/delete":                        true, // Can delete secrets
-		"Microsoft.KeyVault/vaults/keys/write":                            true, // Can write keys
-		"Microsoft.KeyVault/vaults/keys/delete":                           true, // Can delete keys
-		"Microsoft.KeyVault/vaults/certificates/write":                    true, // Can write certificates
-		"Microsoft.KeyVault/vaults/accessPolicies/write":                  true, // Can modify access policies
+		// Storage & Data Access (Credential Theft)
+		"Microsoft.Storage/storageAccounts/write":                        true,
+		"Microsoft.Storage/storageAccounts/listKeys/action":              true,
+		"Microsoft.Storage/storageAccounts/regeneratekey/action":         true,
+		"Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey/action": true,
 
-		// Database Access
-		"Microsoft.Sql/servers/write":                                     true, // Can modify SQL servers
-		"Microsoft.Sql/servers/databases/write":                           true, // Can modify databases
-		"Microsoft.Sql/servers/firewallRules/write":                       true, // Can modify firewall rules
-		"Microsoft.Sql/servers/administrators/write":                      true, // Can modify administrators
-		"Microsoft.DocumentDB/databaseAccounts/write":                     true, // Can modify Cosmos DB
-		"Microsoft.DocumentDB/databaseAccounts/listKeys/action":           true, // Can list Cosmos DB keys
+		// Key Vault (Secrets Access)
+		"Microsoft.KeyVault/vaults/write":                                true,
+		"Microsoft.KeyVault/vaults/secrets/write":                        true,
+		"Microsoft.KeyVault/vaults/keys/write":                           true,
+		"Microsoft.KeyVault/vaults/accessPolicies/write":                 true,
 
-		// Networking - Security Controls
-		"Microsoft.Network/networkSecurityGroups/write":                   true, // Can modify NSGs
-		"Microsoft.Network/networkSecurityGroups/securityRules/write":     true, // Can modify NSG rules
-		"Microsoft.Network/routeTables/write":                             true, // Can modify route tables
-		"Microsoft.Network/routeTables/routes/write":                      true, // Can modify routes
-		"Microsoft.Network/virtualNetworks/write":                         true, // Can modify VNets
-		"Microsoft.Network/publicIPAddresses/write":                       true, // Can modify public IPs
-		"Microsoft.Network/azureFirewalls/write":                          true, // Can modify Azure Firewall
-		"Microsoft.Network/applicationGateways/write":                     true, // Can modify App Gateway
+		// Database Access (Data & Credential Theft)
+		"Microsoft.Sql/servers/databases/write":                          true,
+		"Microsoft.DocumentDB/databaseAccounts/listKeys/action":          true,
+		"Microsoft.DocumentDB/databaseAccounts/write":                    true,
 
-		// Container & Kubernetes
-		"Microsoft.ContainerService/managedClusters/write":                true, // Can modify AKS clusters
-		"Microsoft.ContainerService/managedClusters/accessProfiles/listCredential/action": true, // Can get AKS credentials
-		"Microsoft.ContainerRegistry/registries/write":                    true, // Can modify ACR
-		"Microsoft.ContainerRegistry/registries/artifacts/delete":         true, // Can delete container images
+		// Container & Registry (Supply Chain Attacks)
+		"Microsoft.ContainerService/managedClusters/write":               true,
+		"Microsoft.ContainerService/managedClusters/accessProfiles/listCredential/action": true,
+		"Microsoft.ContainerRegistry/registries/write":                   true,
+		"Microsoft.ContainerRegistry/registries/importImage/action":      true,
 
-		// Resource Management
-		"Microsoft.Resources/subscriptions/write":                         true, // Can modify subscriptions
-		"Microsoft.Resources/subscriptions/resourceGroups/write":          true, // Can modify resource groups
-		"Microsoft.Resources/deployments/write":                           true, // Can deploy ARM templates
-		"Microsoft.Resources/deployments/delete":                          true, // Can delete deployments
+		// Network Control (Lateral Movement)
+		"Microsoft.Network/networkSecurityGroups/write":                  true,
+		"Microsoft.Network/networkSecurityGroups/securityRules/write":    true,
+		"Microsoft.Network/virtualNetworks/write":                        true,
 
-		// Privileged Operations
-		"Microsoft.Automation/automationAccounts/write":                   true, // Can modify automation accounts
-		"Microsoft.Automation/automationAccounts/runbooks/write":          true, // Can modify runbooks
-		"Microsoft.Logic/workflows/write":                                 true, // Can modify logic apps
-		"Microsoft.Web/sites/write":                                       true, // Can modify web apps
-		"Microsoft.Web/sites/config/write":                                true, // Can modify web app config
-		"Microsoft.Web/sites/functions/write":                             true, // Can modify functions
+		// Message Queue & Event Systems (Persistence & C2)
+		"Microsoft.ServiceBus/namespaces/write":                          true,
+		"Microsoft.EventHub/namespaces/write":                            true,
 	}
 
 	// Check both Entra ID and RBAC dangerous permissions
@@ -2154,76 +2139,64 @@ func (l *Neo4jImporterLink) isDangerousEntraPermission(permission string) bool {
 // isDangerousRBACPermission checks if an Azure RBAC permission is considered dangerous
 func (l *Neo4jImporterLink) isDangerousRBACPermission(permission string) bool {
 	l.Logger.Debug("Checking if RBAC permission is dangerous", "permission", permission)
-	// Define dangerous RBAC permissions
+	// Define dangerous RBAC permissions - focused BloodHound/AzureHound aligned list
 	rbacDangerousPermissions := map[string]bool{
-		// Identity & Access Management - High Priority
-		"Microsoft.Authorization/roleAssignments/write":                   true, // Can grant RBAC permissions
-		"Microsoft.Authorization/roleAssignments/delete":                  true, // Can remove RBAC permissions
-		"Microsoft.Authorization/roleDefinitions/write":                   true, // Can create custom roles
-		"Microsoft.Authorization/roleDefinitions/delete":                  true, // Can delete role definitions
-		"Microsoft.ManagedIdentity/userAssignedIdentities/write":         true, // Can modify managed identities
-		"Microsoft.ManagedIdentity/userAssignedIdentities/assign/action": true, // Can assign managed identities
+		// Identity & Access Management (Privilege Escalation)
+		"Microsoft.Authorization/roleAssignments/write":                   true,
+		"Microsoft.Authorization/roleDefinitions/write":                   true,
+		"Microsoft.ManagedIdentity/userAssignedIdentities/write":         true,
+		"Microsoft.ManagedIdentity/userAssignedIdentities/assign/action": true,
 
-		// Compute - Direct System Access
-		"Microsoft.Compute/virtualMachines/write":                         true, // Can modify VMs
-		"Microsoft.Compute/virtualMachines/runCommand/action":             true, // Can execute commands on VMs
-		"Microsoft.Compute/virtualMachines/extensions/write":              true, // Can install VM extensions
-		"Microsoft.Compute/virtualMachines/restart/action":                true, // Can restart VMs
-		"Microsoft.Compute/virtualMachines/start/action":                  true, // Can start VMs
-		"Microsoft.Compute/virtualMachineScaleSets/write":                 true, // Can modify VMSS
-		"Microsoft.Compute/virtualMachineScaleSets/extensions/write":      true, // Can install VMSS extensions
+		// Application/Service Principal Control (Backdoor Access)
+		"Microsoft.Graph/applications/credentials/update":                 true,
+		"Microsoft.Graph/servicePrincipals/credentials/update":           true,
+		"Microsoft.Directory/applications/credentials/update":            true,
+		"Microsoft.Directory/servicePrincipals/credentials/update":       true,
 
-		// Storage - Data Access
-		"Microsoft.Storage/storageAccounts/write":                         true, // Can modify storage accounts
-		"Microsoft.Storage/storageAccounts/listKeys/action":               true, // Can list storage keys
-		"Microsoft.Storage/storageAccounts/regeneratekey/action":          true, // Can regenerate storage keys
-		"Microsoft.Storage/storageAccounts/blobServices/containers/write": true, // Can modify containers
-		"Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey/action": true, // Can generate delegation keys
+		// Code Execution (Direct System Access)
+		"Microsoft.Compute/virtualMachines/runCommand/action":            true,
+		"Microsoft.Compute/virtualMachines/write":                        true,
+		"Microsoft.Compute/virtualMachines/extensions/write":             true,
+		"Microsoft.Compute/virtualMachineScaleSets/write":                true,
+		"Microsoft.Compute/virtualMachineScaleSets/extensions/write":     true,
+		"Microsoft.Automation/automationAccounts/write":                  true,
+		"Microsoft.Automation/automationAccounts/runbooks/write":         true,
+		"Microsoft.Logic/workflows/write":                                true,
+		"Microsoft.Web/sites/write":                                      true,
+		"Microsoft.Web/sites/config/write":                               true,
+		"Microsoft.Web/sites/functions/write":                            true,
 
-		// Key Vault - Secrets Access
-		"Microsoft.KeyVault/vaults/write":                                 true, // Can modify Key Vault
-		"Microsoft.KeyVault/vaults/delete":                                true, // Can delete Key Vault
-		"Microsoft.KeyVault/vaults/secrets/write":                         true, // Can write secrets
-		"Microsoft.KeyVault/vaults/secrets/delete":                        true, // Can delete secrets
-		"Microsoft.KeyVault/vaults/keys/write":                            true, // Can write keys
-		"Microsoft.KeyVault/vaults/keys/delete":                           true, // Can delete keys
-		"Microsoft.KeyVault/vaults/certificates/write":                    true, // Can write certificates
-		"Microsoft.KeyVault/vaults/accessPolicies/write":                  true, // Can modify access policies
+		// Storage & Data Access (Credential Theft)
+		"Microsoft.Storage/storageAccounts/write":                        true,
+		"Microsoft.Storage/storageAccounts/listKeys/action":              true,
+		"Microsoft.Storage/storageAccounts/regeneratekey/action":         true,
+		"Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey/action": true,
 
-		// Database Access
-		"Microsoft.Sql/servers/write":                                     true, // Can modify SQL servers
-		"Microsoft.Sql/servers/databases/write":                           true, // Can modify databases
-		"Microsoft.Sql/servers/firewallRules/write":                       true, // Can modify firewall rules
-		"Microsoft.Sql/servers/administrators/write":                      true, // Can modify administrators
-		"Microsoft.DocumentDB/databaseAccounts/write":                     true, // Can modify Cosmos DB
-		"Microsoft.DocumentDB/databaseAccounts/listKeys/action":           true, // Can list Cosmos DB keys
+		// Key Vault (Secrets Access)
+		"Microsoft.KeyVault/vaults/write":                                true,
+		"Microsoft.KeyVault/vaults/secrets/write":                        true,
+		"Microsoft.KeyVault/vaults/keys/write":                           true,
+		"Microsoft.KeyVault/vaults/accessPolicies/write":                 true,
 
-		// Networking - Security Controls
-		"Microsoft.Network/networkSecurityGroups/write":                   true, // Can modify NSGs
-		"Microsoft.Network/networkSecurityGroups/securityRules/write":     true, // Can modify NSG rules
-		"Microsoft.Network/virtualNetworks/write":                         true, // Can modify VNets
-		"Microsoft.Network/publicIPAddresses/write":                       true, // Can modify public IPs
-		"Microsoft.Network/loadBalancers/write":                           true, // Can modify load balancers
+		// Database Access (Data & Credential Theft)
+		"Microsoft.Sql/servers/databases/write":                          true,
+		"Microsoft.DocumentDB/databaseAccounts/listKeys/action":          true,
+		"Microsoft.DocumentDB/databaseAccounts/write":                    true,
 
-		// Container Services
-		"Microsoft.ContainerService/managedClusters/write":                true, // Can modify AKS clusters
-		"Microsoft.ContainerService/managedClusters/accessProfiles/listCredential/action": true, // Can get AKS credentials
-		"Microsoft.ContainerRegistry/registries/write":                    true, // Can modify ACR
-		"Microsoft.ContainerRegistry/registries/artifacts/delete":         true, // Can delete container images
+		// Container & Registry (Supply Chain Attacks)
+		"Microsoft.ContainerService/managedClusters/write":               true,
+		"Microsoft.ContainerService/managedClusters/accessProfiles/listCredential/action": true,
+		"Microsoft.ContainerRegistry/registries/write":                   true,
+		"Microsoft.ContainerRegistry/registries/importImage/action":      true,
 
-		// Resource Management
-		"Microsoft.Resources/subscriptions/write":                         true, // Can modify subscriptions
-		"Microsoft.Resources/subscriptions/resourceGroups/write":          true, // Can modify resource groups
-		"Microsoft.Resources/deployments/write":                           true, // Can deploy ARM templates
-		"Microsoft.Resources/deployments/delete":                          true, // Can delete deployments
+		// Network Control (Lateral Movement)
+		"Microsoft.Network/networkSecurityGroups/write":                  true,
+		"Microsoft.Network/networkSecurityGroups/securityRules/write":    true,
+		"Microsoft.Network/virtualNetworks/write":                        true,
 
-		// Privileged Operations
-		"Microsoft.Automation/automationAccounts/write":                   true, // Can modify automation accounts
-		"Microsoft.Automation/automationAccounts/runbooks/write":          true, // Can modify runbooks
-		"Microsoft.Logic/workflows/write":                                 true, // Can modify logic apps
-		"Microsoft.Web/sites/write":                                       true, // Can modify web apps
-		"Microsoft.Web/sites/config/write":                                true, // Can modify web app config
-		"Microsoft.Web/sites/functions/write":                             true, // Can modify functions
+		// Message Queue & Event Systems (Persistence & C2)
+		"Microsoft.ServiceBus/namespaces/write":                          true,
+		"Microsoft.EventHub/namespaces/write":                            true,
 	}
 
 	// Check exact matches first
@@ -2261,74 +2234,63 @@ func (l *Neo4jImporterLink) isDangerousRBACPermission(permission string) bool {
 func (l *Neo4jImporterLink) expandRBACWildcardToDangerousPermissions(permission string) []string {
 	// Define dangerous RBAC permissions (same list as in isDangerousRBACPermission)
 	rbacDangerousPermissions := map[string]bool{
-		// Identity & Access Management - High Priority
+		// Identity & Access Management (Privilege Escalation)
 		"Microsoft.Authorization/roleAssignments/write":                   true,
-		"Microsoft.Authorization/roleAssignments/delete":                  true,
 		"Microsoft.Authorization/roleDefinitions/write":                   true,
-		"Microsoft.Authorization/roleDefinitions/delete":                  true,
 		"Microsoft.ManagedIdentity/userAssignedIdentities/write":         true,
 		"Microsoft.ManagedIdentity/userAssignedIdentities/assign/action": true,
 
-		// Compute - Direct System Access
-		"Microsoft.Compute/virtualMachines/write":                         true,
-		"Microsoft.Compute/virtualMachines/runCommand/action":             true,
-		"Microsoft.Compute/virtualMachines/extensions/write":              true,
-		"Microsoft.Compute/virtualMachines/restart/action":                true,
-		"Microsoft.Compute/virtualMachines/start/action":                  true,
-		"Microsoft.Compute/virtualMachineScaleSets/write":                 true,
-		"Microsoft.Compute/virtualMachineScaleSets/extensions/write":      true,
+		// Application/Service Principal Control (Backdoor Access)
+		"Microsoft.Graph/applications/credentials/update":                 true,
+		"Microsoft.Graph/servicePrincipals/credentials/update":           true,
+		"Microsoft.Directory/applications/credentials/update":            true,
+		"Microsoft.Directory/servicePrincipals/credentials/update":       true,
 
-		// Storage - Data Access
-		"Microsoft.Storage/storageAccounts/write":                         true,
-		"Microsoft.Storage/storageAccounts/listKeys/action":               true,
-		"Microsoft.Storage/storageAccounts/regeneratekey/action":          true,
-		"Microsoft.Storage/storageAccounts/blobServices/containers/write": true,
+		// Code Execution (Direct System Access)
+		"Microsoft.Compute/virtualMachines/runCommand/action":            true,
+		"Microsoft.Compute/virtualMachines/write":                        true,
+		"Microsoft.Compute/virtualMachines/extensions/write":             true,
+		"Microsoft.Compute/virtualMachineScaleSets/write":                true,
+		"Microsoft.Compute/virtualMachineScaleSets/extensions/write":     true,
+		"Microsoft.Automation/automationAccounts/write":                  true,
+		"Microsoft.Automation/automationAccounts/runbooks/write":         true,
+		"Microsoft.Logic/workflows/write":                                true,
+		"Microsoft.Web/sites/write":                                      true,
+		"Microsoft.Web/sites/config/write":                               true,
+		"Microsoft.Web/sites/functions/write":                            true,
+
+		// Storage & Data Access (Credential Theft)
+		"Microsoft.Storage/storageAccounts/write":                        true,
+		"Microsoft.Storage/storageAccounts/listKeys/action":              true,
+		"Microsoft.Storage/storageAccounts/regeneratekey/action":         true,
 		"Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey/action": true,
 
-		// Key Vault - Secrets Access
-		"Microsoft.KeyVault/vaults/write":                                 true,
-		"Microsoft.KeyVault/vaults/delete":                                true,
-		"Microsoft.KeyVault/vaults/secrets/write":                         true,
-		"Microsoft.KeyVault/vaults/secrets/delete":                        true,
-		"Microsoft.KeyVault/vaults/keys/write":                            true,
-		"Microsoft.KeyVault/vaults/keys/delete":                           true,
-		"Microsoft.KeyVault/vaults/certificates/write":                    true,
-		"Microsoft.KeyVault/vaults/accessPolicies/write":                  true,
+		// Key Vault (Secrets Access)
+		"Microsoft.KeyVault/vaults/write":                                true,
+		"Microsoft.KeyVault/vaults/secrets/write":                        true,
+		"Microsoft.KeyVault/vaults/keys/write":                           true,
+		"Microsoft.KeyVault/vaults/accessPolicies/write":                 true,
 
-		// Database Access
-		"Microsoft.Sql/servers/write":                                     true,
-		"Microsoft.Sql/servers/databases/write":                           true,
-		"Microsoft.Sql/servers/firewallRules/write":                       true,
-		"Microsoft.Sql/servers/administrators/write":                      true,
-		"Microsoft.DocumentDB/databaseAccounts/write":                     true,
-		"Microsoft.DocumentDB/databaseAccounts/listKeys/action":           true,
+		// Database Access (Data & Credential Theft)
+		"Microsoft.Sql/servers/databases/write":                          true,
+		"Microsoft.DocumentDB/databaseAccounts/listKeys/action":          true,
+		"Microsoft.DocumentDB/databaseAccounts/write":                    true,
 
-		// Networking - Security Controls
-		"Microsoft.Network/networkSecurityGroups/write":                   true,
-		"Microsoft.Network/networkSecurityGroups/securityRules/write":     true,
-		"Microsoft.Network/virtualNetworks/write":                         true,
-		"Microsoft.Network/publicIPAddresses/write":                       true,
-		"Microsoft.Network/loadBalancers/write":                           true,
-
-		// Container Services
-		"Microsoft.ContainerService/managedClusters/write":                true,
+		// Container & Registry (Supply Chain Attacks)
+		"Microsoft.ContainerService/managedClusters/write":               true,
 		"Microsoft.ContainerService/managedClusters/accessProfiles/listCredential/action": true,
-		"Microsoft.ContainerRegistry/registries/write":                    true,
-		"Microsoft.ContainerRegistry/registries/artifacts/delete":         true,
+		"Microsoft.ContainerRegistry/registries/write":                   true,
+		"Microsoft.ContainerRegistry/registries/push/write":              true,
 
-		// Resource Management
-		"Microsoft.Resources/subscriptions/write":                         true,
-		"Microsoft.Resources/subscriptions/resourceGroups/write":          true,
-		"Microsoft.Resources/deployments/write":                           true,
-		"Microsoft.Resources/deployments/delete":                          true,
+		// Resource Management (Infrastructure Takeover)
+		"Microsoft.Resources/deployments/write":                          true,
+		"Microsoft.Resources/subscriptions/resourceGroups/write":         true,
 
-		// Privileged Operations
-		"Microsoft.Automation/automationAccounts/write":                   true,
-		"Microsoft.Automation/automationAccounts/runbooks/write":          true,
-		"Microsoft.Logic/workflows/write":                                 true,
-		"Microsoft.Web/sites/write":                                       true,
-		"Microsoft.Web/sites/config/write":                                true,
-		"Microsoft.Web/sites/functions/write":                             true,
+		// Additional Managed Identity Services
+		"Microsoft.ContainerService/managedClusters/agentPools/write":    true,
+		"Microsoft.Sql/servers/write":                                    true,
+		"Microsoft.DataFactory/factories/write":                          true,
+		"Microsoft.Batch/batchAccounts/write":                            true,
 	}
 
 	var result []string
@@ -2464,7 +2426,7 @@ func (l *Neo4jImporterLink) parseAssignmentScope(scope string) (resourceType, re
 
 	// Check if it's a subscription-level scope
 	if len(parts) == 2 && parts[0] == "subscriptions" {
-		return "Subscription", parts[1]
+		return "Microsoft.Resources/subscriptions", fmt.Sprintf("/subscriptions/%s", parts[1])
 	}
 
 	// Check if it's a resource group-level scope

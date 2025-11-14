@@ -566,12 +566,10 @@ func (l *SDKComprehensiveCollectorLink) processSubscriptionsParallelSDK(
 	subChan := make(chan string, len(subscriptionIDs))
 	resultChan := make(chan subResult, len(subscriptionIDs))
 
-	// Use single worker for now (can be increased for performance)
+	// Use single worker to avoid concurrency issues with Azure SDK rate limiting
+	// Multiple workers can cause API throttling and authentication conflicts
 	var wg sync.WaitGroup
 	numWorkers := 1
-	if len(subscriptionIDs) < 1 {
-		numWorkers = len(subscriptionIDs)
-	}
 
 	// Start workers
 	for i := 0; i < numWorkers; i++ {

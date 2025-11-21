@@ -15,6 +15,17 @@ import (
 	"github.com/praetorian-inc/tabularium/pkg/model/model"
 )
 
+// Command represents the input and output of a command that requires manual triage
+// This is a local copy of enricher.Command to avoid import cycles
+type Command struct {
+	Command                   string `json:"command"`
+	Description               string `json:"description"`
+	ExpectedOutputDescription string `json:"expected_output_description"`
+	ActualOutput              string `json:"actual_output"`
+	ExitCode                  int    `json:"exit_code"`
+	Error                     string `json:"error,omitempty"`
+}
+
 // ARGScanOutput represents the complete output structure with template metadata
 type ARGScanOutput struct {
 	Metadata ARGScanMetadata `json:"metadata"`
@@ -355,6 +366,7 @@ func (j *ARGScanJSONOutputter) writeTemplateSectionDetail(writer *os.File, templ
 	fmt.Fprintf(writer, "**Severity:** %s\n\n", template.Severity)
 	fmt.Fprintf(writer, "**Template ID:** %s\n\n", template.ID)
 
+
 	// Findings table
 	fmt.Fprintf(writer, "### Findings\n\n")
 	fmt.Fprintf(writer, "| Resource Name | Resource Type | Location | Subscription | Details | Automated Triage |\n")
@@ -380,6 +392,7 @@ func (j *ARGScanJSONOutputter) writeTemplateSectionDetail(writer *os.File, templ
 			escapeForMarkdownTable(location), escapeForMarkdownTable(subscription),
 			details, automatedTriage)
 	}
+
 
 	// Triage guide
 	if template.TriageNotes != "" {
@@ -441,6 +454,7 @@ func (j *ARGScanJSONOutputter) buildDetailsString(properties map[string]any) str
 			details = append(details, fmt.Sprintf("%s: %v", escapeForMarkdownTable(prop), escapeForMarkdownTable(fmt.Sprintf("%v", v))))
 		}
 	}
+
 
 	// Limit to reasonable length for table cell
 	result := strings.Join(details, "<br>")

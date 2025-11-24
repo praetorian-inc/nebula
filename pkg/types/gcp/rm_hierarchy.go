@@ -45,3 +45,66 @@ type Project struct {
 	Policies       Policies `json:"policies"`
 	Services       []string `json:"services,omitempty"` // enabled services
 }
+
+func (org *Organization) ToResource() *Resource {
+	properties := make(map[string]string)
+	properties["organizationNumber"] = org.OrganizationNumber
+	if org.DirectoryCustomer != "" {
+		properties["directoryCustomer"] = org.DirectoryCustomer
+	}
+	if org.CreateTime != "" {
+		properties["createTime"] = org.CreateTime
+	}
+	for k, v := range org.Labels {
+		properties["label:"+k] = v
+	}
+	return &Resource{
+		AssetType:  "cloudresourcemanager.googleapis.com/Organization",
+		URI:        org.URI,
+		Name:       org.DisplayName,
+		Properties: properties,
+		Policies:   org.Policies,
+	}
+}
+
+func (folder *Folder) ToResource() *Resource {
+	properties := make(map[string]string)
+	properties["folderNumber"] = folder.FolderNumber
+	if folder.CreateTime != "" {
+		properties["createTime"] = folder.CreateTime
+	}
+	for k, v := range folder.Labels {
+		properties["label:"+k] = v
+	}
+	return &Resource{
+		AssetType:  "cloudresourcemanager.googleapis.com/Folder",
+		URI:        folder.URI,
+		ParentURI:  folder.ParentURI,
+		Name:       folder.DisplayName,
+		Properties: properties,
+		Policies:   folder.Policies,
+	}
+}
+
+func (project *Project) ToResource() *Resource {
+	properties := make(map[string]string)
+	properties["projectNumber"] = project.ProjectNumber
+	properties["projectId"] = project.ProjectID
+	if project.BillingAccount != "" {
+		properties["billingAccount"] = project.BillingAccount
+	}
+	if project.CreateTime != "" {
+		properties["createTime"] = project.CreateTime
+	}
+	for k, v := range project.Labels {
+		properties["label:"+k] = v
+	}
+	return &Resource{
+		AssetType:  "cloudresourcemanager.googleapis.com/Project",
+		URI:        project.URI,
+		ParentURI:  project.ParentURI,
+		Name:       project.DisplayName,
+		Properties: properties,
+		Policies:   project.Policies,
+	}
+}

@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	iampb "cloud.google.com/go/iam/apiv1/iampb"
 	iampolicies "cloud.google.com/go/iam/apiv2"
 	iampoliciespb "cloud.google.com/go/iam/apiv2/iampb"
 	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
 	resourcemanagerpb "cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
+	gcperrors "github.com/praetorian-inc/nebula/pkg/gcp/errors"
 	gcptypes "github.com/praetorian-inc/nebula/pkg/types/gcp"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -102,7 +104,7 @@ func (c *HierarchyCollector) CollectOrganization(orgID string, org *gcptypes.Org
 	if err != nil {
 		return fmt.Errorf("failed to get organization %s: %w", orgName, err)
 	}
-	org.URI = resp.Name
+	org.URI = toFullURI(resp.Name)
 	org.DisplayName = resp.DisplayName
 	org.CreateTime = resp.CreateTime.AsTime().Format("2006-01-02T15:04:05Z")
 	org.OrganizationNumber = extractIDFromName(resp.Name)
@@ -119,8 +121,8 @@ func (c *HierarchyCollector) CollectFolder(folderID string, folder *gcptypes.Fol
 	if err != nil {
 		return fmt.Errorf("failed to get folder %s: %w", folderName, err)
 	}
-	folder.URI = resp.Name
-	folder.ParentURI = resp.Parent
+	folder.URI = toFullURI(resp.Name)
+	folder.ParentURI = toFullURI(resp.Parent)
 	folder.DisplayName = resp.DisplayName
 	folder.CreateTime = resp.CreateTime.AsTime().Format("2006-01-02T15:04:05Z")
 	folder.FolderNumber = extractIDFromName(resp.Name)
@@ -129,7 +131,7 @@ func (c *HierarchyCollector) CollectFolder(folderID string, folder *gcptypes.Fol
 
 func (c *HierarchyCollector) CollectFoldersInParent(parentURI string) ([]*gcptypes.Folder, error) {
 	req := &resourcemanagerpb.ListFoldersRequest{
-		Parent: parentURI,
+		Parent: toShortName(parentURI),
 	}
 	it := c.foldersClient.ListFolders(c.ctx, req)
 	var folders []*gcptypes.Folder
@@ -142,8 +144,8 @@ func (c *HierarchyCollector) CollectFoldersInParent(parentURI string) ([]*gcptyp
 			return nil, fmt.Errorf("failed to iterate folders: %w", err)
 		}
 		folder := &gcptypes.Folder{
-			URI:          resp.Name,
-			ParentURI:    resp.Parent,
+			URI:          toFullURI(resp.Name),
+			ParentURI:    toFullURI(resp.Parent),
 			DisplayName:  resp.DisplayName,
 			CreateTime:   resp.CreateTime.AsTime().Format("2006-01-02T15:04:05Z"),
 			FolderNumber: extractIDFromName(resp.Name),
@@ -162,8 +164,8 @@ func (c *HierarchyCollector) CollectProject(projectID string, project *gcptypes.
 	if err != nil {
 		return fmt.Errorf("failed to get project %s: %w", projectName, err)
 	}
-	project.URI = resp.Name
-	project.ParentURI = resp.Parent
+	project.URI = toFullURI(resp.Name)
+	project.ParentURI = toFullURI(resp.Parent)
 	project.DisplayName = resp.DisplayName
 	project.CreateTime = resp.CreateTime.AsTime().Format("2006-01-02T15:04:05Z")
 	project.ProjectNumber = extractIDFromName(resp.Name)
@@ -176,7 +178,7 @@ func (c *HierarchyCollector) CollectProject(projectID string, project *gcptypes.
 
 func (c *HierarchyCollector) CollectProjectsInParent(parentURI string) ([]*gcptypes.Project, error) {
 	req := &resourcemanagerpb.ListProjectsRequest{
-		Parent: parentURI,
+		Parent: toShortName(parentURI),
 	}
 	it := c.projectsClient.ListProjects(c.ctx, req)
 	var projects []*gcptypes.Project
@@ -192,10 +194,9 @@ func (c *HierarchyCollector) CollectProjectsInParent(parentURI string) ([]*gcpty
 		if !c.IncludeSysProjects && isSysProject(resp.ProjectId, resp.DisplayName) {
 			continue
 		}
-
 		project := &gcptypes.Project{
-			URI:           resp.Name,
-			ParentURI:     resp.Parent,
+			URI:           toFullURI(resp.Name),
+			ParentURI:     toFullURI(resp.Parent),
 			DisplayName:   resp.DisplayName,
 			CreateTime:    resp.CreateTime.AsTime().Format("2006-01-02T15:04:05Z"),
 			ProjectNumber: extractIDFromName(resp.Name),
@@ -210,16 +211,20 @@ func (c *HierarchyCollector) CollectProjectsInParent(parentURI string) ([]*gcpty
 }
 
 func (c *HierarchyCollector) CollectAllowPolicy(resourceURI string, policies *gcptypes.Policies) error {
+	shortName := toShortName(resourceURI)
 	req := &iampb.GetIamPolicyRequest{
-		Resource: resourceURI,
+		Resource: shortName,
+		Options: &iampb.GetPolicyOptions{
+			RequestedPolicyVersion: 3,
+		},
 	}
 	var policy *iampb.Policy
 	var err error
-	if strings.HasPrefix(resourceURI, "organizations/") {
+	if strings.HasPrefix(shortName, "organizations/") {
 		policy, err = c.organizationsClient.GetIamPolicy(c.ctx, req)
-	} else if strings.HasPrefix(resourceURI, "folders/") {
+	} else if strings.HasPrefix(shortName, "folders/") {
 		policy, err = c.foldersClient.GetIamPolicy(c.ctx, req)
-	} else if strings.HasPrefix(resourceURI, "projects/") {
+	} else if strings.HasPrefix(shortName, "projects/") {
 		policy, err = c.projectsClient.GetIamPolicy(c.ctx, req)
 	} else {
 		return fmt.Errorf("unsupported resource type for IAM policy: %s", resourceURI)
@@ -251,14 +256,15 @@ func (c *HierarchyCollector) CollectAllowPolicy(resourceURI string, policies *gc
 }
 
 func (c *HierarchyCollector) CollectDenyPolicies(parentURI string, policies *gcptypes.Policies) error {
-	parent := convertURIToDenyPolicyParent(parentURI)
+	parent := convertURIToDenyPolicyParent(toShortName(parentURI))
 	req := &iampoliciespb.ListPoliciesRequest{
 		Parent: parent,
 	}
 	it := c.iamPoliciesClient.ListPolicies(c.ctx, req)
 	var denyPolicies []gcptypes.DenyPolicy
 	for {
-		policy, err := it.Next()
+		time.Sleep(10 * time.Second) // Rate limit deny policy requests to stay under quota
+		policy, err := gcperrors.RetryIterator(it.Next)
 		if err == iterator.Done {
 			break
 		}

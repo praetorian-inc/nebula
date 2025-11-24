@@ -57,6 +57,7 @@ require (
 	github.com/microsoftgraph/msgraph-sdk-go v1.53.0
 	github.com/microsoftgraph/msgraph-sdk-go-core v1.2.1
 	github.com/mpvl/unique v0.0.0-20150818121801-cbe035fff7de
+	github.com/neo4j/neo4j-go-driver/v5 v5.28.1
 	github.com/praetorian-inc/janus-framework v0.0.0-20250918211123-5f90adc9184b
 	github.com/praetorian-inc/konstellation v0.0.0-20250609145306-636c2e50b157
 	github.com/praetorian-inc/tabularium v1.0.43
@@ -64,6 +65,8 @@ require (
 	github.com/stretchr/testify v1.10.0
 	golang.org/x/oauth2 v0.30.0
 	google.golang.org/api v0.249.0
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250818200422-3122310a409c
+	google.golang.org/grpc v1.75.0
 )
 
 require (
@@ -122,7 +125,6 @@ require (
 	github.com/microsoft/kiota-serialization-text-go v1.0.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/sys/user v0.4.0 // indirect
-	github.com/neo4j/neo4j-go-driver/v5 v5.28.1 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
@@ -148,8 +150,6 @@ require (
 	golang.org/x/time v0.12.0 // indirect
 	google.golang.org/genproto v0.0.0-20250603155806-513f23925822 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250818200422-3122310a409c // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250818200422-3122310a409c // indirect
-	google.golang.org/grpc v1.75.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )
 

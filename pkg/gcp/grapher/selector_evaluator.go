@@ -40,7 +40,7 @@ func (se *SelectorEvaluator) EvaluateCondition(condition *gcptypes.Condition, re
 			"type":     resource.AssetType,
 			"service":  resource.Service,
 			"location": resource.Location,
-			"labels":   resource.Tags,
+			"labels":   resource.Properties,
 		},
 	}
 	result, _, err := prg.Eval(vars)
@@ -72,7 +72,7 @@ func (se *SelectorEvaluator) MatchesTags(requiredTags map[string]string, resourc
 		return true
 	}
 	for key, value := range requiredTags {
-		resourceValue, ok := resource.Tags[key]
+		resourceValue, ok := resource.Properties[key]
 		if !ok || resourceValue != value {
 			return false
 		}

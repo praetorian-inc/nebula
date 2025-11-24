@@ -21,7 +21,9 @@ func (re *RoleExpander) AddRole(role *gcptypes.Role) {
 	for _, p := range role.IncludedPermissions {
 		permSet.Add(p)
 	}
-	re.rolePermsByName[role.Name] = permSet
+	if len(permSet) > 0 {
+		re.rolePermsByName[role.Name] = permSet
+	}
 }
 
 func (re *RoleExpander) AddRoles(roles []*gcptypes.Role) {

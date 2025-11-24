@@ -7,6 +7,7 @@ import (
 	asset "cloud.google.com/go/asset/apiv1"
 	assetpb "cloud.google.com/go/asset/apiv1/assetpb"
 	iampb "cloud.google.com/go/iam/apiv1/iampb"
+	gcperrors "github.com/praetorian-inc/nebula/pkg/gcp/errors"
 	gcptypes "github.com/praetorian-inc/nebula/pkg/types/gcp"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -49,7 +50,7 @@ func (rc *ResourceCollector) ListResourcesInScope(scope string, assetTypes []str
 	resources := make([]*gcptypes.Resource, 0)
 
 	for {
-		assetResp, err := it.Next()
+		assetResp, err := gcperrors.RetryIterator(it.Next)
 		if err == iterator.Done {
 			break
 		}
@@ -58,19 +59,19 @@ func (rc *ResourceCollector) ListResourcesInScope(scope string, assetTypes []str
 		}
 
 		resource := &gcptypes.Resource{
-			URI:         assetResp.Name,
-			AssetType:   assetResp.AssetType,
-			DisplayName: extractDisplayName(assetResp),
-			Location:    extractLocation(assetResp),
-			ParentURI:   extractParentURI(assetResp),
-			Tags:        make(map[string]string),
+			URI:        assetResp.Name,
+			AssetType:  assetResp.AssetType,
+			Name:       extractDisplayName(assetResp),
+			Location:   extractLocation(assetResp),
+			ParentURI:  extractParentURI(assetResp),
+			Properties: make(map[string]string),
 		}
 
 		if assetResp.Resource != nil && assetResp.Resource.Data != nil {
 			if labels := assetResp.Resource.Data.GetFields()["labels"]; labels != nil {
 				if labelsStruct := labels.GetStructValue(); labelsStruct != nil {
 					for key, val := range labelsStruct.Fields {
-						resource.Tags[key] = val.GetStringValue()
+						resource.Properties[key] = val.GetStringValue()
 					}
 				}
 			}
@@ -93,7 +94,7 @@ func (rc *ResourceCollector) ListResourcesWithPolicies(scope string, assetTypes 
 	resources := make([]*gcptypes.Resource, 0)
 
 	for {
-		assetResp, err := it.Next()
+		assetResp, err := gcperrors.RetryIterator(it.Next)
 		if err == iterator.Done {
 			break
 		}
@@ -102,12 +103,12 @@ func (rc *ResourceCollector) ListResourcesWithPolicies(scope string, assetTypes 
 		}
 
 		resource := &gcptypes.Resource{
-			URI:         assetResp.Name,
-			AssetType:   assetResp.AssetType,
-			DisplayName: extractDisplayName(assetResp),
-			Location:    extractLocation(assetResp),
-			ParentURI:   extractParentURI(assetResp),
-			Tags:        make(map[string]string),
+			URI:        assetResp.Name,
+			AssetType:  assetResp.AssetType,
+			Name:       extractDisplayName(assetResp),
+			Location:   extractLocation(assetResp),
+			ParentURI:  extractParentURI(assetResp),
+			Properties: make(map[string]string),
 		}
 
 		if assetResp.IamPolicy != nil {

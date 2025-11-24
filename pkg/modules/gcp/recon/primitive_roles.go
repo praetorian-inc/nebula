@@ -72,9 +72,10 @@ The module provides detailed findings including CVSS scoring and remediation gui
 	options.GcpOrg(),
 ).WithParams(
 	cfg.NewParam[string]("module-name", "name of the module for dynamic file naming"),
-	options.GcpIncludeSysProjects(),
+	cfg.NewParam[bool]("include-sys-projects", "include system projects from analysis").WithDefault(true),
 	cfg.NewParam[bool]("exclude-default-service-accounts", "exclude default service accounts from primitive role detection").WithDefault(false),
 ).WithConfigs(
 	cfg.WithArg("module-name", "primitive-roles"),
+	cfg.WithArg("include-sys-projects", true),
 	cfg.WithArg("exclude-default-service-accounts", false),
 )

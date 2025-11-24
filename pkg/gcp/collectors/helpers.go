@@ -1,6 +1,10 @@
 package gcloudcollectors
 
-import "strings"
+import (
+	"fmt"
+	"regexp"
+	"strings"
+)
 
 func normalizeOrgName(orgID string) string {
 	if strings.HasPrefix(orgID, "organizations/") {
@@ -32,16 +36,8 @@ func extractIDFromName(name string) string {
 }
 
 func convertURIToDenyPolicyParent(uri string) string {
-	if strings.HasPrefix(uri, "organizations/") {
-		return uri + "/locations/global"
-	}
-	if strings.HasPrefix(uri, "folders/") {
-		return uri + "/locations/global"
-	}
-	if strings.HasPrefix(uri, "projects/") {
-		return uri + "/locations/global"
-	}
-	return uri
+	encodedURI := strings.ReplaceAll(uri, "/", "%2F") // needed
+	return "policies/cloudresourcemanager.googleapis.com%2F" + encodedURI + "/denypolicies"
 }
 
 func isSysProject(projectID, displayName string) bool {
@@ -73,4 +69,78 @@ func extractIDFromURI(uri string) string {
 		}
 	}
 	return uri
+}
+
+func toFullURI(shortName string) string {
+	if strings.HasPrefix(shortName, "//") {
+		return shortName
+	}
+	return "//cloudresourcemanager.googleapis.com/" + shortName
+}
+
+func toShortName(fullURI string) string {
+	if strings.HasPrefix(fullURI, "//cloudresourcemanager.googleapis.com/") {
+		return strings.TrimPrefix(fullURI, "//cloudresourcemanager.googleapis.com/")
+	}
+	return fullURI
+}
+
+func ExtractProjectIDFromEmail(email string) string {
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 {
+		return ""
+	}
+	domainParts := strings.Split(parts[1], ".")
+	if len(domainParts) > 0 {
+		return domainParts[0]
+	}
+	return ""
+}
+
+func ExtractProjectNumber(uri string) string {
+	re := regexp.MustCompile(`projects/(\d+)`)
+	matches := re.FindStringSubmatch(uri)
+	if len(matches) > 1 {
+		return matches[1]
+	}
+	return ""
+}
+
+func ExtractProjectIDFromURI(uri string) string {
+	re := regexp.MustCompile(`projects/([^/]+)`)
+	matches := re.FindStringSubmatch(uri)
+	if len(matches) > 1 {
+		return matches[1]
+	}
+	return ""
+}
+
+func BuildFullResourceURI(service string, shortName string, projectIDToNumber map[string]string) string {
+	projectID := ExtractProjectIDFromURI(shortName)
+	if projectID == "" {
+		return "//" + service + "/" + shortName
+	}
+
+	projectNumber, ok := projectIDToNumber[projectID]
+	if !ok {
+		return "//" + service + "/" + shortName
+	}
+
+	updatedName := strings.Replace(shortName, "projects/"+projectID, "projects/"+projectNumber, 1)
+	return "//" + service + "/" + updatedName
+}
+
+func BuildServiceAccountURI(email string, projectNumber string) string {
+	return fmt.Sprintf("//iam.googleapis.com/projects/%s/serviceAccounts/%s", projectNumber, email)
+}
+
+func BuildProjectParentURI(projectNumber string) string {
+	return fmt.Sprintf("//cloudresourcemanager.googleapis.com/projects/%s", projectNumber)
+}
+
+func NormalizeToFullURI(uri string) string {
+	if strings.HasPrefix(uri, "//") {
+		return uri
+	}
+	return "//cloudresourcemanager.googleapis.com/" + uri
 }

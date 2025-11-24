@@ -11,19 +11,22 @@ import (
 	serviceusagepb "cloud.google.com/go/serviceusage/apiv1/serviceusagepb"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
+	gcperrors "github.com/praetorian-inc/nebula/pkg/gcp/errors"
 	"github.com/praetorian-inc/nebula/internal/helpers"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/base"
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 	"golang.org/x/oauth2/google"
+	"google.golang.org/api/cloudresourcemanager/v1"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
 
 type GcpAssetSearchOrgLink struct {
 	*base.GcpBaseLink
-	assetClient     *asset.Client
-	resourceCounts  map[string]int
-	assetAPIProject string
+	assetClient            *asset.Client
+	resourceManagerService *cloudresourcemanager.Service
+	resourceCounts         map[string]int
+	assetAPIProject        string
 }
 
 func NewGcpAssetSearchOrgLink(configs ...cfg.Config) chain.Link {
@@ -62,6 +65,10 @@ func (g *GcpAssetSearchOrgLink) Initialize() error {
 	if err != nil {
 		return fmt.Errorf("failed to create asset client: %w", err)
 	}
+	g.resourceManagerService, err = cloudresourcemanager.NewService(ctx, g.ClientOptions...)
+	if err != nil {
+		return fmt.Errorf("failed to create resource manager service: %w", err)
+	}
 	return nil
 }
 
@@ -72,31 +79,52 @@ func (g *GcpAssetSearchOrgLink) Process(resource tab.GCPResource) error {
 	if err := CheckAssetAPIEnabled(g.assetAPIProject, g.ClientOptions...); err != nil {
 		return err
 	}
-	scope := fmt.Sprintf("organizations/%s", resource.Name)
-	return g.performAssetSearch(scope, "organization", resource)
-}
 
-func (g *GcpAssetSearchOrgLink) performAssetSearch(scope, scopeType string, resource tab.GCPResource) error {
-	slog.Info("Searching assets", "scope", scope, "scopeName", resource.DisplayName)
-	req := &assetpb.SearchAllResourcesRequest{
-		Scope: scope,
-	}
-	ctx := context.Background()
-	it := g.assetClient.SearchAllResources(ctx, req)
-	totalCount := 0
-	for {
-		assetResource, err := it.Next()
-		if err == iterator.Done {
-			break
+	// List all projects in the organization
+	orgID := resource.Name
+	slog.Info("Listing projects in organization", "orgID", orgID, "orgName", resource.DisplayName)
+
+	var projects []*cloudresourcemanager.Project
+	listReq := g.resourceManagerService.Projects.List()
+	err := listReq.Pages(context.Background(), func(page *cloudresourcemanager.ListProjectsResponse) error {
+		for _, project := range page.Projects {
+			// Filter out sys-* projects
+			if isSysProject(project) {
+				slog.Debug("Skipping system project", "projectId", project.ProjectId)
+				continue
+			}
+			// Only include projects under this org
+			if project.Parent != nil && project.Parent.Type == "organization" && project.Parent.Id == orgID {
+				projects = append(projects, project)
+			}
 		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list projects: %w", err)
+	}
+
+	slog.Info("Found projects to scan", "count", len(projects))
+
+	// For each project, list assets and aggregate counts
+	totalProjectCount := 0
+	for _, project := range projects {
+		projectScope := fmt.Sprintf("projects/%s", project.ProjectId)
+		slog.Info("Scanning project", "projectId", project.ProjectId, "projectName", project.Name)
+
+		count, err := g.listAssetsForScope(projectScope)
 		if err != nil {
-			return fmt.Errorf("failed to iterate assets: %w", err)
+			slog.Warn("Failed to list assets for project", "projectId", project.ProjectId, "error", err)
+			continue
 		}
-		assetType := assetResource.AssetType
-		g.resourceCounts[assetType]++
-		totalCount++
+		totalProjectCount += count
 	}
-	slog.Info("Asset search completed", "scope", scope, "totalResources", totalCount, "uniqueTypes", len(g.resourceCounts))
+
+	slog.Info("Organization asset scan completed",
+		"orgID", orgID,
+		"totalProjects", len(projects),
+		"totalAssets", totalProjectCount,
+		"uniqueTypes", len(g.resourceCounts))
 
 	var resources []*helpers.ResourceCount
 	for assetType, count := range g.resourceCounts {
@@ -106,7 +134,7 @@ func (g *GcpAssetSearchOrgLink) performAssetSearch(scope, scopeType string, reso
 		})
 	}
 	envDetails := &helpers.GCPEnvironmentDetails{
-		ScopeType: scopeType,
+		ScopeType: "organization",
 		ScopeName: resource.DisplayName,
 		ScopeID:   resource.Name,
 		Location:  resource.Region,
@@ -115,6 +143,31 @@ func (g *GcpAssetSearchOrgLink) performAssetSearch(scope, scopeType string, reso
 	}
 	g.Send(envDetails)
 	return nil
+}
+
+// listAssetsForScope lists assets in a given scope and updates resourceCounts
+func (g *GcpAssetSearchOrgLink) listAssetsForScope(scope string) (int, error) {
+	req := &assetpb.ListAssetsRequest{
+		Parent:      scope,
+		ContentType: assetpb.ContentType_CONTENT_TYPE_UNSPECIFIED,
+		PageSize:    1000,
+	}
+	ctx := context.Background()
+	it := g.assetClient.ListAssets(ctx, req)
+	count := 0
+	for {
+		asset, err := gcperrors.RetryIterator(it.Next)
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return count, fmt.Errorf("failed to iterate assets: %w", err)
+		}
+		assetType := asset.AssetType
+		g.resourceCounts[assetType]++
+		count++
+	}
+	return count, nil
 }
 
 type GcpAssetSearchFolderLink struct {
@@ -177,26 +230,28 @@ func (g *GcpAssetSearchFolderLink) Process(resource tab.GCPResource) error {
 }
 
 func (g *GcpAssetSearchFolderLink) performAssetSearch(scope, scopeType string, resource tab.GCPResource) error {
-	slog.Info("Searching assets", "scope", scope, "scopeName", resource.DisplayName)
-	req := &assetpb.SearchAllResourcesRequest{
-		Scope: scope,
+	slog.Info("Listing assets (minimal data for counting)", "scope", scope, "scopeName", resource.DisplayName)
+	req := &assetpb.ListAssetsRequest{
+		Parent:      scope,
+		ContentType: assetpb.ContentType_CONTENT_TYPE_UNSPECIFIED,
+		PageSize:    1000,
 	}
 	ctx := context.Background()
-	it := g.assetClient.SearchAllResources(ctx, req)
+	it := g.assetClient.ListAssets(ctx, req)
 	totalCount := 0
 	for {
-		assetResource, err := it.Next()
+		asset, err := gcperrors.RetryIterator(it.Next)
 		if err == iterator.Done {
 			break
 		}
 		if err != nil {
 			return fmt.Errorf("failed to iterate assets: %w", err)
 		}
-		assetType := assetResource.AssetType
+		assetType := asset.AssetType
 		g.resourceCounts[assetType]++
 		totalCount++
 	}
-	slog.Info("Asset search completed", "scope", scope, "totalResources", totalCount, "uniqueTypes", len(g.resourceCounts))
+	slog.Info("Asset listing completed", "scope", scope, "totalResources", totalCount, "uniqueTypes", len(g.resourceCounts))
 
 	var resources []*helpers.ResourceCount
 	for assetType, count := range g.resourceCounts {
@@ -269,27 +324,29 @@ func (g *GcpAssetSearchProjectLink) Process(resource tab.GCPResource) error {
 }
 
 func (g *GcpAssetSearchProjectLink) performAssetSearch(scope, scopeType string, resource tab.GCPResource) error {
-	slog.Info("Searching assets", "scope", scope, "scopeName", resource.DisplayName)
+	slog.Info("Listing assets (minimal data for counting)", "scope", scope, "scopeName", resource.DisplayName)
 
-	req := &assetpb.SearchAllResourcesRequest{
-		Scope: scope,
+	req := &assetpb.ListAssetsRequest{
+		Parent:      scope,
+		ContentType: assetpb.ContentType_CONTENT_TYPE_UNSPECIFIED,
+		PageSize:    1000,
 	}
 	ctx := context.Background()
-	it := g.assetClient.SearchAllResources(ctx, req)
+	it := g.assetClient.ListAssets(ctx, req)
 	totalCount := 0
 	for {
-		assetResource, err := it.Next()
+		asset, err := gcperrors.RetryIterator(it.Next)
 		if err == iterator.Done {
 			break
 		}
 		if err != nil {
 			return fmt.Errorf("failed to iterate assets: %w", err)
 		}
-		assetType := assetResource.AssetType
+		assetType := asset.AssetType
 		g.resourceCounts[assetType]++
 		totalCount++
 	}
-	slog.Info("Asset search completed", "scope", scope, "totalResources", totalCount, "uniqueTypes", len(g.resourceCounts))
+	slog.Info("Asset listing completed", "scope", scope, "totalResources", totalCount, "uniqueTypes", len(g.resourceCounts))
 
 	var resources []*helpers.ResourceCount
 	for assetType, count := range g.resourceCounts {

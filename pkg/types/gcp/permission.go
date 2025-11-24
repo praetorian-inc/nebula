@@ -7,11 +7,17 @@ type Provenance struct {
 	Conditions    []string
 }
 
+type ContainsEdge struct {
+	Parent *Resource
+	Child  *Resource
+}
+
 type PermissionTuple struct {
-	Principal  *Principal
+	Source     *Resource
 	Permission Permission
-	Resource   *Resource
+	Target     *Resource
 	Provenance *Provenance
+	IsDeny     bool
 }
 
 type PermissionSet map[Permission]struct{}

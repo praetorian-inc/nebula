@@ -1877,7 +1877,16 @@ func (l *Neo4jImporterLink) buildRoleDefinitionsCache() error {
 					if roleDefMap, ok := roleDef.(map[string]interface{}); ok {
 						roleDefinitionId := l.getStringValue(roleDefMap, "id") // RBAC uses "id" field as full path ID
 						if roleDefinitionId != "" {
+							// Store with full subscription-scoped ID
 							l.roleDefinitionsMap[roleDefinitionId] = roleDefMap
+
+							// Also store with normalized key format to match role assignments
+							// Extract role GUID and create normalized key
+							if roleGUID := l.getStringValue(roleDefMap, "name"); roleGUID != "" {
+								normalizedKey := "/providers/Microsoft.Authorization/RoleDefinitions/" + roleGUID
+								l.roleDefinitionsMap[normalizedKey] = roleDefMap
+								l.Logger.Debug("Cached role definition with both keys", "fullId", roleDefinitionId, "normalizedKey", normalizedKey)
+							}
 							rbacRoleCount++
 						}
 					}
@@ -1935,8 +1944,26 @@ func (l *Neo4jImporterLink) expandRBACRoleToPermissions(roleDefinitionId string)
 	// Look up role definition by roleDefinitionId
 	roleDef, exists := l.roleDefinitionsMap[roleDefinitionId]
 	if !exists {
-		l.Logger.Debug("RBAC role definition not found", "roleDefinitionId", roleDefinitionId)
-		return permissions
+		// Fallback: try to find by any key containing the role GUID
+		if strings.Contains(roleDefinitionId, "/RoleDefinitions/") {
+			parts := strings.Split(roleDefinitionId, "/")
+			if len(parts) > 0 {
+				roleGUID := parts[len(parts)-1]
+				for cachedKey, cachedRoleDef := range l.roleDefinitionsMap {
+					if strings.HasSuffix(cachedKey, roleGUID) {
+						l.Logger.Debug("Found RBAC role via fallback lookup", "searchKey", roleDefinitionId, "foundKey", cachedKey)
+						roleDef = cachedRoleDef
+						exists = true
+						break
+					}
+				}
+			}
+		}
+
+		if !exists {
+			l.Logger.Debug("RBAC role definition not found", "roleDefinitionId", roleDefinitionId)
+			return permissions
+		}
 	}
 
 	l.Logger.Debug("Found RBAC role definition", "roleDefinitionId", roleDefinitionId)

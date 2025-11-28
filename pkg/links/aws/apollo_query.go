@@ -9,7 +9,7 @@ import (
 	"github.com/praetorian-inc/konstellation/pkg/graph/adapters"
 	"github.com/praetorian-inc/konstellation/pkg/graph/queries"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
-	"github.com/praetorian-inc/tabularium/pkg/model/model"
+	"github.com/praetorian-inc/nebula/pkg/types"
 )
 
 type ApolloQuery struct {
@@ -83,34 +83,23 @@ func (a *ApolloQuery) Process(query string) error {
 					continue
 				}
 
-				// var proofKey string
-				// var proofValue any
-				// for k, _ := range r {
-				// 	if k != "vulnerable" {
-				// 		proofKey = k
-				// 		proofValue = r.String()
-				// 		break
-				// 	}
-				// }
-
-				// if proofKey == "" {
-				// 	proofKey = "attack-path"
-				// 	proofValue = r.String()
-				// }
-
-				risk := model.Risk{
-					Name:     q.QueryMetadata.Name,
-					DNS:      vuln,
-					Priority: GetPriority(q.QueryMetadata.Severity),
-					// Proof:    map[string]any{proofKey: proofValue},
-					// Metadata: map[string]any{
-					// 	"name":              q.QueryMetadata.Name,
-					// 	"description":       q.QueryMetadata.Description,
-					// 	"severity":          q.QueryMetadata.Severity,
-					// 	"impacted-services": q.QueryMetadata.ImpactedServices,
-					// },
+				// Build proof from all non-vulnerable fields in the query result
+				proof := make(map[string]any)
+				for k, v := range r {
+					if k != "vulnerable" {
+						proof[k] = v
+					}
 				}
-				a.Send(risk)
+
+				result := types.ApolloQueryResult{
+					Name:             q.QueryMetadata.Name,
+					Severity:         q.QueryMetadata.Severity,
+					Vulnerable:       vuln,
+					Description:      q.QueryMetadata.Description,
+					ImpactedServices: q.QueryMetadata.ImpactedServices,
+					Proof:            proof,
+				}
+				a.Send(result)
 			}
 		}
 	}

@@ -11,20 +11,23 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/internal/message"
+	"github.com/praetorian-inc/nebula/pkg/types"
 	"github.com/praetorian-inc/tabularium/pkg/model/model"
 )
 
 type RiskCSVOutputter struct {
 	*chain.BaseOutputter
-	risks      []model.Risk // List to store all risks
-	outputFile string
+	risks        []model.Risk           // List to store all risks
+	apolloResults []types.ApolloQueryResult // List to store Apollo query results
+	outputFile   string
 }
 
 // NewRiskCSVOutputter creates a new CSV outputter for Risk types
 func NewRiskCSVOutputter(configs ...cfg.Config) chain.Outputter {
 	o := &RiskCSVOutputter{
-		risks:      []model.Risk{},
-		outputFile: "risks.csv",
+		risks:         []model.Risk{},
+		apolloResults: []types.ApolloQueryResult{},
+		outputFile:    "risks.csv",
 	}
 	o.BaseOutputter = chain.NewBaseOutputter(o, configs...)
 	return o
@@ -32,13 +35,23 @@ func NewRiskCSVOutputter(configs ...cfg.Config) chain.Outputter {
 
 // Output collects risk items for CSV output
 func (o *RiskCSVOutputter) Output(v any) error {
+	// Try to get an ApolloQueryResult first
+	if apolloResult, ok := v.(types.ApolloQueryResult); ok {
+		o.apolloResults = append(o.apolloResults, apolloResult)
+		return nil
+	}
+	if apolloResultPtr, ok := v.(*types.ApolloQueryResult); ok {
+		o.apolloResults = append(o.apolloResults, *apolloResultPtr)
+		return nil
+	}
+
 	// Try to get a Janus Risk type
 	janusRisk, ok := v.(model.Risk)
 	if !ok {
 		// Try as pointer
 		janusRiskPtr, ok := v.(*model.Risk)
 		if !ok {
-			return nil // Not a Janus Risk, silently ignore
+			return nil // Not a supported type, silently ignore
 		}
 		janusRisk = *janusRiskPtr
 	}
@@ -61,12 +74,76 @@ func (o *RiskCSVOutputter) Initialize() error {
 
 // Complete is called when the chain is complete - write all collected risks to CSV
 func (o *RiskCSVOutputter) Complete() error {
+	// Handle Apollo query results
+	if len(o.apolloResults) > 0 {
+		return o.writeApolloResults()
+	}
+
+	// Handle standard risks
 	if len(o.risks) == 0 {
 		slog.Info("No risks to write to CSV")
 		return nil
 	}
 
-	// Create CSV file
+	return o.writeRisks()
+}
+
+// writeApolloResults writes Apollo query results to CSV
+func (o *RiskCSVOutputter) writeApolloResults() error {
+	file, err := os.Create(o.outputFile)
+	if err != nil {
+		return fmt.Errorf("failed to create CSV file: %w", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Write CSV header for Apollo results
+	header := []string{
+		"Name",
+		"Severity",
+		"Vulnerable",
+		"Description",
+		"Impacted Services",
+		"Proof",
+	}
+
+	if err := writer.Write(header); err != nil {
+		return fmt.Errorf("error writing CSV header: %w", err)
+	}
+
+	// Write each Apollo result as a CSV row
+	for _, result := range o.apolloResults {
+		// Convert impacted services to string
+		impactedServices, _ := formatAny(result.ImpactedServices)
+
+		// Convert proof to string
+		proofStr, err := formatMap(result.Proof)
+		if err != nil {
+			proofStr = fmt.Sprintf("Error formatting proof: %v", err)
+		}
+
+		row := []string{
+			result.Name,
+			result.Severity,
+			result.Vulnerable,
+			result.Description,
+			impactedServices,
+			proofStr,
+		}
+
+		if err := writer.Write(row); err != nil {
+			return fmt.Errorf("error writing CSV row: %w", err)
+		}
+	}
+
+	message.Success("CSV output written to %s (%d results)", o.outputFile, len(o.apolloResults))
+	return nil
+}
+
+// writeRisks writes standard Risk objects to CSV
+func (o *RiskCSVOutputter) writeRisks() error {
 	file, err := os.Create(o.outputFile)
 	if err != nil {
 		return fmt.Errorf("failed to create CSV file: %w", err)
@@ -94,45 +171,15 @@ func (o *RiskCSVOutputter) Complete() error {
 
 	// Write each risk as a CSV row
 	for _, risk := range o.risks {
-		// Extract description and impacted services from metadata
-		description := ""
-		impactedServices := ""
-
-		// if risk.Metadata != nil {
-		// 	if desc, ok := risk.Metadata["description"].(string); ok {
-		// 		description = desc
-		// 	}
-
-		// 	if services, ok := risk.Metadata["impacted-services"]; ok {
-		// 		// Convert services to string
-		// 		servicesStr, err := formatAny(services)
-		// 		if err == nil {
-		// 			impactedServices = servicesStr
-		// 		}
-		// 	}
-		// }
-
-		// Convert proof to string
-		// proofStr, err := formatMap(risk.Proof)
-		// if err != nil {
-		// 	proofStr = fmt.Sprintf("Error formatting proof: %v", err)
-		// }
-
-		// Convert metadata to string
-		// metadataStr, err := formatMap(risk.Metadata)
-		// if err != nil {
-		// 	metadataStr = fmt.Sprintf("Error formatting metadata: %v", err)
-		// }
-
-		// Create and write the CSV row
 		row := []string{
 			risk.Name,
-			string(risk.Priority),
+			fmt.Sprintf("%d", risk.Priority),
 			risk.DNS,
-			description,
-			impactedServices,
-			// proofStr,
-			// metadataStr,
+			"", // IP (not used)
+			"", // Description
+			"", // Impacted Services
+			"", // Proof
+			"", // Metadata
 		}
 
 		if err := writer.Write(row); err != nil {

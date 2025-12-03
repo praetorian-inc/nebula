@@ -882,7 +882,16 @@ func TestPolicyEvaluator_AssumeRolePolicyDocument(t *testing.T) {
 		},
 	}
 
-	evaluator := NewPolicyEvaluator(&PolicyData{})
+	// Create PolicyData with ResourcePolicies containing the trust policy
+	// For AssumeRole, the evaluator checks ResourcePolicies[roleArn] for the trust policy
+	resourcePolicies := make(map[string]*types.Policy)
+	resourcePolicies["arn:aws:iam::111122223333:role/role-name"] = &types.Policy{
+		Statement: assumeRolePolicy,
+	}
+
+	evaluator := NewPolicyEvaluator(&PolicyData{
+		ResourcePolicies: resourcePolicies,
+	})
 
 	tests := []struct {
 		name             string
@@ -933,7 +942,6 @@ func TestPolicyEvaluator_AssumeRolePolicyDocument(t *testing.T) {
 				Resource:           tt.resource,
 				Context:            createRequestContext(tt.principalArn),
 				IdentityStatements: identity,
-				BoundaryStatements: assumeRolePolicy,
 			}
 
 			result, err := evaluator.Evaluate(req)
@@ -1206,6 +1214,7 @@ func TestPolicyEvaluator_SCPServiceLinkedRole(t *testing.T) {
 	// Test regular principal - should be denied by SCP
 	ctx := createRequestContext("arn:aws:iam::111122223333:user/test-user")
 	ctx.PrincipalOrgID = "o-1234567"
+	ctx.ResourceAccount = "111122223333" // Required for SCP lookup
 	req := &EvaluationRequest{
 		Action:             "bedrock:InvokeModel",
 		Resource:           "arn:aws:bedrock:us-east-1:111122223333:agent/QOYTA2YG0G",
@@ -1222,6 +1231,7 @@ func TestPolicyEvaluator_SCPServiceLinkedRole(t *testing.T) {
 	// Test service-linked role - should be allowed despite SCP deny
 	ctx = createRequestContext("arn:aws:iam::111122223333:role/aws-service-role/bedrock.amazonaws.com/AWSServiceRoleForBedrock")
 	ctx.PrincipalOrgID = "o-1234567"
+	ctx.ResourceAccount = "111122223333" // Required for SCP lookup
 	req = &EvaluationRequest{
 		Action:             "bedrock:InvokeModel",
 		Resource:           "arn:aws:bedrock:us-east-1:111122223333:agent/QOYTA2YG0G",

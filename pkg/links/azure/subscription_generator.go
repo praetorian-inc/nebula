@@ -29,47 +29,47 @@ func (l *AzureSubscriptionGeneratorLink) Params() []cfg.Param {
 
 func (l *AzureSubscriptionGeneratorLink) Process(input any) error {
 	subscriptions, _ := cfg.As[[]string](l.Arg("subscription"))
-	
+
 	l.Logger.Info("Processing Azure subscription input", "subscriptions", subscriptions)
-	
+
 	// Handle the case where subscriptions is empty or contains "all"
 	if len(subscriptions) == 0 || (len(subscriptions) == 1 && strings.EqualFold(subscriptions[0], "all")) {
 		l.Logger.Info("Listing all subscriptions")
-		
+
 		// Get credentials
 		cred, err := helpers.NewAzureCredential()
 		if err != nil {
 			l.Logger.Error("Failed to get Azure credentials", "error", err)
 			return err
 		}
-		
+
 		// Create subscription client directly
 		subClient, err := armsubscriptions.NewClient(cred, nil)
 		if err != nil {
 			l.Logger.Error("Failed to create subscription client", "error", err)
 			return err
 		}
-		
+
 		// List all subscriptions
 		pager := subClient.NewListPager(nil)
 		var allSubs []string
-		
+
 		for pager.More() {
 			page, err := pager.NextPage(l.Context())
 			if err != nil {
 				l.Logger.Error("Failed to list subscriptions", "error", err)
 				return err
 			}
-			
+
 			for _, sub := range page.Value {
 				if sub.SubscriptionID != nil {
 					allSubs = append(allSubs, *sub.SubscriptionID)
 				}
 			}
 		}
-		
+
 		l.Logger.Info("Found subscriptions", "count", len(allSubs))
-		
+
 		for _, sub := range allSubs {
 			l.Logger.Debug("Sending subscription", "subscription", sub)
 			l.Send(sub)
@@ -81,6 +81,6 @@ func (l *AzureSubscriptionGeneratorLink) Process(input any) error {
 			l.Send(subscription)
 		}
 	}
-	
+
 	return nil
 }

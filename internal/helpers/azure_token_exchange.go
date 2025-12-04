@@ -21,7 +21,6 @@ type TokenResponse struct {
 }
 
 // ExchangeRefreshToken exchanges a refresh token for an access token
-// Direct port of AzureHunter's token_exchange.py logic
 func ExchangeRefreshToken(refreshToken, clientID, tenantID, scope, proxyURL string) (*TokenResponse, error) {
 	// Detect which format to use based on client_id
 	useBrokerFormat := (clientID == "c44b4083-3bb0-49c1-b47d-974e53cbdf3c") // Azure Portal broker
@@ -87,7 +86,7 @@ func ExchangeRefreshToken(refreshToken, clientID, tenantID, scope, proxyURL stri
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
 
-	// Set headers to match AzureHunter
+	// Set headers for token exchange request
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=utf-8")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:143.0) Gecko/20100101 Firefox/143.0")
 	req.Header.Set("Accept", "*/*")
@@ -130,11 +129,11 @@ func GetGraphAPIToken(refreshToken, tenantID, proxyURL string) (*TokenResponse, 
 	return ExchangeRefreshToken(refreshToken, clientID, tenantID, scope, proxyURL)
 }
 
-// GetPIMToken gets a PIM API access token - EXACTLY like AzureHunter
+// GetPIMToken gets a PIM API access token
 func GetPIMToken(refreshToken, tenantID, proxyURL string) (*TokenResponse, error) {
 	clientID := "74658136-14ec-4630-ad9b-26e160ff0fc6" // Microsoft Graph API client ID for PIM
-	pimAudience := "01fc33a7-78ba-4d2f-a4b7-768e336e890e"     // EXACT PIM audience from AzureHunter
-	scope := pimAudience + "/.default"                        // EXACT scope format from AzureHunter
+	pimAudience := "01fc33a7-78ba-4d2f-a4b7-768e336e890e"     // PIM API audience
+	scope := pimAudience + "/.default"                        // PIM API scope format
 	return ExchangeRefreshToken(refreshToken, clientID, tenantID, scope, proxyURL)
 }
 

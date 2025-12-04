@@ -10,7 +10,7 @@ nebula azure recon iam-push [flags]
 
 ```
       --clear-db                Clear existing data before import
-      --data-file string        Path to consolidated AzureHunter JSON file (required)
+      --data-file string        Path to consolidated Azure data JSON file (required)
   -h, --help                    help for iam-push
       --indent int              the number of spaces to use for the JSON indentation
       --module-name string      the name of the module for dynamic file naming

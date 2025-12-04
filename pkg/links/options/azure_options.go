@@ -220,7 +220,7 @@ func AzureNeo4jPassword() cfg.Param {
 }
 
 func AzureDataFile() cfg.Param {
-	return cfg.NewParam[string]("data-file", "Path to consolidated AzureHunter JSON file").
+	return cfg.NewParam[string]("data-file", "Path to consolidated Azure data JSON file").
 		AsRequired()
 }
 

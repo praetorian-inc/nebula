@@ -20,3 +20,5 @@ out.json
 debug.log*
 *.json
 docker-images
+NEBULA_OUTPUT/
+nebula-output/

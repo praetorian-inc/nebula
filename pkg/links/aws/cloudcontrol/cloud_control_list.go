@@ -128,6 +128,11 @@ func (ct *CompletionTracker) AddExpectedWork(resourceTypeRegionKey string) {
 
 // AddPendingRetry increments pending retry count for a resourceType+region
 func (ct *CompletionTracker) AddPendingRetry(resourceTypeRegionKey string) {
+	if ct == nil {
+		slog.Warn("CompletionTracker is nil, cannot add pending retry", "resourceTypeRegion", resourceTypeRegionKey)
+		return
+	}
+
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
 
@@ -237,7 +242,7 @@ func (a *AWSCloudControl) Params() []cfg.Param {
 	params = append(params, options.AwsCommonReconOptions()...)
 	params = append(params, options.AwsRegions(), options.AwsResourceType())
 	params = append(params, cfg.NewParam[int]("max-concurrent-services", "Maximum number of AWS services to process concurrently").
-		WithDefault(1000))
+		WithDefault(100))
 	params = append(params, cfg.NewParam[int]("global-rate-limit", "Per-region rate limit in requests per second (AWS SDK level)").
 		WithDefault(5))
 	params = append(params, cfg.NewParam[bool]("enable-debug-metrics", "Enable debug metrics for rate limiting analysis (disabled in production)").
@@ -249,7 +254,7 @@ func (a *AWSCloudControl) Params() []cfg.Param {
 func NewAWSCloudControl(configs ...cfg.Config) chain.Link {
 	cc := &AWSCloudControl{
 		wg:                    sync.WaitGroup{},
-		maxConcurrentServices: 1000,                   // Default to 1000 concurrent services
+		maxConcurrentServices: 100,                    // Default to 100 concurrent services
 		globalRateLimit:       5,                      // Default to 5 TPS per region rate limit
 		completionTracker:     NewCompletionTracker(), // Initialize early to prevent nil panics, will be updated in Initialize()
 	}

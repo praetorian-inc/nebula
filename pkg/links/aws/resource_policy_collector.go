@@ -10,6 +10,7 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/links/general"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	"github.com/praetorian-inc/nebula/pkg/types"
+	"github.com/praetorian-inc/tabularium/pkg/model/model"
 )
 
 // PolicyWithArn wraps a policy with its associated resource ARN for keying
@@ -28,15 +29,15 @@ func NewAwsResourcePolicyCollector(configs ...cfg.Config) chain.Link {
 	return r
 }
 
-func (a *AwsResourcePolicyCollector) SupportedResourceTypes() []string {
+func (a *AwsResourcePolicyCollector) SupportedResourceTypes() []model.CloudResourceType {
 	// Return resource types that have resource policies
-	return []string{
-		"AWS::S3::Bucket",
-		"AWS::SNS::Topic", 
-		"AWS::SQS::Queue",
-		"AWS::Lambda::Function",
-		"AWS::EFS::FileSystem",
-		"AWS::ElasticSearch::Domain",
+	return []model.CloudResourceType{
+		model.AWSS3Bucket,
+		model.AWSSNSTopic,
+		model.AWSSQSQueue,
+		model.AWSLambdaFunction,
+		model.CloudResourceType("AWS::EFS::FileSystem"),
+		model.CloudResourceType("AWS::ElasticSearch::Domain"),
 	}
 }
 

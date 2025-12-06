@@ -7,15 +7,16 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	jlinks "github.com/praetorian-inc/janus-framework/pkg/links"
 	"github.com/praetorian-inc/nebula/pkg/types"
+	"github.com/praetorian-inc/tabularium/pkg/model/model"
 )
 
 type SupportsResourceTypes interface {
-	SupportedResourceTypes() []string
+	SupportedResourceTypes() []model.CloudResourceType
 }
 
 func PreprocessResourceTypes(class SupportsResourceTypes) func(chain.Link, string) error {
 	processor := func(self chain.Link, input string) error {
-		resourceTypes := []string{input}
+		resourceTypes := []model.CloudResourceType{model.CloudResourceType(input)}
 
 		if strings.ToLower(input) == "all" {
 			resourceTypes = class.SupportedResourceTypes()

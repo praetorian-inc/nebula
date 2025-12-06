@@ -11,6 +11,7 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/links/general"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	"github.com/praetorian-inc/nebula/pkg/outputters"
+	"github.com/praetorian-inc/tabularium/pkg/model/model"
 )
 
 var ECRDump = chain.NewModule(
@@ -60,10 +61,10 @@ var ECRDump = chain.NewModule(
 // AWSECRResourceTypes implements the SupportsResourceTypes interface
 type AWSECRResourceTypes struct{}
 
-func (a *AWSECRResourceTypes) SupportedResourceTypes() []string {
-	return []string{
-		"AWS::ECR::Repository",
-		"AWS::ECR::PublicRepository",
+func (a *AWSECRResourceTypes) SupportedResourceTypes() []model.CloudResourceType {
+	return []model.CloudResourceType{
+		model.AWSEcrRepository,
+		model.AWSEcrPublicRepository,
 	}
 }
 

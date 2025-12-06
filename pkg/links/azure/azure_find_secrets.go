@@ -36,20 +36,20 @@ func (l *AzureFindSecretsLink) Params() []cfg.Param {
 	}
 }
 
-func (l *AzureFindSecretsLink) SupportedResourceTypes() []string {
-	return []string{
-		"Microsoft.Compute/virtualMachines/userData",
-		"Microsoft.Compute/virtualMachines/extensions",
-		"Microsoft.Compute/virtualMachines/diskEncryption",
-		"Microsoft.Compute/virtualMachines/tags",
-		"Microsoft.Web/sites/configuration",
-		"Microsoft.Web/sites/connectionStrings",
-		"Microsoft.Web/sites/keys",
-		"Microsoft.Web/sites/settings",
-		"Microsoft.Web/sites/tags",
-		"Microsoft.Automation/automationAccounts/runbooks",
-		"Microsoft.Automation/automationAccounts/variables",
-		"Microsoft.Automation/automationAccounts/jobs",
+func (l *AzureFindSecretsLink) SupportedResourceTypes() []model.CloudResourceType {
+	return []model.CloudResourceType{
+		model.CloudResourceType("Microsoft.Compute/virtualMachines/userData"),
+		model.CloudResourceType("Microsoft.Compute/virtualMachines/extensions"),
+		model.CloudResourceType("Microsoft.Compute/virtualMachines/diskEncryption"),
+		model.CloudResourceType("Microsoft.Compute/virtualMachines/tags"),
+		model.CloudResourceType("Microsoft.Web/sites/configuration"),
+		model.CloudResourceType("Microsoft.Web/sites/connectionStrings"),
+		model.CloudResourceType("Microsoft.Web/sites/keys"),
+		model.CloudResourceType("Microsoft.Web/sites/settings"),
+		model.CloudResourceType("Microsoft.Web/sites/tags"),
+		model.CloudResourceType("Microsoft.Automation/automationAccounts/runbooks"),
+		model.CloudResourceType("Microsoft.Automation/automationAccounts/variables"),
+		model.CloudResourceType("Microsoft.Automation/automationAccounts/jobs"),
 	}
 }
 

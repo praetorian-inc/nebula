@@ -3,11 +3,11 @@ package recon
 import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
-	"github.com/praetorian-inc/nebula/pkg/links/docker"
 	"github.com/praetorian-inc/janus-framework/pkg/links/noseyparker"
 	"github.com/praetorian-inc/nebula/internal/registry"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/cloudcontrol"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/ecr"
+	"github.com/praetorian-inc/nebula/pkg/links/docker"
 	"github.com/praetorian-inc/nebula/pkg/links/general"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	"github.com/praetorian-inc/nebula/pkg/outputters"
@@ -23,7 +23,7 @@ var ECRDump = chain.NewModule(
 		"platform":    "aws",
 		"opsec_level": "moderate",
 		"authors":     []string{"Praetorian"},
-	}),
+}).WithChainInputParam(options.AwsResourceType().Name()),
 ).WithLinks(
 	// First get the resource types for ECR repositories
 	general.NewResourceTypePreprocessor(&AWSECRResourceTypes{}),
@@ -43,8 +43,10 @@ var ECRDump = chain.NewModule(
 	docker.NewDockerExtractToFS,
 	// Convert to NoseyParker inputs and scan
 	docker.NewDockerExtractToNP,
-	chain.ConstructLinkWithConfigs(noseyparker.NewNoseyParkerScanner, 
+	chain.ConstructLinkWithConfigs(noseyparker.NewNoseyParkerScanner,
 		cfg.WithArg("continue_piping", true)),
+	// Output scan summary
+	docker.NewDockerScanSummary,
 ).WithInputParam(
 	options.AwsResourceType().WithDefault([]string{"AWS::ECR::Repository", "AWS::ECR::PublicRepository"}),
 ).WithConfigs(
@@ -56,7 +58,7 @@ var ECRDump = chain.NewModule(
 ).WithOutputters(
 	outputters.NewRuntimeJSONOutputter,
 	outputters.NewNPFindingsConsoleOutputter,
-).WithAutoRun()
+).WithStrictness(chain.Lax)
 
 // AWSECRResourceTypes implements the SupportsResourceTypes interface
 type AWSECRResourceTypes struct{}

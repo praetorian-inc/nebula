@@ -11,7 +11,7 @@ import (
 	"github.com/docker/docker/api/types/registry"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
-	jtypes "github.com/praetorian-inc/janus-framework/pkg/types"
+	"github.com/praetorian-inc/janus-framework/pkg/types/docker"
 	"github.com/praetorian-inc/nebula/internal/helpers"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/base"
 )
@@ -49,11 +49,11 @@ func (a *AWSECRLogin) Process(registryURL string) error {
 		return err
 	}
 
-	ic := jtypes.DockerImage{
+	ic := docker.DockerImage{
 		AuthConfig: registry.AuthConfig{
 			Username:      "AWS",
 			Password:      string(jwt),
-			ServerAddress: fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com", account, region),
+			ServerAddress: fmt.Sprintf("https://%s.dkr.ecr.%s.amazonaws.com", account, region),
 		},
 		Image: registryURL,
 	}

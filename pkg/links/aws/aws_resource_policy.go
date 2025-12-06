@@ -14,6 +14,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/efs"
 	"github.com/aws/aws-sdk-go-v2/service/elasticsearchservice"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
+	"github.com/aws/aws-sdk-go-v2/service/opensearch"
+	"github.com/aws/aws-sdk-go-v2/service/opensearchserverless"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
@@ -133,7 +135,12 @@ func (a *AwsResourcePolicyChecker) Process(resource *types.EnrichedResourceDescr
 		return nil
 	}
 
-	slog.Debug(fmt.Sprintf("policy for %s", resource.Arn.String()), "policy", policy)
+	policyJson, err := json.MarshalIndent(policy, "", "  ")
+	if err != nil {
+		slog.Debug(fmt.Sprintf("policy for %s (failed to marshal): %v", resource.Arn.String(), err))
+	} else {
+		slog.Debug(fmt.Sprintf("policy for %s", resource.Arn.String()), "policy", string(policyJson))
+	}
 
 	// Check if the policy allows public access
 	res, err := a.analyzePolicy(resource.Arn.String(), policy, resource.AccountId, resource.TypeName)
@@ -344,6 +351,40 @@ func GetEvaluationContexts(resourceType string) []*iam.RequestContext {
 		}
 		return generator.GenerateAllPermutations()
 
+	case "AWS::OpenSearchService::Domain", "AWS::Elasticsearch::Domain":
+		generator := ContextGenerator{
+			BasePrincipals: []string{
+				"arn:aws:iam::111122223333:role/praetorian", // Generic cross-account
+				"es.amazonaws.com",                          // ElasticSearch service
+				"opensearch.amazonaws.com",                  // OpenSearch service
+			},
+			Conditions: []ConditionPermutation{
+				{"aws:SecureTransport", []string{"true", "false", ""}},
+				{"aws:PrincipalType", []string{"Anonymous", "AssumedRole", "User", "Service", ""}},
+				{"aws:SourceAccount", []string{"111122223333", ""}},
+				{"aws:SourceIp", []string{"0.0.0.0/0", "10.0.0.0/8", ""}},
+				{"es:source", []string{"*", ""}}, // ElasticSearch specific
+			},
+		}
+		return generator.GenerateAllPermutations()
+
+	case "AWS::OpenSearchServerless::Collection":
+		generator := ContextGenerator{
+			BasePrincipals: []string{
+				"arn:aws:iam::111122223333:role/praetorian", // Generic cross-account
+				"aoss.amazonaws.com",                        // OpenSearch Serverless service
+				"opensearch.amazonaws.com",                  // OpenSearch service
+			},
+			Conditions: []ConditionPermutation{
+				{"aws:SecureTransport", []string{"true", "false", ""}},
+				{"aws:PrincipalType", []string{"Anonymous", "AssumedRole", "User", "Service", ""}},
+				{"aws:SourceAccount", []string{"111122223333", ""}},
+				{"aws:SourceIp", []string{"0.0.0.0/0", "10.0.0.0/8", ""}},
+				{"aoss:collection", []string{"*", ""}}, // OpenSearch Serverless specific
+			},
+		}
+		return generator.GenerateAllPermutations()
+
 	default:
 		// Default fallback for unknown resource types
 		return []*iam.RequestContext{
@@ -519,6 +560,16 @@ var ServiceMap = map[string]ServicePolicyConfig{
 		IdentifierField: "DomainName",
 		PolicyField:     "AccessPolicy",
 	},
+	"AWS::OpenSearchService::Domain": {
+		GetPolicy:       ServicePolicyFuncMap["AWS::OpenSearchService::Domain"],
+		IdentifierField: "DomainName",
+		PolicyField:     "AccessPolicy",
+	},
+	"AWS::OpenSearchServerless::Collection": {
+		GetPolicy:       ServicePolicyFuncMap["AWS::OpenSearchServerless::Collection"],
+		IdentifierField: "Name",
+		PolicyField:     "AccessPolicy",
+	},
 }
 
 var ServicePolicyFuncMap = map[string]PolicyGetter{
@@ -548,7 +599,36 @@ var ServicePolicyFuncMap = map[string]PolicyGetter{
 	"AWS::S3::Bucket": func(ctx context.Context, cfg aws.Config, bucketName string, allowedRegions []string) (*types.Policy, error) {
 		client := s3.NewFromConfig(cfg)
 
-		// 1. Check Block Public Access settings first - if it blocks access, the request is denied regardless of policies or ACLs
+		// 0. Check bucket location first to ensure we're using the correct region
+		locationResp, err := client.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
+			Bucket: aws.String(bucketName),
+		})
+		if err != nil {
+			slog.Error("Failed to get bucket location", "bucket", bucketName, "error", err)
+			return nil, err
+		}
+
+		// Handle empty LocationConstraint (means us-east-1)
+		bucketRegion := "us-east-1"
+		if locationResp.LocationConstraint != "" {
+			bucketRegion = string(locationResp.LocationConstraint)
+		}
+
+		// Check if the bucket's region is in the user's allowed regions list
+		if !slices.Contains(allowedRegions, bucketRegion) {
+			slog.Debug("Bucket region not in allowed regions list", "bucket", bucketName, "bucketRegion", bucketRegion, "allowedRegions", allowedRegions)
+			return nil, nil // Skip this bucket
+		}
+
+		// Only create a new client if the bucket is in a different region
+		if bucketRegion != cfg.Region {
+			newCfg := cfg.Copy()
+			newCfg.Region = bucketRegion
+			client = s3.NewFromConfig(newCfg)
+			slog.Debug("Created region-specific S3 client", "bucket", bucketName, "region", bucketRegion)
+		}
+
+		// 1. Check Block Public Access settings - if it blocks access, the request is denied regardless of policies or ACLs
 		blockPublicAccessResp, err := client.GetPublicAccessBlock(ctx, &s3.GetPublicAccessBlockInput{
 			Bucket: aws.String(bucketName),
 		})
@@ -564,8 +644,8 @@ var ServicePolicyFuncMap = map[string]PolicyGetter{
 			if (config.IgnorePublicAcls != nil && *config.IgnorePublicAcls) ||
 				(config.RestrictPublicBuckets != nil && *config.RestrictPublicBuckets) {
 				slog.Debug("Bucket has public access blocked", "bucket", bucketName,
-					"ignorePublicAcls", config.IgnorePublicAcls,
-					"restrictPublicBuckets", config.RestrictPublicBuckets)
+					"ignorePublicAcls", config.IgnorePublicAcls != nil && *config.IgnorePublicAcls,
+					"restrictPublicBuckets", config.RestrictPublicBuckets != nil && *config.RestrictPublicBuckets)
 
 				// Create a policy that represents the blocked access
 				// Use the correct types for Principal, Action, Resource, and Condition
@@ -590,73 +670,29 @@ var ServicePolicyFuncMap = map[string]PolicyGetter{
 			}
 		}
 
+		// 2. We pass through the bucket policy since this is what we want from this function
+		var bucketPolicy *types.Policy
 		resp, err := client.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
 			Bucket: aws.String(bucketName),
 		})
 		if err != nil {
-			// Handle region redirect for S3 buckets
-			if strings.Contains(err.Error(), "PermanentRedirect") {
-				// Try to get bucket location first
-				locationResp, locErr := client.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
-					Bucket: aws.String(bucketName),
-				})
-
-				if locErr != nil {
-					slog.Error("Failed to get bucket location", "bucket", bucketName, "error", locErr)
-					return nil, locErr
-				}
-
-				// Handle empty LocationConstraint (means us-east-1)
-				bucketRegion := "us-east-1"
-				if locationResp.LocationConstraint != "" {
-					bucketRegion = string(locationResp.LocationConstraint)
-				}
-
-				// Check if the bucket's region is in the user's allowed regions list
-				if !slices.Contains(allowedRegions, bucketRegion) {
-					slog.Debug("Bucket region not in allowed regions list", "bucket", bucketName, "bucketRegion", bucketRegion, "allowedRegions", allowedRegions)
-					return nil, nil // Skip this bucket
-				}
-
-				// Only create a new client if the bucket is in a different region
-				if bucketRegion != cfg.Region {
-					newCfg := cfg.Copy()
-					newCfg.Region = bucketRegion
-					client = s3.NewFromConfig(newCfg)
-					slog.Debug("Created region-specific S3 client", "bucket", bucketName, "region", bucketRegion)
-				}
-
-				// Retrieve the bucket policy again
-				resp, err = client.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
-					Bucket: aws.String(bucketName),
-				})
-			}
-
-			// If not a redirect error
-			if err != nil {
-				if strings.Contains(err.Error(), "NoSuchBucketPolicy") {
-					return nil, nil
-				}
+			if strings.Contains(err.Error(), "NoSuchBucketPolicy") {
+				slog.Debug("Bucket does not exists", "bucket", bucketName, "error", err)
 				return nil, err
 			}
+			slog.Debug("Failed to get bucket policy", "bucket", bucketName, "error", err)
+			// Continue since we need to evaluate bucket ACL
 		}
-
-		// 2. Check bucket policy next - policies can grant or explicitly deny access
-		var bucketPolicy *types.Policy
-		if err != nil {
-			if !strings.Contains(err.Error(), "NoSuchBucketPolicy") {
-				return nil, err
-			}
-			// NoSuchBucketPolicy is fine, just means no bucket policy exists
-		} else if resp.Policy != nil {
+		if resp != nil && resp.Policy != nil {
 			bucketPolicy, err = strToPolicy(*resp.Policy)
 			if err != nil {
-				return nil, err
+				slog.Debug("Error in converting string to policy, continuing to evaluate ACLs", "policy", *resp.Policy, "error", err)
 			}
 		}
 
-		// 3. Check bucket ACLs only if no explicit deny is found in policies
-		// ACLs are evaluated last and can provide additional access controls
+		// 3. ACLs are evaluated last and can provide additional access controls
+		// In this case, we merge the policies.
+		// No better way to do this at the moment unless we evaluate the policy in the combined function with other resources
 		aclResp, err := client.GetBucketAcl(ctx, &s3.GetBucketAclInput{
 			Bucket: aws.String(bucketName),
 		})
@@ -788,6 +824,96 @@ var ServicePolicyFuncMap = map[string]PolicyGetter{
 
 		return policy, nil
 	},
+	"AWS::OpenSearchService::Domain": func(ctx context.Context, cfg aws.Config, domainName string, allowedRegions []string) (*types.Policy, error) {
+		client := opensearch.NewFromConfig(cfg)
+		resp, err := client.DescribeDomainConfig(ctx, &opensearch.DescribeDomainConfigInput{
+			DomainName: aws.String(domainName),
+		})
+		if err != nil {
+			// Handle "no domain" errors gracefully
+			if strings.Contains(err.Error(), "ResourceNotFoundException") {
+				return nil, err
+			}
+			return nil, err
+		}
+		if resp.DomainConfig.AccessPolicies == nil || resp.DomainConfig.AccessPolicies.Options == nil {
+			return nil, errors.New("no policy found")
+		}
+
+		policy, err := strToPolicy(*resp.DomainConfig.AccessPolicies.Options)
+		if err != nil {
+			return nil, err
+		}
+
+		return policy, nil
+	},
+	"AWS::OpenSearchServerless::Collection": func(ctx context.Context, cfg aws.Config, collectionName string, allowedRegions []string) (*types.Policy, error) {
+		client := opensearchserverless.NewFromConfig(cfg)
+
+		// List access policies to find the one for this collection
+		listResp, err := client.ListAccessPolicies(ctx, &opensearchserverless.ListAccessPoliciesInput{
+			Type: "data",
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to list access policies: %w", err)
+		}
+
+		// Find policy that matches our collection
+		for _, policySummary := range listResp.AccessPolicySummaries {
+			if policySummary.Name == nil {
+				continue
+			}
+
+			// Get the full policy details
+			getResp, err := client.GetAccessPolicy(ctx, &opensearchserverless.GetAccessPolicyInput{
+				Name: policySummary.Name,
+				Type: "data",
+			})
+			if err != nil {
+				slog.Debug("Failed to get access policy details", "policy", *policySummary.Name, "error", err)
+				continue
+			}
+
+			if getResp.AccessPolicyDetail == nil || getResp.AccessPolicyDetail.Policy == nil {
+				continue
+			}
+
+			// Parse the policy to check if it applies to our collection
+			var policyDoc map[string]any
+			policyBytes, err := json.Marshal(getResp.AccessPolicyDetail.Policy)
+			if err != nil {
+				slog.Debug("Failed to marshal policy document", "policy", *policySummary.Name, "error", err)
+				continue
+			}
+			if err := json.Unmarshal(policyBytes, &policyDoc); err != nil {
+				slog.Debug("Failed to parse policy document", "policy", *policySummary.Name, "error", err)
+				continue
+			}
+
+			// Check if this policy applies to our collection
+			if rules, ok := policyDoc["Rules"].([]any); ok {
+				for _, rule := range rules {
+					if ruleMap, ok := rule.(map[string]any); ok {
+						if resourceTypes, ok := ruleMap["ResourceType"].([]any); ok {
+							for _, resourceType := range resourceTypes {
+								if rt, ok := resourceType.(string); ok && strings.Contains(rt, collectionName) {
+									// Convert the policy document to our Policy type
+									policy, err := strToPolicy(string(policyBytes))
+									if err != nil {
+										return nil, fmt.Errorf("failed to parse policy: %w", err)
+									}
+									return policy, nil
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// No specific access policy found for this collection
+		return nil, nil
+	},
 }
 
 // convertACLGrantsToStatements converts S3 ACL grants to IAM policy statements
@@ -897,7 +1023,12 @@ func (a *AwsResourcePolicyFetcher) Process(resource *types.EnrichedResourceDescr
 		return fmt.Errorf("failed to get policy: %w", err)
 	}
 
+	if policy == nil {
+		return nil
+	}
+
 	// Send the policy downstream
+	policy.ResourceARN = resource.Arn.String()
 	a.Send(policy)
 	return nil
 }

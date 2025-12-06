@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/appservice/armappservice"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
@@ -38,18 +37,20 @@ func (l *AzureFindSecretsLink) Params() []cfg.Param {
 
 func (l *AzureFindSecretsLink) SupportedResourceTypes() []model.CloudResourceType {
 	return []model.CloudResourceType{
-		model.CloudResourceType("Microsoft.Compute/virtualMachines/userData"),
-		model.CloudResourceType("Microsoft.Compute/virtualMachines/extensions"),
-		model.CloudResourceType("Microsoft.Compute/virtualMachines/diskEncryption"),
-		model.CloudResourceType("Microsoft.Compute/virtualMachines/tags"),
-		model.CloudResourceType("Microsoft.Web/sites/configuration"),
-		model.CloudResourceType("Microsoft.Web/sites/connectionStrings"),
-		model.CloudResourceType("Microsoft.Web/sites/keys"),
-		model.CloudResourceType("Microsoft.Web/sites/settings"),
-		model.CloudResourceType("Microsoft.Web/sites/tags"),
-		model.CloudResourceType("Microsoft.Automation/automationAccounts/runbooks"),
-		model.CloudResourceType("Microsoft.Automation/automationAccounts/variables"),
-		model.CloudResourceType("Microsoft.Automation/automationAccounts/jobs"),
+		model.AzureVM,
+		model.AzureVMUserData,
+		model.AzureVMExtensions,
+		model.AzureVMDiskEncryption,
+		model.AzureVMTags,
+		model.AzureWebSite,
+		model.AzureWebSiteConfiguration,
+		model.AzureWebSiteConnectionStrings,
+		model.AzureWebSiteKeys,
+		model.AzureWebSiteSettings,
+		model.AzureWebSiteTags,
+		model.AzureAutomationRunbooks,
+		model.AzureAutomationVariables,
+		model.AzureAutomationJobs,
 	}
 }
 
@@ -140,7 +141,7 @@ func (l *AzureFindSecretsLink) processVMUserData(resource *model.AzureResource) 
 		return fmt.Errorf("failed to parse VM resource ID: %w", err)
 	}
 
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	cred, err := helpers.NewAzureCredential()
 	if err != nil {
 		return fmt.Errorf("failed to get Azure credential: %w", err)
 	}
@@ -223,7 +224,7 @@ func (l *AzureFindSecretsLink) processVMExtensions(resource *model.AzureResource
 		return fmt.Errorf("failed to parse VM resource ID: %w", err)
 	}
 
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	cred, err := helpers.NewAzureCredential()
 	if err != nil {
 		return fmt.Errorf("failed to get Azure credential: %w", err)
 	}
@@ -278,7 +279,7 @@ func (l *AzureFindSecretsLink) processFunctionAppConfig(resource *model.AzureRes
 		return fmt.Errorf("failed to parse Function App resource ID: %w", err)
 	}
 
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	cred, err := helpers.NewAzureCredential()
 	if err != nil {
 		return fmt.Errorf("failed to get Azure credential: %w", err)
 	}
@@ -323,7 +324,7 @@ func (l *AzureFindSecretsLink) processFunctionAppConnections(resource *model.Azu
 		return fmt.Errorf("failed to parse Function App resource ID: %w", err)
 	}
 
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	cred, err := helpers.NewAzureCredential()
 	if err != nil {
 		return fmt.Errorf("failed to get Azure credential: %w", err)
 	}
@@ -368,7 +369,7 @@ func (l *AzureFindSecretsLink) processFunctionAppKeys(resource *model.AzureResou
 		return fmt.Errorf("failed to parse Function App resource ID: %w", err)
 	}
 
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	cred, err := helpers.NewAzureCredential()
 	if err != nil {
 		return fmt.Errorf("failed to get Azure credential: %w", err)
 	}

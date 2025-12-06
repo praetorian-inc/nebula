@@ -9,7 +9,7 @@ import (
 	"github.com/docker/docker/api/types/registry"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
-	jtypes "github.com/praetorian-inc/janus-framework/pkg/types"
+	"github.com/praetorian-inc/janus-framework/pkg/types/docker"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/base"
 )
 
@@ -50,11 +50,11 @@ func (a *AWSECRLoginPublic) Process(repositoryURI string) error {
 		return nil
 	}
 
-	image := jtypes.DockerImage{
+	image := docker.DockerImage{
 		AuthConfig: registry.AuthConfig{
 			Username:      "AWS",
 			Password:      string(parsed),
-			ServerAddress: fmt.Sprintf("public.ecr.aws"),
+			ServerAddress: fmt.Sprintf("https://public.ecr.aws"),
 		},
 		Image: repositoryURI,
 	}

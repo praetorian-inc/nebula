@@ -89,10 +89,10 @@ var AzureDevOpsProjectOpt = types.Option{
 var AzureARGTemplatesDirOpt = types.Option{
 	Name:        "template-dir",
 	Short:       "T",
-	Description: "Optional directory containing additional ARG query templates (defaults to embedded templates)",
+	Description: "Directory containing ARG query templates (replaces embedded templates when specified)",
 	Required:    false,
 	Type:        types.String,
-	Value:       "", // Empty means use only embedded templates
+	Value:       "", // Empty means use embedded templates
 }
 
 func AzureSubscription() cfg.Param {
@@ -103,7 +103,7 @@ func AzureSubscription() cfg.Param {
 }
 
 func AzureTemplateDir() cfg.Param {
-	return cfg.NewParam[string]("template-dir", "Directory containing Azure ARG templates").
+	return cfg.NewParam[string]("template-dir", "Directory containing Azure ARG templates (replaces embedded templates)").
 		WithShortcode("t")
 }
 
@@ -140,6 +140,51 @@ func AzureWorkerCount() cfg.Param {
 	return cfg.NewParam[int]("workers", "Number of concurrent workers for processing").
 		WithShortcode("w").
 		WithDefault(5)
+}
+
+func AzureConditionalAccessFile() cfg.Param {
+	return cfg.NewParam[string]("conditional-access-file", "Path to JSON file containing conditional access policies")
+}
+
+func AzureLLMAPIKey() cfg.Param {
+	return cfg.NewParam[string]("llm-api-key", "API key for LLM provider").
+		AsRequired()
+}
+
+func AzureLLMAPIKeyOptional() cfg.Param {
+	return cfg.NewParam[string]("llm-api-key", "API key for LLM provider (required when --enable-llm-analysis is true)")
+}
+
+func AzureLLMProvider() cfg.Param {
+	return cfg.NewParam[string]("llm-provider", "LLM provider to use for analysis").
+		WithDefault("anthropic")
+}
+
+func AzureLLMModel() cfg.Param {
+	return cfg.NewParam[string]("llm-model", "LLM model to use for analysis").
+		WithDefault("claude-opus-4-1-20250805")
+}
+
+
+func AzureLLMOutputTokens() cfg.Param {
+	return cfg.NewParam[int]("llm-output-tokens", "Maximum output tokens for LLM analysis").
+		WithDefault(32000)
+}
+
+func AzureEnableLLMAnalysis() cfg.Param {
+	return cfg.NewParam[bool]("enable-llm-analysis", "Enable LLM analysis of conditional access policies").
+		WithDefault(false)
+}
+
+func AzureResourceID() cfg.Param {
+	return cfg.NewParam[[]string]("azure-resource-id", "Azure resource ID in full format (/subscriptions/.../resourceGroups/.../providers/...)").
+		WithShortcode("i").
+		AsRequired()
+}
+
+func AzureDisableEnrichment() cfg.Param {
+	return cfg.NewParam[bool]("disable-enrichment", "Disable enrichment of resources with security testing commands").
+		WithDefault(false)
 }
 
 // AzureReconBaseOptions provides common options for Azure reconnaissance modules

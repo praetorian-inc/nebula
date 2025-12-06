@@ -17,8 +17,11 @@ nebula aws recon find-secrets [flags]
       --continue_piping                If true, pipes output to next link. If false, saves to datastore file. (default true)
       --datastore string               NoseyParker datastore file (default "datastore.np")
       --disable-cache                  Disable API response caching
+      --enable-debug-metrics           Enable debug metrics for rate limiting analysis (disabled in production)
+      --global-rate-limit int          Per-region rate limit in requests per second (AWS SDK level) (default 5)
   -h, --help                           help for find-secrets
       --indent int                     the number of spaces to use for the JSON indentation
+      --max-concurrent-services int    Maximum number of AWS services to process concurrently (default 100)
       --max-events int                 Maximum number of log events to fetch per log group/stream (applies to CloudWatch Logs resources) (default 10000)
       --max-streams int                Maximum number of log streams to sample per log group (applies to CloudWatch Logs resources) (default 10)
       --module-name string             name of the module for dynamic file naming

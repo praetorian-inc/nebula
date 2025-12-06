@@ -15,8 +15,11 @@ nebula aws recon public-resources [flags]
       --cache-ext string               Name of AWS API response cache files extension (default ".aws-cache")
       --cache-ttl int                  TTL for cached responses in seconds (default 3600)
       --disable-cache                  Disable API response caching
+      --enable-debug-metrics           Enable debug metrics for rate limiting analysis (disabled in production)
+      --global-rate-limit int          Per-region rate limit in requests per second (AWS SDK level) (default 5)
   -h, --help                           help for public-resources
       --indent int                     the number of spaces to use for the JSON indentation
+      --max-concurrent-services int    Maximum number of AWS services to process concurrently (default 100)
       --module-name string             name of the module for dynamic file naming
       --opsec_level string             Operational security level for AWS operations (default "none")
   -o, --org-policies string            Path to AWS organization policies JSON file from get-org-policies module

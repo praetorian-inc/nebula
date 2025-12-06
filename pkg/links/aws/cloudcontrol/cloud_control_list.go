@@ -675,12 +675,28 @@ func (a *AWSCloudControl) initializeClients() error {
 	a.cloudControlClients = make(map[string]*cloudcontrol.Client)
 	a.regionRateLimiters = make(map[string]*rate.Limiter)
 
-	// Create per-region rate limiters using golang.org/x/time/rate for continuous 5 TPS
+	// Cache configs per-region first (only load once per region, not per service+region)
+	regionConfigs := make(map[string]aws.Config)
 	for _, region := range a.Regions {
 		// Create rate limiter: 5 requests per second with burst of 5
 		limiter := rate.NewLimiter(rate.Limit(a.globalRateLimit), a.globalRateLimit)
 		a.regionRateLimiters[region] = limiter
 		slog.Debug("Created rate limiter for region", "region", region, "rateLimit", a.globalRateLimit)
+
+		// Get base config from framework once per region
+		baseConfig, err := a.GetConfigWithRuntimeArgs(region)
+		if err != nil {
+			return fmt.Errorf("failed to get base config for region %s: %w", region, err)
+		}
+
+		// Disable retries completely - we handle rate limiting manually
+		baseConfig.Retryer = func() aws.Retryer {
+			return retry.NewStandard(func(o *retry.StandardOptions) {
+				o.MaxAttempts = 1 // No retries
+			})
+		}
+
+		regionConfigs[region] = baseConfig
 	}
 
 	// Get all unique service names from filtered resource types
@@ -690,26 +706,14 @@ func (a *AWSCloudControl) initializeClients() error {
 		knownServices[serviceName] = true
 	}
 
-	// Pre-create clients for all known service+region combinations with no retries
+	// Pre-create clients for all known service+region combinations using cached configs
 	clientCount := 0
 	for serviceName := range knownServices {
 		for _, region := range a.Regions {
 			serviceRegionKey := a.getServiceRegionKey(serviceName, region)
 
-			// Get base config from framework
-			baseConfig, err := a.GetConfigWithRuntimeArgs(region)
-			if err != nil {
-				return fmt.Errorf("failed to get base config for %s: %w", serviceRegionKey, err)
-			}
-
-			// Disable retries completely - we handle rate limiting manually
-			baseConfig.Retryer = func() aws.Retryer {
-				return retry.NewStandard(func(o *retry.StandardOptions) {
-					o.MaxAttempts = 1 // No retries
-				})
-			}
-
-			client := cloudcontrol.NewFromConfig(baseConfig)
+			// Use cached config for this region
+			client := cloudcontrol.NewFromConfig(regionConfigs[region])
 			if client == nil {
 				return fmt.Errorf("failed to create CloudControl client for %s", serviceRegionKey)
 			}

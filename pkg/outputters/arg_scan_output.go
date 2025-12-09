@@ -594,10 +594,21 @@ func escapeForMarkdownTable(s string) string {
 		`}`, `\}`,
 		`|`, `\|`,
 		`>`, `\>`,
+		"\n", "<br>",
+		"\r\n", "<br>",
+		"\r", "<br>",
 	)
 
-	// Collapse multiple spaces
-	s = strings.Join(strings.Fields(replacer.Replace(s)), " ")
+	// Apply replacements first
+	s = replacer.Replace(s)
+
+	// Collapse multiple spaces but preserve line breaks (<br> tags)
+	// Split by <br> tags, collapse spaces within each segment, then rejoin
+	segments := strings.Split(s, "<br>")
+	for i, segment := range segments {
+		segments[i] = strings.Join(strings.Fields(segment), " ")
+	}
+	s = strings.Join(segments, "<br>")
 	return s
 }
 

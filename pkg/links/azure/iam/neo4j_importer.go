@@ -105,6 +105,18 @@ func (l *Neo4jImporterLink) Process(input interface{}) error {
 		l.Logger.Warn("No HAS_PERMISSION edges were created")
 	}
 
+	// Step 10.5: Create HAS_GRAPH_PERMISSION edges (Graph API permissions)
+	message.Info("🔐 Phase 2c: Creating HAS_GRAPH_PERMISSION edges (Graph API permissions)")
+	if err := l.createGraphPermissionEdges(); err != nil {
+		l.Logger.Error("Failed to create Graph permission edges", "error", err)
+	}
+
+	// Step 10.6: Create application ownership edges
+	message.Info("🔐 Phase 2d: Creating application ownership edges")
+	if err := l.createApplicationOwnershipEdges(); err != nil {
+		l.Logger.Error("Failed to create application ownership edges", "error", err)
+	}
+
 	// Step 11: Generate summary
 	summary := l.generateImportSummary()
 	message.Info("🎉 Security graph creation completed successfully!")
@@ -2603,4 +2615,542 @@ func (l *Neo4jImporterLink) extractConstraintName(constraint string) string {
 		}
 	}
 	return "unknown"
+}
+
+// createGraphPermissionEdges creates HAS_GRAPH_PERMISSION relationships for Microsoft Graph API permissions
+func (l *Neo4jImporterLink) createGraphPermissionEdges() error {
+	l.Logger.Info("Creating Microsoft Graph API permission relationships...")
+
+	var allGraphPermissions []CompleteGraphPermission
+
+	// Check if we have a single subscription data format (new format from comprehensive collector)
+	// Structure: {azure_ad: {...}, pim: {...}, management_groups: {...}, azure_resources: {...}}
+	if azureADData, exists := l.consolidatedData["azure_ad"]; exists {
+		// This is the new single subscription format
+		if azureADMap, ok := azureADData.(map[string]interface{}); ok {
+			allGraphPermissions = l.extractGraphPermissionsFromAzureAD(azureADMap, allGraphPermissions)
+		}
+		l.Logger.Info(fmt.Sprintf("Extracted %d Graph permissions from consolidated data", len(allGraphPermissions)))
+	} else {
+		// Legacy multi-subscription format - extract graph permissions from each subscription's data
+		for subscriptionID, subscriptionData := range l.consolidatedData {
+			subscriptionMap, ok := subscriptionData.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			if azureADData, exists := subscriptionMap["azure_ad"]; exists {
+				if azureADMap, ok := azureADData.(map[string]interface{}); ok {
+					beforeCount := len(allGraphPermissions)
+					allGraphPermissions = l.extractGraphPermissionsFromAzureAD(azureADMap, allGraphPermissions)
+					afterCount := len(allGraphPermissions)
+					l.Logger.Info(fmt.Sprintf("Extracted %d Graph permissions from subscription %s (added: %d, total: %d)", subscriptionID, afterCount-beforeCount, afterCount))
+				}
+			}
+		}
+	}
+
+	if len(allGraphPermissions) == 0 {
+		l.Logger.Info("No Graph permissions found to import")
+		return nil
+	}
+
+	// Create relationships in batches
+	const batchSize = 1000
+	totalBatches := (len(allGraphPermissions) + batchSize - 1) / batchSize
+
+	totalCreated := 0
+	for j := 0; j < len(allGraphPermissions); j += batchSize {
+		end := j + batchSize
+		if end > len(allGraphPermissions) {
+			end = len(allGraphPermissions)
+		}
+
+		batch := allGraphPermissions[j:end]
+		batchNum := j/batchSize + 1
+
+		created, err := l.processBatchGraphPermissions(batch, batchNum, totalBatches)
+		if err != nil {
+			return fmt.Errorf("failed to process Graph permission batch %d: %w", batchNum, err)
+		}
+		totalCreated += created
+	}
+
+	l.Logger.Info(fmt.Sprintf("✅ Graph permission edge creation completed successfully!"))
+	l.Logger.Info(fmt.Sprintf("📊 Summary: %d total HAS_GRAPH_PERMISSION edges created", totalCreated))
+	message.Info("Created %d total HAS_GRAPH_PERMISSION edges", totalCreated)
+
+	return nil
+}
+
+// processBatchGraphPermissions processes a batch of Graph permissions and creates Neo4j relationships
+func (l *Neo4jImporterLink) processBatchGraphPermissions(permissions []CompleteGraphPermission, batchNum, totalBatches int) (int, error) {
+	cypher := `
+	UNWIND $permissions as perm
+	// Find the principal (could be service principal, user, or group)
+	OPTIONAL MATCH (sp:Resource {id: perm.servicePrincipalId}) WHERE perm.servicePrincipalId <> ""
+	OPTIONAL MATCH (user:Resource {id: perm.userId}) WHERE perm.userId <> ""
+	OPTIONAL MATCH (group:Resource {id: perm.groupId}) WHERE perm.groupId <> ""
+
+	// Find the resource app (target of the permission)
+	MATCH (target:Resource {id: perm.resourceAppId})
+
+	// Create the relationship from whichever principal exists
+	WITH perm, target,
+		 CASE
+		   WHEN sp IS NOT NULL THEN sp
+		   WHEN user IS NOT NULL THEN user
+		   WHEN group IS NOT NULL THEN group
+		   ELSE null
+		 END as principal
+	WHERE principal IS NOT NULL
+
+	MERGE (principal)-[r:HAS_GRAPH_PERMISSION {
+		permission: perm.permission,
+		permissionType: perm.permissionType,
+		consentType: perm.consentType,
+		id: perm.id
+	}]->(target)
+	SET r.source = "Microsoft Graph",
+		r.type = perm.type,
+		r.resourceAppId = perm.resourceAppId,
+		r.resourceAppName = perm.resourceAppName,
+		r.grantedFor = perm.grantedFor,
+		r.createdDateTime = perm.createdDateTime,
+		r.expiryDateTime = perm.expiryDateTime,
+		r.appRoleId = perm.appRoleId,
+		r.scope = perm.scope,
+		r.sourceLocation = perm.source,
+		r.lastUpdated = datetime()
+	RETURN count(r) as created
+	`
+
+	// Convert permissions to map format for Cypher
+	var permissionMaps []map[string]interface{}
+	for _, perm := range permissions {
+		permissionMaps = append(permissionMaps, map[string]interface{}{
+			"id":                   perm.ID,
+			"type":                 perm.Type,
+			"servicePrincipalId":   perm.ServicePrincipalID,
+			"servicePrincipalName": perm.ServicePrincipalName,
+			"userId":               perm.UserID,
+			"userName":             perm.UserName,
+			"groupId":              perm.GroupID,
+			"groupName":            perm.GroupName,
+			"resourceAppId":        perm.ResourceAppID,
+			"resourceAppName":      perm.ResourceAppName,
+			"permissionType":       perm.PermissionType,
+			"permission":           perm.Permission,
+			"consentType":          perm.ConsentType,
+			"grantedFor":           perm.GrantedFor,
+			"createdDateTime":      perm.CreatedDateTime,
+			"expiryDateTime":       perm.ExpiryDateTime,
+			"appRoleId":            perm.AppRoleID,
+			"scope":                perm.Scope,
+			"source":               perm.Source,
+		})
+	}
+
+	params := map[string]interface{}{
+		"permissions": permissionMaps,
+	}
+
+	ctx := context.Background()
+	result, err := neo4j.ExecuteQuery(ctx, l.driver, cypher, params, neo4j.EagerResultTransformer)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create Graph permission relationships: %w", err)
+	}
+
+	created := 0
+	if len(result.Records) > 0 {
+		if createdValue, exists := result.Records[0].Get("created"); exists {
+			if createdInt, ok := createdValue.(int64); ok {
+				created = int(createdInt)
+			}
+		}
+		l.Logger.Info(fmt.Sprintf("Batch %d/%d: Created %d Graph permission edges", batchNum, totalBatches, created))
+	}
+
+	return created, nil
+}
+
+// extractGraphPermissionsFromAzureAD extracts oauth2PermissionGrants and appRoleAssignments from Azure AD data
+func (l *Neo4jImporterLink) extractGraphPermissionsFromAzureAD(azureADMap map[string]interface{}, allGraphPermissions []CompleteGraphPermission) []CompleteGraphPermission {
+	// Process oauth2PermissionGrants
+	if oauth2Grants, exists := azureADMap["oauth2PermissionGrants"]; exists {
+		if grantsList, ok := oauth2Grants.([]interface{}); ok {
+			l.Logger.Info(fmt.Sprintf("Processing %d oauth2PermissionGrants", len(grantsList)))
+			for _, grantInterface := range grantsList {
+				if grantData, ok := grantInterface.(map[string]interface{}); ok {
+					permission := CompleteGraphPermission{
+						ID:                l.getStringField(grantData, "id"),
+						Type:              "oauth2PermissionGrant",
+						ServicePrincipalID: l.getStringField(grantData, "clientId"),
+						ServicePrincipalName: "", // Will be resolved by Neo4j query
+						UserID:            l.getStringField(grantData, "principalId"),
+						UserName:          "", // Will be resolved by Neo4j query
+						ResourceAppID:     l.getStringField(grantData, "resourceId"),
+						ResourceAppName:   "", // Will be resolved by Neo4j query
+						PermissionType:    "Delegated",
+						Permission:        l.getStringField(grantData, "scope"),
+						ConsentType:       l.getStringField(grantData, "consentType"),
+						GrantedFor:        "User",
+						CreatedDateTime:   "", // Not available in oauth2PermissionGrants
+						ExpiryDateTime:    l.getStringField(grantData, "expiryTime"),
+						Scope:             l.getStringField(grantData, "scope"),
+						Source:            "oauth2PermissionGrants",
+					}
+					allGraphPermissions = append(allGraphPermissions, permission)
+				}
+			}
+		}
+	}
+
+	// Process appRoleAssignments
+	if appRoles, exists := azureADMap["appRoleAssignments"]; exists {
+		if rolesList, ok := appRoles.([]interface{}); ok {
+			l.Logger.Info(fmt.Sprintf("Processing %d appRoleAssignments", len(rolesList)))
+			for _, roleInterface := range rolesList {
+				if roleData, ok := roleInterface.(map[string]interface{}); ok {
+					permission := CompleteGraphPermission{
+						ID:                l.getStringField(roleData, "id"),
+						Type:              "appRoleAssignment",
+						ServicePrincipalID: l.getStringField(roleData, "principalId"),
+						ServicePrincipalName: "", // Will be resolved by Neo4j query
+						ResourceAppID:     l.getStringField(roleData, "resourceId"),
+						ResourceAppName:   "", // Will be resolved by Neo4j query
+						PermissionType:    "Application",
+						Permission:        l.getStringField(roleData, "appRoleId"),
+						ConsentType:       "AllPrincipals",
+						GrantedFor:        "Application",
+						CreatedDateTime:   l.getStringField(roleData, "createdDateTime"),
+						AppRoleID:         l.getStringField(roleData, "appRoleId"),
+						Source:            "appRoleAssignments",
+					}
+					allGraphPermissions = append(allGraphPermissions, permission)
+				}
+			}
+		}
+	}
+
+	return allGraphPermissions
+}
+
+func (l *Neo4jImporterLink) createApplicationOwnershipEdges() error {
+	azureAD := l.getMapValue(l.consolidatedData, "azure_ad")
+	if azureAD == nil {
+		l.Logger.Info("No azure_ad data found for application ownership")
+		return nil
+	}
+
+	var totalEdges int
+
+	// Process application ownership - direct ownership relationships
+	applicationOwnership := l.getArrayValue(azureAD, "applicationOwnership")
+	if len(applicationOwnership) > 0 {
+		count, err := l.createApplicationOwnershipDirectEdges(applicationOwnership)
+		if err != nil {
+			return fmt.Errorf("failed to create direct ownership edges: %w", err)
+		}
+		totalEdges += count
+		l.edgeCounts["OWNS"] = count
+	}
+
+	// Process application credential management permissions - role-based permissions
+	credentialPerms := l.getArrayValue(azureAD, "applicationCredentialPermissions")
+	if len(credentialPerms) > 0 {
+		count, err := l.createApplicationCredentialPermissionEdges(credentialPerms)
+		if err != nil {
+			return fmt.Errorf("failed to create credential permission edges: %w", err)
+		}
+		totalEdges += count
+		l.edgeCounts["HAS_APP_CREDENTIAL_PERMISSION"] = count
+	}
+
+	// Process application RBAC permissions - role-based application access
+	rbacPerms := l.getArrayValue(azureAD, "applicationRBACPermissions")
+	if len(rbacPerms) > 0 {
+		count, err := l.createApplicationRBACPermissionEdges(rbacPerms)
+		if err != nil {
+			return fmt.Errorf("failed to create RBAC permission edges: %w", err)
+		}
+		totalEdges += count
+		l.edgeCounts["HAS_APP_RBAC_PERMISSION"] = count
+	}
+
+	if totalEdges > 0 {
+		l.Logger.Info("Created application ownership edges", "total", totalEdges)
+	} else {
+		l.Logger.Info("No application ownership data to process")
+	}
+
+	return nil
+}
+
+func (l *Neo4jImporterLink) createApplicationOwnershipDirectEdges(applicationOwnership []interface{}) (int, error) {
+	if len(applicationOwnership) == 0 {
+		return 0, nil
+	}
+
+	l.Logger.Info("Creating direct application ownership edges", "count", len(applicationOwnership))
+
+	var edges []map[string]interface{}
+	currentTime := time.Now().Unix()
+
+	for _, item := range applicationOwnership {
+		ownershipMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		applicationID := l.getStringValue(ownershipMap, "applicationId")
+		if applicationID == "" {
+			continue
+		}
+
+		ownerID := l.getStringValue(ownershipMap, "ownerId")
+		if ownerID == "" {
+			continue
+		}
+
+		edge := map[string]interface{}{
+			"sourceId":    ownerID,
+			"targetId":    applicationID,
+			"source":      "ApplicationOwnership",
+			"createdAt":   currentTime,
+		}
+		edges = append(edges, edge)
+	}
+
+	if len(edges) == 0 {
+		l.Logger.Info("No valid application ownership edges to create")
+		return 0, nil
+	}
+
+	ctx := context.Background()
+	session := l.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: ""})
+	defer session.Close(ctx)
+
+	batchSize := 500
+	totalProcessed := 0
+
+	for i := 0; i < len(edges); i += batchSize {
+		end := i + batchSize
+		if end > len(edges) {
+			end = len(edges)
+		}
+		batch := edges[i:end]
+
+		query := `
+		UNWIND $edges AS edge
+		MATCH (source {id: edge.sourceId})
+		MATCH (target {id: edge.targetId})
+		WHERE target.resourceType = "Microsoft.DirectoryServices/applications"
+		MERGE (source)-[r:OWNS]->(target)
+		SET r.source = edge.source,
+		    r.createdAt = edge.createdAt
+		RETURN count(r) as created`
+
+		result, err := session.Run(ctx, query, map[string]interface{}{"edges": batch})
+		if err != nil {
+			return totalProcessed, fmt.Errorf("failed to create ownership edges batch: %w", err)
+		}
+
+		if result.Next(ctx) {
+			if count, ok := result.Record().Get("created"); ok {
+				if c, ok := count.(int64); ok {
+					totalProcessed += int(c)
+				}
+			}
+		}
+
+		if err := result.Err(); err != nil {
+			return totalProcessed, fmt.Errorf("error processing ownership edges batch: %w", err)
+		}
+	}
+
+	l.Logger.Info("Created direct ownership edges", "count", totalProcessed)
+	return totalProcessed, nil
+}
+
+func (l *Neo4jImporterLink) createApplicationCredentialPermissionEdges(credentialPerms []interface{}) (int, error) {
+	if len(credentialPerms) == 0 {
+		return 0, nil
+	}
+
+	l.Logger.Info("Creating application credential permission edges", "count", len(credentialPerms))
+
+	var edges []map[string]interface{}
+	currentTime := time.Now().Unix()
+
+	for _, item := range credentialPerms {
+		permMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		principalID := l.getStringValue(permMap, "principalId")
+		roleName := l.getStringValue(permMap, "roleName")
+		if principalID == "" || roleName == "" {
+			continue
+		}
+
+		edge := map[string]interface{}{
+			"sourceId":         principalID,
+			"permission":       "ApplicationCredentialManagement",
+			"roleName":        roleName,
+			"source":          "DirectoryRole",
+			"principalType":   "User",
+			"createdAt":       currentTime,
+		}
+		edges = append(edges, edge)
+	}
+
+	if len(edges) == 0 {
+		l.Logger.Info("No valid credential permission edges to create")
+		return 0, nil
+	}
+
+	ctx := context.Background()
+	session := l.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: ""})
+	defer session.Close(ctx)
+
+	batchSize := 500
+	totalProcessed := 0
+
+	for i := 0; i < len(edges); i += batchSize {
+		end := i + batchSize
+		if end > len(edges) {
+			end = len(edges)
+		}
+		batch := edges[i:end]
+
+		query := `
+		UNWIND $edges AS edge
+		MATCH (source {id: edge.sourceId})
+		MATCH (tenant {resourceType: "Microsoft.DirectoryServices/tenant"})
+		MERGE (source)-[r:HAS_PERMISSION]->(tenant)
+		SET r.permission = edge.permission,
+		    r.roleName = edge.roleName,
+		    r.source = edge.source,
+		    r.principalType = edge.principalType,
+		    r.createdAt = edge.createdAt
+		RETURN count(r) as created`
+
+		result, err := session.Run(ctx, query, map[string]interface{}{"edges": batch})
+		if err != nil {
+			return totalProcessed, fmt.Errorf("failed to create credential permission edges batch: %w", err)
+		}
+
+		if result.Next(ctx) {
+			if count, ok := result.Record().Get("created"); ok {
+				if c, ok := count.(int64); ok {
+					totalProcessed += int(c)
+				}
+			}
+		}
+
+		if err := result.Err(); err != nil {
+			return totalProcessed, fmt.Errorf("error processing credential permission edges batch: %w", err)
+		}
+	}
+
+	l.Logger.Info("Created credential management permission edges", "count", totalProcessed)
+	return totalProcessed, nil
+}
+
+func (l *Neo4jImporterLink) createApplicationRBACPermissionEdges(rbacPerms []interface{}) (int, error) {
+	if len(rbacPerms) == 0 {
+		return 0, nil
+	}
+
+	l.Logger.Info("Creating application RBAC permission edges", "count", len(rbacPerms))
+
+	var edges []map[string]interface{}
+	currentTime := time.Now().Unix()
+
+	for _, item := range rbacPerms {
+		permMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		principalID := l.getStringValue(permMap, "principalId")
+		roleName := l.getStringValue(permMap, "roleName")
+		if principalID == "" || roleName == "" {
+			continue
+		}
+
+		edge := map[string]interface{}{
+			"sourceId":         principalID,
+			"permission":       "ApplicationManagement",
+			"roleName":        roleName,
+			"source":          "DirectoryRole",
+			"principalType":   "User",
+			"createdAt":       currentTime,
+		}
+		edges = append(edges, edge)
+	}
+
+	if len(edges) == 0 {
+		l.Logger.Info("No valid RBAC permission edges to create")
+		return 0, nil
+	}
+
+	ctx := context.Background()
+	session := l.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: ""})
+	defer session.Close(ctx)
+
+	batchSize := 500
+	totalProcessed := 0
+
+	for i := 0; i < len(edges); i += batchSize {
+		end := i + batchSize
+		if end > len(edges) {
+			end = len(edges)
+		}
+		batch := edges[i:end]
+
+		query := `
+		UNWIND $edges AS edge
+		MATCH (source {id: edge.sourceId})
+		MATCH (tenant {resourceType: "Microsoft.DirectoryServices/tenant"})
+		MERGE (source)-[r:HAS_PERMISSION]->(tenant)
+		SET r.permission = edge.permission,
+		    r.roleName = edge.roleName,
+		    r.source = edge.source,
+		    r.principalType = edge.principalType,
+		    r.createdAt = edge.createdAt
+		RETURN count(r) as created`
+
+		result, err := session.Run(ctx, query, map[string]interface{}{"edges": batch})
+		if err != nil {
+			return totalProcessed, fmt.Errorf("failed to create RBAC permission edges batch: %w", err)
+		}
+
+		if result.Next(ctx) {
+			if count, ok := result.Record().Get("created"); ok {
+				if c, ok := count.(int64); ok {
+					totalProcessed += int(c)
+				}
+			}
+		}
+
+		if err := result.Err(); err != nil {
+			return totalProcessed, fmt.Errorf("error processing RBAC permission edges batch: %w", err)
+		}
+	}
+
+	l.Logger.Info("Created application RBAC permission edges", "count", totalProcessed)
+	return totalProcessed, nil
+}
+
+// getStringField safely extracts string fields from map data
+func (l *Neo4jImporterLink) getStringField(data map[string]interface{}, key string) string {
+	if value, exists := data[key]; exists {
+		if str, ok := value.(string); ok {
+			return str
+		}
+	}
+	return ""
 }

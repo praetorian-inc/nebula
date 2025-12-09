@@ -50,6 +50,49 @@ var selectedResourceTypes = []string{
 	"microsoft.network/azurefirewalls",
 }
 
+// CompleteGraphPermission represents all types of Graph API permissions
+type CompleteGraphPermission struct {
+	ID                   string `json:"id"`
+	Type                 string `json:"type"` // "ServicePrincipalApplication", "ServicePrincipalDelegated", "UserApplication", "GroupApplication", "UserDelegated"
+	ServicePrincipalID   string `json:"servicePrincipalId,omitempty"`
+	ServicePrincipalName string `json:"servicePrincipalName,omitempty"`
+	UserID               string `json:"userId,omitempty"`
+	UserName             string `json:"userName,omitempty"`
+	GroupID              string `json:"groupId,omitempty"`
+	GroupName            string `json:"groupName,omitempty"`
+	ResourceAppID        string `json:"resourceAppId"`
+	ResourceAppName      string `json:"resourceAppName"`
+	PermissionType       string `json:"permissionType"` // "Application" or "Delegated"
+	Permission           string `json:"permission"`
+	ConsentType          string `json:"consentType"` // "Admin" or "User"
+	GrantedFor           string `json:"grantedFor,omitempty"`
+	CreatedDateTime      string `json:"createdDateTime"`
+	ExpiryDateTime       string `json:"expiryDateTime,omitempty"`
+	AppRoleID            string `json:"appRoleId,omitempty"`
+	Scope                string `json:"scope,omitempty"`
+	Source               string `json:"source"` // "Global", "ServicePrincipal", "User", "Group"
+}
+
+// ServicePrincipalInfo holds basic service principal information
+type ServicePrincipalInfo struct {
+	ID          string
+	AppID       string
+	DisplayName string
+}
+
+// UserInfo holds basic user information
+type UserInfo struct {
+	ID                string
+	DisplayName       string
+	UserPrincipalName string
+}
+
+// GroupInfo holds basic group information
+type GroupInfo struct {
+	ID          string
+	DisplayName string
+}
+
 // IAMComprehensiveCollectorLink collects comprehensive Azure IAM data
 // Complete Azure AD, PIM, and ARM resource collection in one link
 type IAMComprehensiveCollectorLink struct {
@@ -846,7 +889,16 @@ func (l *IAMComprehensiveCollectorLink) collectAllGraphData(accessToken string) 
 
 	// Directory role assignments
 	l.Logger.Info("*** TRACE PRE-CALL: About to call collectDirectoryRoleAssignments ***")
-	roleAssignments, err := l.collectDirectoryRoleAssignments(accessToken)
+
+	// Get the already-collected service principals to pass to the function
+	var servicePrincipalsForDirectoryRoles []interface{}
+	if spData, exists := azureADData["servicePrincipals"]; exists {
+		if spList, ok := spData.([]interface{}); ok {
+			servicePrincipalsForDirectoryRoles = spList
+		}
+	}
+
+	roleAssignments, err := l.collectDirectoryRoleAssignments(accessToken, servicePrincipalsForDirectoryRoles)
 	l.Logger.Info("*** TRACE POST-CALL: Returned from collectDirectoryRoleAssignments ***")
 	if err != nil {
 		l.Logger.Error("Failed to collect directory role assignments", "error", err)
@@ -868,6 +920,33 @@ func (l *IAMComprehensiveCollectorLink) collectAllGraphData(accessToken string) 
 		l.Logger.Error("Failed to collect app role assignments", "error", err)
 	} else {
 		azureADData["appRoleAssignments"] = appRoleAssignments
+	}
+
+	// Collect application ownership data
+	l.Logger.Info("Collecting application ownership")
+	applicationOwnership, err := l.collectApplicationOwnership(accessToken)
+	if err != nil {
+		l.Logger.Error("Failed to collect application ownership", "error", err)
+	} else {
+		azureADData["applicationOwnership"] = applicationOwnership
+	}
+
+	// Collect application credential management permissions
+	l.Logger.Info("Collecting application credential management permissions")
+	credentialPerms, err := l.collectApplicationCredentialPermissions(accessToken)
+	if err != nil {
+		l.Logger.Error("Failed to collect application credential permissions", "error", err)
+	} else {
+		azureADData["applicationCredentialPermissions"] = credentialPerms
+	}
+
+	// Collect application RBAC permissions
+	l.Logger.Info("Collecting application RBAC permissions")
+	appRBAC, err := l.collectApplicationRBACPermissions(accessToken)
+	if err != nil {
+		l.Logger.Error("Failed to collect application RBAC permissions", "error", err)
+	} else {
+		azureADData["applicationRBACPermissions"] = appRBAC
 	}
 
 	return azureADData, nil
@@ -1336,7 +1415,7 @@ func (l *IAMComprehensiveCollectorLink) collectGroupMemberships(accessToken stri
 }
 
 // collectDirectoryRoleAssignments collects directory role assignments
-func (l *IAMComprehensiveCollectorLink) collectDirectoryRoleAssignments(accessToken string) ([]interface{}, error) {
+func (l *IAMComprehensiveCollectorLink) collectDirectoryRoleAssignments(accessToken string, servicePrincipals []interface{}) ([]interface{}, error) {
 	l.Logger.Info("*** TRACE 1: Entering collectDirectoryRoleAssignments function ***")
 	roles, err := l.collectPaginatedGraphData(accessToken, "/directoryRoles")
 	if err != nil {
@@ -1355,10 +1434,17 @@ func (l *IAMComprehensiveCollectorLink) collectDirectoryRoleAssignments(accessTo
 	l.Logger.Info(fmt.Sprintf("*** TRACE 5: Starting loop with batchSize=%d, total roles=%d ***", batchSize, len(roles)))
 	for batchIdx := 0; batchIdx < len(roles); batchIdx += batchSize {
 		l.Logger.Info(fmt.Sprintf("*** TRACE 6: Processing batch starting at index %d ***", batchIdx))
-		batchRoles := roles[batchIdx:]
-		if len(batchRoles) > batchSize {
-			batchRoles = batchRoles[:batchSize]
+
+		// Ensure batchIdx is within bounds
+		if batchIdx >= len(roles) {
+			break
 		}
+
+		end := batchIdx + batchSize
+		if end > len(roles) {
+			end = len(roles)
+		}
+		batchRoles := roles[batchIdx:end]
 
 		l.Logger.Info(fmt.Sprintf("Batch calling %d requests...", len(batchRoles)))
 
@@ -1463,7 +1549,7 @@ func (l *IAMComprehensiveCollectorLink) collectDirectoryRoleAssignments(accessTo
 	// don't appear in role membership lists, but they do appear when querying their memberOf
 	l.Logger.Info("*** TRACE 13: About to start service principal collection ***")
 	l.Logger.Info("Collecting service principal directory role assignments using memberOf approach...")
-	servicePrincipalAssignments, err := l.collectServicePrincipalDirectoryRoles(accessToken)
+	servicePrincipalAssignments, err := l.collectServicePrincipalDirectoryRoles(accessToken, servicePrincipals)
 	if err != nil {
 		l.Logger.Error("*** TRACE 14: Service principal collection FAILED ***", "error", err)
 	} else {
@@ -1477,14 +1563,13 @@ func (l *IAMComprehensiveCollectorLink) collectDirectoryRoleAssignments(accessTo
 
 // collectServicePrincipalDirectoryRoles collects directory role assignments for service principals
 // using the memberOf approach to work around Graph API asymmetry bug
-func (l *IAMComprehensiveCollectorLink) collectServicePrincipalDirectoryRoles(accessToken string) ([]interface{}, error) {
+func (l *IAMComprehensiveCollectorLink) collectServicePrincipalDirectoryRoles(accessToken string, servicePrincipals []interface{}) ([]interface{}, error) {
 	l.Logger.Info("*** TRACE SP-1: Entering collectServicePrincipalDirectoryRoles ***")
 
-	// First, get all service principals
-	servicePrincipals, err := l.collectPaginatedGraphData(accessToken, "/servicePrincipals")
-	if err != nil {
-		l.Logger.Error("*** TRACE SP-2: Failed to get service principals ***", "error", err)
-		return nil, fmt.Errorf("failed to get service principals: %w", err)
+	// Use the already-collected service principals passed as parameter
+	if servicePrincipals == nil || len(servicePrincipals) == 0 {
+		l.Logger.Error("*** TRACE SP-2: No service principals provided ***")
+		return nil, fmt.Errorf("no service principals provided")
 	}
 
 	l.Logger.Info(fmt.Sprintf("*** TRACE SP-3: Got %d service principals, checking for directory roles ***", len(servicePrincipals)))
@@ -1494,10 +1579,16 @@ func (l *IAMComprehensiveCollectorLink) collectServicePrincipalDirectoryRoles(ac
 	// Process service principals in batches for memberOf collection
 	batchSize := 20
 	for batchIdx := 0; batchIdx < len(servicePrincipals); batchIdx += batchSize {
-		batchSPs := servicePrincipals[batchIdx:]
-		if len(batchSPs) > batchSize {
-			batchSPs = batchSPs[:batchSize]
+		// Ensure batchIdx is within bounds
+		if batchIdx >= len(servicePrincipals) {
+			break
 		}
+
+		end := batchIdx + batchSize
+		if end > len(servicePrincipals) {
+			end = len(servicePrincipals)
+		}
+		batchSPs := servicePrincipals[batchIdx:end]
 
 		l.Logger.Info(fmt.Sprintf("*** TRACE SP-4: Processing SP batch %d with %d service principals ***", batchIdx/batchSize, len(batchSPs)))
 
@@ -1624,10 +1715,17 @@ func (l *IAMComprehensiveCollectorLink) collectAppRoleAssignments(accessToken st
 
 	for batchIdx := 0; batchIdx < len(servicePrincipals); batchIdx += batchSize {
 		batchNum := (batchIdx / batchSize) + 1
-		batchSPs := servicePrincipals[batchIdx:]
-		if len(batchSPs) > batchSize {
-			batchSPs = batchSPs[:batchSize]
+
+		// Ensure batchIdx is within bounds
+		if batchIdx >= len(servicePrincipals) {
+			break
 		}
+
+		end := batchIdx + batchSize
+		if end > len(servicePrincipals) {
+			end = len(servicePrincipals)
+		}
+		batchSPs := servicePrincipals[batchIdx:end]
 
 		l.Logger.Info(fmt.Sprintf("Batch calling %d requests...", len(batchSPs)*2))
 
@@ -2515,4 +2613,1068 @@ func (l *IAMComprehensiveCollectorLink) processSubscriptionRM(
 	}
 
 	return azurermData, nil
+}
+
+// collectCompleteGraphPermissions collects comprehensive Graph API permissions from all sources
+func (l *IAMComprehensiveCollectorLink) collectCompleteGraphPermissions(accessToken string, azureADData map[string]interface{}) ([]CompleteGraphPermission, error) {
+	var allPermissions []CompleteGraphPermission
+
+	l.Logger.Info("Starting comprehensive Microsoft Graph API permissions collection")
+	message.Info("Collecting comprehensive Microsoft Graph API permissions...")
+
+	// Extract reference data (already collected)
+	servicePrincipals, spOk := azureADData["servicePrincipals"].([]interface{})
+	users, usersOk := azureADData["users"].([]interface{})
+	groups, groupsOk := azureADData["groups"].([]interface{})
+
+	if !spOk || !usersOk || !groupsOk {
+		return nil, fmt.Errorf("missing required reference data (servicePrincipals, users, or groups)")
+	}
+
+	// Build reference maps
+	spMap := l.buildServicePrincipalsMap(servicePrincipals)
+	userMap := l.buildUsersMap(users)
+	groupMap := l.buildGroupsMap(groups)
+
+	// Get app roles map for permission name resolution
+	appRolesMap, err := l.buildAppRolesMap(accessToken, spMap)
+	if err != nil {
+		l.Logger.Error("Failed to build app roles map", "error", err)
+		appRolesMap = make(map[string]map[string]string)
+	}
+
+	// 1. Global OAuth2 Permission Grants (already collected in main flow)
+	if oauth2Grants, exists := azureADData["oauth2PermissionGrants"]; exists {
+		if oauth2List, ok := oauth2Grants.([]interface{}); ok {
+			globalDelegated := l.processGlobalOAuth2Grants(oauth2List, spMap, userMap)
+			allPermissions = append(allPermissions, globalDelegated...)
+			l.Logger.Info(fmt.Sprintf("Processed %d global OAuth2 grants", len(globalDelegated)))
+		}
+	}
+
+	// 2. Global App Role Assignments (already collected in main flow)
+	if appRoleAssignments, exists := azureADData["appRoleAssignments"]; exists {
+		if appRoleList, ok := appRoleAssignments.([]interface{}); ok {
+			globalApplication := l.processGlobalAppRoleAssignments(appRoleList, spMap, userMap, groupMap, appRolesMap)
+			allPermissions = append(allPermissions, globalApplication...)
+			l.Logger.Info(fmt.Sprintf("Processed %d global app role assignments", len(globalApplication)))
+		}
+	}
+
+	// 3. Service Principal specific permissions
+	spPermissions, err := l.collectServicePrincipalPermissions(accessToken, servicePrincipals, spMap, userMap, appRolesMap)
+	if err != nil {
+		l.Logger.Error("Failed to collect service principal permissions", "error", err)
+	} else {
+		allPermissions = append(allPermissions, spPermissions...)
+	}
+
+	// 4. User specific permissions (limited to first 100 users for performance)
+	userPermissions, err := l.collectUserPermissions(accessToken, users, spMap, userMap, appRolesMap)
+	if err != nil {
+		l.Logger.Error("Failed to collect user permissions", "error", err)
+	} else {
+		allPermissions = append(allPermissions, userPermissions...)
+	}
+
+	// 5. Group specific permissions
+	groupPermissions, err := l.collectGroupPermissions(accessToken, groups, spMap, groupMap, appRolesMap)
+	if err != nil {
+		l.Logger.Error("Failed to collect group permissions", "error", err)
+	} else {
+		allPermissions = append(allPermissions, groupPermissions...)
+	}
+
+	l.Logger.Info(fmt.Sprintf("Collected %d total comprehensive Graph API permissions", len(allPermissions)))
+	message.Info("Comprehensive Graph permissions collection completed: %d permissions found", len(allPermissions))
+
+	return allPermissions, nil
+}
+
+// buildServicePrincipalsMap creates a map of service principal ID to basic info for name resolution
+func (l *IAMComprehensiveCollectorLink) buildServicePrincipalsMap(servicePrincipals []interface{}) map[string]ServicePrincipalInfo {
+	spMap := make(map[string]ServicePrincipalInfo)
+	for _, spInterface := range servicePrincipals {
+		sp, ok := spInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := sp["id"].(string)
+		appId, _ := sp["appId"].(string)
+		displayName, _ := sp["displayName"].(string)
+		if id != "" {
+			spMap[id] = ServicePrincipalInfo{
+				ID:          id,
+				AppID:       appId,
+				DisplayName: displayName,
+			}
+		}
+	}
+	return spMap
+}
+
+// buildUsersMap creates a map of user ID to basic info for name resolution
+func (l *IAMComprehensiveCollectorLink) buildUsersMap(users []interface{}) map[string]UserInfo {
+	userMap := make(map[string]UserInfo)
+	for _, userInterface := range users {
+		user, ok := userInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := user["id"].(string)
+		displayName, _ := user["displayName"].(string)
+		upn, _ := user["userPrincipalName"].(string)
+		if id != "" {
+			userMap[id] = UserInfo{
+				ID:                id,
+				DisplayName:       displayName,
+				UserPrincipalName: upn,
+			}
+		}
+	}
+	return userMap
+}
+
+// buildGroupsMap creates a map of group ID to basic info for name resolution
+func (l *IAMComprehensiveCollectorLink) buildGroupsMap(groups []interface{}) map[string]GroupInfo {
+	groupMap := make(map[string]GroupInfo)
+	for _, groupInterface := range groups {
+		group, ok := groupInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := group["id"].(string)
+		displayName, _ := group["displayName"].(string)
+		if id != "" {
+			groupMap[id] = GroupInfo{
+				ID:          id,
+				DisplayName: displayName,
+			}
+		}
+	}
+	return groupMap
+}
+
+// buildAppRolesMap creates a map of resource ID -> app role ID -> permission name for name resolution
+func (l *IAMComprehensiveCollectorLink) buildAppRolesMap(accessToken string, spMap map[string]ServicePrincipalInfo) (map[string]map[string]string, error) {
+	appRolesMap := make(map[string]map[string]string)
+
+	// Key resource providers to get detailed app roles for
+	keyResourceAppIds := []string{
+		"00000003-0000-0000-c000-000000000000", // Microsoft Graph
+		"00000002-0000-0000-c000-000000000000", // Azure Active Directory Graph
+		"797f4846-ba00-4fd7-ba43-dac1f8f63013", // Azure Service Management
+		"00000009-0000-0000-c000-000000000000", // Azure Key Vault
+		"c5393580-f805-4401-95e8-94b7a6ef2fc2", // Office 365 Management APIs
+		"00000007-0000-0000-c000-000000000000", // Dynamics CRM
+	}
+
+	for resourceID, spInfo := range spMap {
+		// Process key resources
+		shouldProcess := false
+		for _, keyAppId := range keyResourceAppIds {
+			if spInfo.AppID == keyAppId {
+				shouldProcess = true
+				break
+			}
+		}
+
+		if !shouldProcess {
+			continue
+		}
+
+		// Get both app roles and OAuth2 permission scopes
+		appRoles, oauth2Scopes, err := l.getServicePrincipalRoles(accessToken, resourceID)
+		if err != nil {
+			l.Logger.Error(fmt.Sprintf("Failed to get roles for SP %s", resourceID), "error", err)
+			continue
+		}
+
+		if len(appRoles) > 0 || len(oauth2Scopes) > 0 {
+			roleMap := make(map[string]string)
+
+			// Add application permissions (app roles)
+			for roleID, roleName := range appRoles {
+				roleMap[roleID] = roleName
+			}
+
+			// Add delegated permissions (OAuth2 scopes) with prefix
+			for scopeID, scopeName := range oauth2Scopes {
+				roleMap["oauth2_"+scopeID] = scopeName
+			}
+
+			appRolesMap[resourceID] = roleMap
+		}
+	}
+
+	return appRolesMap, nil
+}
+
+// getServicePrincipalRoles gets app roles and OAuth2 permission scopes for a service principal
+func (l *IAMComprehensiveCollectorLink) getServicePrincipalRoles(accessToken, servicePrincipalID string) (map[string]string, map[string]string, error) {
+	endpoint := fmt.Sprintf("/servicePrincipals/%s?$select=appRoles,oauth2PermissionScopes", servicePrincipalID)
+
+	req, err := http.NewRequestWithContext(l.Context(), "GET", fmt.Sprintf("https://graph.microsoft.com/v1.0%s", endpoint), nil)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := l.httpClient.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, nil, fmt.Errorf("API call failed with status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		AppRoles []struct {
+			ID    string `json:"id"`
+			Value string `json:"value"`
+		} `json:"appRoles"`
+		OAuth2PermissionScopes []struct {
+			ID    string `json:"id"`
+			Value string `json:"value"`
+		} `json:"oauth2PermissionScopes"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, nil, err
+	}
+
+	appRoles := make(map[string]string)
+	oauth2Scopes := make(map[string]string)
+
+	for _, role := range result.AppRoles {
+		if role.ID != "" && role.Value != "" {
+			appRoles[role.ID] = role.Value
+		}
+	}
+
+	for _, scope := range result.OAuth2PermissionScopes {
+		if scope.ID != "" && scope.Value != "" {
+			oauth2Scopes[scope.ID] = scope.Value
+		}
+	}
+
+	return appRoles, oauth2Scopes, nil
+}
+
+// processGlobalOAuth2Grants processes the global OAuth2 permission grants
+func (l *IAMComprehensiveCollectorLink) processGlobalOAuth2Grants(grants []interface{}, spMap map[string]ServicePrincipalInfo, userMap map[string]UserInfo) []CompleteGraphPermission {
+	var permissions []CompleteGraphPermission
+
+	for _, grantInterface := range grants {
+		grant, ok := grantInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		clientID, _ := grant["clientId"].(string)
+		resourceID, _ := grant["resourceId"].(string)
+		scope, _ := grant["scope"].(string)
+		consentType, _ := grant["consentType"].(string)
+		principalID, _ := grant["principalId"].(string)
+		startTime, _ := grant["startTime"].(string)
+		expiryTime, _ := grant["expiryTime"].(string)
+		grantID, _ := grant["id"].(string)
+
+		clientSP, clientExists := spMap[clientID]
+		resourceSP, resourceExists := spMap[resourceID]
+		if !clientExists || !resourceExists {
+			continue
+		}
+
+		// Parse individual permissions from scope string
+		scopes := strings.Fields(scope)
+		for _, individualScope := range scopes {
+			if strings.TrimSpace(individualScope) == "" {
+				continue
+			}
+
+			permission := CompleteGraphPermission{
+				ID:                   grantID,
+				Type:                 "ServicePrincipalDelegated",
+				ServicePrincipalID:   clientID,
+				ServicePrincipalName: clientSP.DisplayName,
+				ResourceAppID:        resourceSP.AppID,
+				ResourceAppName:      resourceSP.DisplayName,
+				PermissionType:       "Delegated",
+				Permission:           strings.TrimSpace(individualScope),
+				ConsentType:          consentType,
+				GrantedFor:           principalID,
+				CreatedDateTime:      startTime,
+				ExpiryDateTime:       expiryTime,
+				Scope:                scope,
+				Source:               "Global",
+			}
+
+			// Add user info if available
+			if principalID != "" {
+				if user, exists := userMap[principalID]; exists {
+					permission.UserID = user.ID
+					permission.UserName = user.DisplayName
+				}
+			}
+
+			permissions = append(permissions, permission)
+		}
+	}
+
+	return permissions
+}
+
+// processGlobalAppRoleAssignments processes the global app role assignments
+func (l *IAMComprehensiveCollectorLink) processGlobalAppRoleAssignments(assignments []interface{}, spMap map[string]ServicePrincipalInfo, userMap map[string]UserInfo, groupMap map[string]GroupInfo, appRolesMap map[string]map[string]string) []CompleteGraphPermission {
+	var permissions []CompleteGraphPermission
+
+	for _, assignmentInterface := range assignments {
+		assignment, ok := assignmentInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		appRoleID, _ := assignment["appRoleId"].(string)
+		resourceID, _ := assignment["resourceId"].(string)
+		principalID, _ := assignment["principalId"].(string)
+		principalType, _ := assignment["principalType"].(string)
+		createdDateTime, _ := assignment["createdDateTime"].(string)
+		assignmentID, _ := assignment["id"].(string)
+
+		resourceSP, resourceExists := spMap[resourceID]
+		if !resourceExists {
+			continue
+		}
+
+		// Get permission name
+		permissionName := appRoleID
+		if resourceRoles, exists := appRolesMap[resourceID]; exists {
+			if roleName, roleExists := resourceRoles[appRoleID]; roleExists {
+				permissionName = roleName
+			}
+		}
+
+		permission := CompleteGraphPermission{
+			ID:              assignmentID,
+			ResourceAppID:   resourceSP.AppID,
+			ResourceAppName: resourceSP.DisplayName,
+			PermissionType:  "Application",
+			Permission:      permissionName,
+			ConsentType:     "Admin",
+			CreatedDateTime: createdDateTime,
+			AppRoleID:       appRoleID,
+			Source:          "Global",
+		}
+
+		// Set principal info based on type
+		switch principalType {
+		case "ServicePrincipal":
+			if sp, exists := spMap[principalID]; exists {
+				permission.Type = "ServicePrincipalApplication"
+				permission.ServicePrincipalID = sp.ID
+				permission.ServicePrincipalName = sp.DisplayName
+			}
+		case "User":
+			if user, exists := userMap[principalID]; exists {
+				permission.Type = "UserApplication"
+				permission.UserID = user.ID
+				permission.UserName = user.DisplayName
+			}
+		case "Group":
+			if group, exists := groupMap[principalID]; exists {
+				permission.Type = "GroupApplication"
+				permission.GroupID = group.ID
+				permission.GroupName = group.DisplayName
+			}
+		}
+
+		permissions = append(permissions, permission)
+	}
+
+	return permissions
+}
+
+// collectServicePrincipalPermissions collects permissions specific to each service principal
+func (l *IAMComprehensiveCollectorLink) collectServicePrincipalPermissions(accessToken string, servicePrincipals []interface{}, spMap map[string]ServicePrincipalInfo, userMap map[string]UserInfo, appRolesMap map[string]map[string]string) ([]CompleteGraphPermission, error) {
+	var permissions []CompleteGraphPermission
+
+	l.Logger.Info("Collecting service principal specific permissions")
+
+	batchSize := 5 // Conservative for relationship endpoints to avoid Graph API timeouts
+	for i := 0; i < len(servicePrincipals); i += batchSize {
+		end := i + batchSize
+		if end > len(servicePrincipals) {
+			end = len(servicePrincipals)
+		}
+
+		batch := servicePrincipals[i:end]
+		batchPermissions := l.processServicePrincipalPermissionBatch(accessToken, batch, spMap, userMap, appRolesMap)
+		permissions = append(permissions, batchPermissions...)
+
+		l.Logger.Info(fmt.Sprintf("Processed SP permission batch %d-%d: %d permissions", i+1, end, len(batchPermissions)))
+		time.Sleep(200 * time.Millisecond) // Respect Graph API throttling for relationship endpoints
+	}
+
+	return permissions, nil
+}
+
+// processServicePrincipalPermissionBatch processes a batch of service principals for permissions using Graph batch API
+func (l *IAMComprehensiveCollectorLink) processServicePrincipalPermissionBatch(accessToken string, servicePrincipals []interface{}, spMap map[string]ServicePrincipalInfo, userMap map[string]UserInfo, appRolesMap map[string]map[string]string) []CompleteGraphPermission {
+	var permissions []CompleteGraphPermission
+
+	// Build batch requests for all service principals in this batch
+	var batchRequests []map[string]interface{}
+	spBatchMap := make(map[string]string) // Maps request ID to SP ID
+
+	for _, spInterface := range servicePrincipals {
+		sp, ok := spInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		spID, _ := sp["id"].(string)
+		if spID == "" {
+			continue
+		}
+
+		// Add app role assignments request
+		appRequestID := fmt.Sprintf("sp_app_%s", spID)
+		batchRequests = append(batchRequests, map[string]interface{}{
+			"id":     appRequestID,
+			"method": "GET",
+			"url":    fmt.Sprintf("/servicePrincipals/%s/appRoleAssignments", spID),
+		})
+		spBatchMap[appRequestID] = spID
+
+		// Add OAuth2 permission grants request
+		oauth2RequestID := fmt.Sprintf("sp_oauth_%s", spID)
+		batchRequests = append(batchRequests, map[string]interface{}{
+			"id":     oauth2RequestID,
+			"method": "GET",
+			"url":    fmt.Sprintf("/servicePrincipals/%s/oauth2PermissionGrants", spID),
+		})
+		spBatchMap[oauth2RequestID] = spID
+	}
+
+	if len(batchRequests) == 0 {
+		return permissions
+	}
+
+	// Execute batch request using existing batch API
+	batchResponse, err := l.callGraphBatchAPI(accessToken, batchRequests)
+	if err != nil {
+		l.Logger.Error("Failed to execute service principal permissions batch", "error", err)
+		return permissions
+	}
+
+	// Process batch responses
+	if responses, ok := batchResponse["responses"].([]interface{}); ok {
+		for _, response := range responses {
+			if respMap, ok := response.(map[string]interface{}); ok {
+				requestID, _ := respMap["id"].(string)
+				_ = spBatchMap[requestID] // SP ID available via spBatchMap if needed
+
+				if body, ok := respMap["body"].(map[string]interface{}); ok {
+					if value, ok := body["value"].([]interface{}); ok {
+						if strings.HasPrefix(requestID, "sp_app_") {
+							// Process app role assignments
+							for _, assignmentInterface := range value {
+								assignment, ok := assignmentInterface.(map[string]interface{})
+								if !ok {
+									continue
+								}
+
+								permission := l.buildApplicationPermissionFromAssignment(assignment, spMap, appRolesMap, "ServicePrincipal")
+								if permission.ID != "" {
+									permissions = append(permissions, permission)
+								}
+							}
+						} else if strings.HasPrefix(requestID, "sp_oauth_") {
+							// Process OAuth2 grants
+							for _, grantInterface := range value {
+								grant, ok := grantInterface.(map[string]interface{})
+								if !ok {
+									continue
+								}
+
+								grantPermissions := l.buildDelegatedPermissionsFromGrant(grant, spMap, userMap, "ServicePrincipal")
+								permissions = append(permissions, grantPermissions...)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return permissions
+}
+
+// collectUserPermissions collects permissions specific to users
+func (l *IAMComprehensiveCollectorLink) collectUserPermissions(accessToken string, users []interface{}, spMap map[string]ServicePrincipalInfo, userMap map[string]UserInfo, appRolesMap map[string]map[string]string) ([]CompleteGraphPermission, error) {
+	var permissions []CompleteGraphPermission
+
+	l.Logger.Info("Collecting user specific permissions")
+
+	// Sample subset of users to avoid overwhelming API (focus on first 100 users)
+	maxUsers := 100
+	if len(users) > maxUsers {
+		users = users[:maxUsers]
+		l.Logger.Info(fmt.Sprintf("Limiting user permission collection to %d users", maxUsers))
+	}
+
+	batchSize := 5 // Conservative for relationship endpoints to avoid Graph API timeouts
+	for i := 0; i < len(users); i += batchSize {
+		end := i + batchSize
+		if end > len(users) {
+			end = len(users)
+		}
+
+		batch := users[i:end]
+		batchPermissions := l.processUserPermissionBatch(accessToken, batch, spMap, userMap, appRolesMap)
+		permissions = append(permissions, batchPermissions...)
+
+		l.Logger.Info(fmt.Sprintf("Processed user permission batch %d-%d: %d permissions", i+1, end, len(batchPermissions)))
+		time.Sleep(200 * time.Millisecond) // Respect Graph API throttling for relationship endpoints
+	}
+
+	return permissions, nil
+}
+
+// processUserPermissionBatch processes a batch of users for permissions using Graph batch API
+func (l *IAMComprehensiveCollectorLink) processUserPermissionBatch(accessToken string, users []interface{}, spMap map[string]ServicePrincipalInfo, userMap map[string]UserInfo, appRolesMap map[string]map[string]string) []CompleteGraphPermission {
+	var permissions []CompleteGraphPermission
+
+	// Build batch requests for all users in this batch
+	var batchRequests []map[string]interface{}
+	userBatchMap := make(map[string]string) // Maps request ID to user ID
+
+	for _, userInterface := range users {
+		user, ok := userInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		userID, _ := user["id"].(string)
+		if userID == "" {
+			continue
+		}
+
+		// Add app role assignments request
+		appRequestID := fmt.Sprintf("user_app_%s", userID)
+		batchRequests = append(batchRequests, map[string]interface{}{
+			"id":     appRequestID,
+			"method": "GET",
+			"url":    fmt.Sprintf("/users/%s/appRoleAssignments", userID),
+		})
+		userBatchMap[appRequestID] = userID
+
+		// Add OAuth2 permission grants request
+		oauth2RequestID := fmt.Sprintf("user_oauth_%s", userID)
+		batchRequests = append(batchRequests, map[string]interface{}{
+			"id":     oauth2RequestID,
+			"method": "GET",
+			"url":    fmt.Sprintf("/users/%s/oauth2PermissionGrants", userID),
+		})
+		userBatchMap[oauth2RequestID] = userID
+	}
+
+	if len(batchRequests) == 0 {
+		return permissions
+	}
+
+	// Execute batch request using existing batch API
+	batchResponse, err := l.callGraphBatchAPI(accessToken, batchRequests)
+	if err != nil {
+		l.Logger.Error("Failed to execute user permissions batch", "error", err)
+		return permissions
+	}
+
+	// Process batch responses
+	if responses, ok := batchResponse["responses"].([]interface{}); ok {
+		for _, response := range responses {
+			if respMap, ok := response.(map[string]interface{}); ok {
+				requestID, _ := respMap["id"].(string)
+				userID := userBatchMap[requestID]
+
+				// Check for successful response (status 200)
+				status, _ := respMap["status"].(float64)
+				if status != 200 {
+					// User may not have permissions, which is normal - continue
+					continue
+				}
+
+				if body, ok := respMap["body"].(map[string]interface{}); ok {
+					if value, ok := body["value"].([]interface{}); ok {
+						if strings.HasPrefix(requestID, "user_app_") {
+							// Process app role assignments
+							for _, assignmentInterface := range value {
+								assignment, ok := assignmentInterface.(map[string]interface{})
+								if !ok {
+									continue
+								}
+
+								permission := l.buildApplicationPermissionFromAssignment(assignment, spMap, appRolesMap, "User")
+								if permission.ID != "" {
+									// Add user details
+									if userInfo, exists := userMap[userID]; exists {
+										permission.UserID = userInfo.ID
+										permission.UserName = userInfo.DisplayName
+									}
+									permissions = append(permissions, permission)
+								}
+							}
+						} else if strings.HasPrefix(requestID, "user_oauth_") {
+							// Process OAuth2 grants
+							for _, grantInterface := range value {
+								grant, ok := grantInterface.(map[string]interface{})
+								if !ok {
+									continue
+								}
+
+								grantPermissions := l.buildDelegatedPermissionsFromGrant(grant, spMap, userMap, "User")
+								permissions = append(permissions, grantPermissions...)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return permissions
+}
+
+// collectGroupPermissions collects permissions specific to groups
+func (l *IAMComprehensiveCollectorLink) collectGroupPermissions(accessToken string, groups []interface{}, spMap map[string]ServicePrincipalInfo, groupMap map[string]GroupInfo, appRolesMap map[string]map[string]string) ([]CompleteGraphPermission, error) {
+	var permissions []CompleteGraphPermission
+
+	l.Logger.Info("Collecting group specific permissions")
+
+	batchSize := 10 // Conservative for relationship endpoints to avoid Graph API timeouts
+	for i := 0; i < len(groups); i += batchSize {
+		end := i + batchSize
+		if end > len(groups) {
+			end = len(groups)
+		}
+
+		batch := groups[i:end]
+		batchPermissions := l.processGroupPermissionBatch(accessToken, batch, spMap, groupMap, appRolesMap)
+		permissions = append(permissions, batchPermissions...)
+
+		l.Logger.Info(fmt.Sprintf("Processed group permission batch %d-%d: %d permissions", i+1, end, len(batchPermissions)))
+		time.Sleep(200 * time.Millisecond) // Respect Graph API throttling for relationship endpoints
+	}
+
+	return permissions, nil
+}
+
+// processGroupPermissionBatch processes a batch of groups for permissions using Graph batch API
+func (l *IAMComprehensiveCollectorLink) processGroupPermissionBatch(accessToken string, groups []interface{}, spMap map[string]ServicePrincipalInfo, groupMap map[string]GroupInfo, appRolesMap map[string]map[string]string) []CompleteGraphPermission {
+	var permissions []CompleteGraphPermission
+
+	// Build batch requests for all groups in this batch
+	var batchRequests []map[string]interface{}
+	groupBatchMap := make(map[string]string) // Maps request ID to group ID
+
+	for _, groupInterface := range groups {
+		group, ok := groupInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		groupID, _ := group["id"].(string)
+		if groupID == "" {
+			continue
+		}
+
+		// Add app role assignments request (groups don't have OAuth2 grants)
+		appRequestID := fmt.Sprintf("group_app_%s", groupID)
+		batchRequests = append(batchRequests, map[string]interface{}{
+			"id":     appRequestID,
+			"method": "GET",
+			"url":    fmt.Sprintf("/groups/%s/appRoleAssignments", groupID),
+		})
+		groupBatchMap[appRequestID] = groupID
+	}
+
+	if len(batchRequests) == 0 {
+		return permissions
+	}
+
+	// Execute batch request using existing batch API
+	batchResponse, err := l.callGraphBatchAPI(accessToken, batchRequests)
+	if err != nil {
+		l.Logger.Error("Failed to execute group permissions batch", "error", err)
+		return permissions
+	}
+
+	// Process batch responses
+	if responses, ok := batchResponse["responses"].([]interface{}); ok {
+		for _, response := range responses {
+			if respMap, ok := response.(map[string]interface{}); ok {
+				requestID, _ := respMap["id"].(string)
+				groupID := groupBatchMap[requestID]
+
+				// Check for successful response (status 200)
+				status, _ := respMap["status"].(float64)
+				if status != 200 {
+					// Group may not have permissions, which is normal - continue
+					continue
+				}
+
+				if body, ok := respMap["body"].(map[string]interface{}); ok {
+					if value, ok := body["value"].([]interface{}); ok {
+						// Process app role assignments
+						for _, assignmentInterface := range value {
+							assignment, ok := assignmentInterface.(map[string]interface{})
+							if !ok {
+								continue
+							}
+
+							permission := l.buildApplicationPermissionFromAssignment(assignment, spMap, appRolesMap, "Group")
+							if permission.ID != "" {
+								// Add group details
+								if groupInfo, exists := groupMap[groupID]; exists {
+									permission.GroupID = groupInfo.ID
+									permission.GroupName = groupInfo.DisplayName
+								}
+								permissions = append(permissions, permission)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return permissions
+}
+
+// buildApplicationPermissionFromAssignment builds a permission from an app role assignment
+func (l *IAMComprehensiveCollectorLink) buildApplicationPermissionFromAssignment(assignment map[string]interface{}, spMap map[string]ServicePrincipalInfo, appRolesMap map[string]map[string]string, principalType string) CompleteGraphPermission {
+	appRoleID, _ := assignment["appRoleId"].(string)
+	resourceID, _ := assignment["resourceId"].(string)
+	createdDateTime, _ := assignment["createdDateTime"].(string)
+	assignmentID, _ := assignment["id"].(string)
+
+	resourceSP, resourceExists := spMap[resourceID]
+	if !resourceExists {
+		return CompleteGraphPermission{}
+	}
+
+	// Get permission name
+	permissionName := appRoleID
+	if resourceRoles, exists := appRolesMap[resourceID]; exists {
+		if roleName, roleExists := resourceRoles[appRoleID]; roleExists {
+			permissionName = roleName
+		}
+	}
+
+	permission := CompleteGraphPermission{
+		ID:              assignmentID,
+		Type:            fmt.Sprintf("%sApplication", principalType),
+		ResourceAppID:   resourceSP.AppID,
+		ResourceAppName: resourceSP.DisplayName,
+		PermissionType:  "Application",
+		Permission:      permissionName,
+		ConsentType:     "Admin",
+		CreatedDateTime: createdDateTime,
+		AppRoleID:       appRoleID,
+		Source:          principalType,
+	}
+
+	return permission
+}
+
+// buildDelegatedPermissionsFromGrant builds permissions from an OAuth2 permission grant
+func (l *IAMComprehensiveCollectorLink) buildDelegatedPermissionsFromGrant(grant map[string]interface{}, spMap map[string]ServicePrincipalInfo, userMap map[string]UserInfo, principalType string) []CompleteGraphPermission {
+	var permissions []CompleteGraphPermission
+
+	clientID, _ := grant["clientId"].(string)
+	resourceID, _ := grant["resourceId"].(string)
+	scope, _ := grant["scope"].(string)
+	consentType, _ := grant["consentType"].(string)
+	principalID, _ := grant["principalId"].(string)
+	startTime, _ := grant["startTime"].(string)
+	expiryTime, _ := grant["expiryTime"].(string)
+	grantID, _ := grant["id"].(string)
+
+	clientSP, clientExists := spMap[clientID]
+	resourceSP, resourceExists := spMap[resourceID]
+	if !clientExists || !resourceExists {
+		return permissions
+	}
+
+	// Parse individual permissions from scope string
+	scopes := strings.Fields(scope)
+	for _, individualScope := range scopes {
+		if strings.TrimSpace(individualScope) == "" {
+			continue
+		}
+
+		permission := CompleteGraphPermission{
+			ID:                   grantID,
+			Type:                 fmt.Sprintf("%sDelegated", principalType),
+			ServicePrincipalID:   clientID,
+			ServicePrincipalName: clientSP.DisplayName,
+			ResourceAppID:        resourceSP.AppID,
+			ResourceAppName:      resourceSP.DisplayName,
+			PermissionType:       "Delegated",
+			Permission:           strings.TrimSpace(individualScope),
+			ConsentType:          consentType,
+			GrantedFor:           principalID,
+			CreatedDateTime:      startTime,
+			ExpiryDateTime:       expiryTime,
+			Scope:                scope,
+			Source:               principalType,
+		}
+
+		// Add user info if available
+		if principalID != "" && principalType == "User" {
+			if user, exists := userMap[principalID]; exists {
+				permission.UserID = user.ID
+				permission.UserName = user.DisplayName
+			}
+		}
+
+		permissions = append(permissions, permission)
+	}
+
+	return permissions
+}
+
+// analyzeComprehensiveGraphPermissions analyzes collected permissions for security risks
+func (l *IAMComprehensiveCollectorLink) analyzeComprehensiveGraphPermissions(permissions []CompleteGraphPermission) {
+	dangerousPermissions := map[string]string{
+		"Directory.ReadWrite.All":                      "Full directory read/write access",
+		"Directory.Read.All":                           "Full directory read access",
+		"Directory.AccessAsUser.All":                   "Access directory as signed-in user",
+		"User.ReadWrite.All":                           "Read/write all user profiles",
+		"User.Read.All":                                "Read all user profiles",
+		"User.Export.All":                              "Export user data",
+		"Application.ReadWrite.All":                    "Manage all applications",
+		"Application.Read.All":                         "Read all applications",
+		"RoleManagement.ReadWrite.Directory":           "Manage directory roles",
+		"RoleManagement.Read.Directory":                "Read directory roles",
+		"DeviceManagementConfiguration.ReadWrite.All":  "Manage device configuration",
+		"DeviceManagementManagedDevices.ReadWrite.All": "Manage all devices",
+		"Policy.ReadWrite.All":                         "Manage all policies",
+		"Policy.Read.All":                              "Read all policies",
+		"Policy.ReadWrite.ConditionalAccess":           "Manage conditional access policies",
+		"PrivilegedAccess.ReadWrite.AzureAD":           "Manage privileged access",
+		"Sites.FullControl.All":                        "Full control of all sites",
+		"Files.ReadWrite.All":                          "Read/write all files",
+		"Mail.ReadWrite":                               "Read/write mail",
+		"Calendars.ReadWrite":                          "Read/write calendars",
+		"MailboxSettings.ReadWrite":                    "Manage mailbox settings",
+		"Group.ReadWrite.All":                          "Manage all groups",
+		"GroupMember.ReadWrite.All":                    "Manage group membership",
+	}
+
+	dangerousFindings := make(map[string][]string)
+	typeStats := make(map[string]int)
+	consentStats := make(map[string]int)
+
+	for _, permission := range permissions {
+		typeStats[permission.Type]++
+		consentStats[permission.ConsentType]++
+
+		if description, isDangerous := dangerousPermissions[permission.Permission]; isDangerous {
+			key := fmt.Sprintf("%s (%s)", permission.Permission, description)
+			principalName := ""
+			if permission.ServicePrincipalName != "" {
+				principalName = permission.ServicePrincipalName
+			} else if permission.UserName != "" {
+				principalName = permission.UserName
+			} else if permission.GroupName != "" {
+				principalName = permission.GroupName
+			}
+			dangerousFindings[key] = append(dangerousFindings[key], fmt.Sprintf("%s (%s)", principalName, permission.Type))
+		}
+	}
+
+	// Log statistics
+	l.Logger.Info("Graph Permission Statistics:")
+	l.Logger.Info("By Type:")
+	for permType, count := range typeStats {
+		l.Logger.Info(fmt.Sprintf("  %s: %d", permType, count))
+	}
+	l.Logger.Info("By Consent:")
+	for consent, count := range consentStats {
+		l.Logger.Info(fmt.Sprintf("  %s: %d", consent, count))
+	}
+
+	if len(dangerousFindings) > 0 {
+		l.Logger.Warn(fmt.Sprintf("Found %d types of dangerous Graph API permissions", len(dangerousFindings)))
+		message.Info("🚨 Dangerous Graph API permissions detected:")
+
+		for permission, principals := range dangerousFindings {
+			l.Logger.Warn(fmt.Sprintf("  %s: %d principals", permission, len(principals)))
+			l.Logger.Warn(fmt.Sprintf("  %s: %s", permission, strings.Join(principals, ", ")))
+		}
+	}
+}
+
+func (l *IAMComprehensiveCollectorLink) collectApplicationOwnership(accessToken string) ([]interface{}, error) {
+	var applicationOwnerships []interface{}
+
+	applications, err := l.collectPaginatedGraphData(accessToken, "/applications?$expand=owners")
+	if err != nil {
+		return nil, err
+	}
+
+	l.Logger.Info(fmt.Sprintf("Processing application ownership for %d applications", len(applications)))
+
+	for _, app := range applications {
+		appMap, ok := app.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		appID, _ := appMap["id"].(string)
+		appName, _ := appMap["displayName"].(string)
+
+		if owners, ok := appMap["owners"].([]interface{}); ok {
+			for _, owner := range owners {
+				ownerMap, ok := owner.(map[string]interface{})
+				if !ok {
+					continue
+				}
+
+				ownerID, _ := ownerMap["id"].(string)
+				ownerType, _ := ownerMap["@odata.type"].(string)
+				ownerName, _ := ownerMap["displayName"].(string)
+
+				ownership := map[string]interface{}{
+					"applicationId":      appID,
+					"applicationName":    appName,
+					"ownerId":           ownerID,
+					"ownerName":         ownerName,
+					"ownerType":         ownerType,
+					"role":              "Owner",
+					"permissionType":    "ApplicationOwnership",
+				}
+				applicationOwnerships = append(applicationOwnerships, ownership)
+			}
+		}
+	}
+
+	l.Logger.Info(fmt.Sprintf("Collected %d application ownership records", len(applicationOwnerships)))
+	return applicationOwnerships, nil
+}
+
+func (l *IAMComprehensiveCollectorLink) collectApplicationCredentialPermissions(accessToken string) ([]interface{}, error) {
+	var credentialPermissions []interface{}
+
+	directoryRoles, err := l.collectPaginatedGraphData(accessToken, "/directoryRoles?$expand=members")
+	if err != nil {
+		return nil, err
+	}
+
+	// Roles that can manage application credentials
+	credentialRoles := []string{
+		"Application Administrator",
+		"Cloud Application Administrator",
+		"Global Administrator",
+	}
+
+	l.Logger.Info(fmt.Sprintf("Processing credential management permissions across %d directory roles", len(directoryRoles)))
+
+	for _, role := range directoryRoles {
+		roleMap, ok := role.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		roleName, _ := roleMap["displayName"].(string)
+
+		// Check if this role can manage application credentials
+		canManageCredentials := false
+		for _, credRole := range credentialRoles {
+			if roleName == credRole {
+				canManageCredentials = true
+				break
+			}
+		}
+
+		if !canManageCredentials {
+			continue
+		}
+
+		if members, ok := roleMap["members"].([]interface{}); ok {
+			for _, member := range members {
+				memberMap, ok := member.(map[string]interface{})
+				if !ok {
+					continue
+				}
+
+				memberID, _ := memberMap["id"].(string)
+				memberType, _ := memberMap["@odata.type"].(string)
+				memberName, _ := memberMap["displayName"].(string)
+
+				permission := map[string]interface{}{
+					"principalId":       memberID,
+					"principalName":     memberName,
+					"principalType":     memberType,
+					"role":              roleName,
+					"permissionType":    "ApplicationCredentialManagement",
+					"capability":        "CanManageApplicationCredentials",
+				}
+				credentialPermissions = append(credentialPermissions, permission)
+			}
+		}
+	}
+
+	l.Logger.Info(fmt.Sprintf("Collected %d application credential management permissions", len(credentialPermissions)))
+	return credentialPermissions, nil
+}
+
+func (l *IAMComprehensiveCollectorLink) collectApplicationRBACPermissions(accessToken string) ([]interface{}, error) {
+	var rbacPermissions []interface{}
+
+	applications, err := l.collectPaginatedGraphData(accessToken, "/applications")
+	if err != nil {
+		return nil, err
+	}
+
+	l.Logger.Info(fmt.Sprintf("Processing RBAC permissions for %d applications", len(applications)))
+
+	for _, app := range applications {
+		appMap, ok := app.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		appID, _ := appMap["id"].(string)
+		appName, _ := appMap["displayName"].(string)
+
+		// Note: Since applications are not ARM resources, we check for directory role memberships
+		// that give implicit RBAC-like permissions over application objects
+		directoryRoles := []string{
+			"Application Administrator",
+			"Cloud Application Administrator",
+			"Application Developer",
+		}
+
+		for _, roleName := range directoryRoles {
+			permission := map[string]interface{}{
+				"applicationId":     appID,
+				"applicationName":   appName,
+				"role":              roleName,
+				"permissionType":    "ApplicationRBAC",
+				"scope":             "Application",
+				"implicitAccess":    true,
+			}
+			rbacPermissions = append(rbacPermissions, permission)
+		}
+	}
+
+	l.Logger.Info(fmt.Sprintf("Collected %d application RBAC permission mappings", len(rbacPermissions)))
+	return rbacPermissions, nil
 }

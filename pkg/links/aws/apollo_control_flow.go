@@ -196,13 +196,9 @@ func (a *AwsApolloControlFlow) gatherResources(resourceType string) ([]types.Enr
 	// Collect resources from the resource chain
 	resources := []types.EnrichedResourceDescription{}
 	for {
-		slog.Info("gathering resource")
 		resource, ok := chain.RecvAs[*types.EnrichedResourceDescription](resourceChain)
 		if !ok {
 			break
-		}
-		if resource.Identifier == "PrivilegeEscalator" {
-			fmt.Println("foo")
 		}
 		resources = append(resources, *resource)
 	}

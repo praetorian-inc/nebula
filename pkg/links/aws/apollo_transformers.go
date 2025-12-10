@@ -60,10 +60,6 @@ func TransformERDToAWSResource(erd *types.EnrichedResourceDescription) (*model.A
 		return nil, fmt.Errorf("enriched resource description cannot be nil")
 	}
 
-	if erd.Arn.String() == "arn:aws:iam::992382775570:role/PrivilegeEscalator" {
-		fmt.Println("foo")
-	}
-
 	// Convert TypeName to CloudResourceType
 	cloudResourceType := model.CloudResourceType(erd.TypeName)
 
@@ -280,10 +276,6 @@ func TransformUserDLToAWSResource(user *types.UserDL) (*model.AWSResource, error
 func TransformRoleDLToAWSResource(role *types.RoleDL) (*model.AWSResource, error) {
 	if role == nil {
 		return nil, fmt.Errorf("role cannot be nil")
-	}
-
-	if role.RoleName == "PrivilegeEscalator" {
-		fmt.Println("foo")
 	}
 
 	// Extract account ID from ARN

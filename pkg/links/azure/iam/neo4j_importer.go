@@ -105,6 +105,12 @@ func (l *Neo4jImporterLink) Process(input interface{}) error {
 		l.Logger.Warn("No HAS_PERMISSION edges were created")
 	}
 
+	// Step 10.1: Create transitive HAS_PERMISSION edges for group members
+	message.Info("🔐 Phase 2b.1: Creating transitive HAS_PERMISSION edges for group members")
+	if !l.createGroupMemberPermissionEdges() {
+		l.Logger.Warn("No group member HAS_PERMISSION edges were created")
+	}
+
 	// Step 10.5: Create HAS_GRAPH_PERMISSION edges (Graph API permissions)
 	message.Info("🔐 Phase 2c: Creating HAS_GRAPH_PERMISSION edges (Graph API permissions)")
 	if err := l.createGraphPermissionEdges(); err != nil {
@@ -1861,6 +1867,175 @@ func (l *Neo4jImporterLink) createRBACPermissionEdges() bool {
 	l.edgeCounts["HAS_PERMISSION"] = currentCount + totalEdgesCreated
 
 	message.Info("Created %d total RBAC HAS_PERMISSION edges", totalEdgesCreated)
+	return totalEdgesCreated > 0
+}
+
+// createGroupMemberPermissionEdges materializes transitive permissions from groups to their members
+func (l *Neo4jImporterLink) createGroupMemberPermissionEdges() bool {
+	message.Info("Creating transitive HAS_PERMISSION edges for group members...")
+
+	// Query for all group HAS_PERMISSION edges and their members in a single query
+	cypher := `
+	MATCH (group:Resource)-[groupPerm:HAS_PERMISSION]->(target:Resource)
+	MATCH (group)-[:CONTAINS]->(member:Resource)
+	WHERE groupPerm.permission IS NOT NULL
+	RETURN
+		group.id as groupId,
+		group.displayName as groupName,
+		member.id as memberId,
+		target.id as targetId,
+		groupPerm.permission as permission,
+		groupPerm.roleDefinitionId as roleDefinitionId,
+		groupPerm.roleName as roleName,
+		groupPerm.roleId as roleId,
+		groupPerm.principalType as originalPrincipalType,
+		groupPerm.source as originalSource,
+		groupPerm.grantedAt as grantedAt,
+		groupPerm.targetResourceType as targetResourceType
+	`
+
+	ctx := context.Background()
+	session := l.driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+
+	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, cypher, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		var permissions []map[string]interface{}
+		for result.Next(ctx) {
+			record := result.Record()
+
+			// Create permission record for the member
+			permission := map[string]interface{}{
+				"memberId":              record.Values[2], // member.id
+				"targetId":              record.Values[3], // target.id
+				"permission":            record.Values[4], // permission
+				"source":                "group_membership",
+				"groupId":               record.Values[0], // group.id
+				"groupName":             record.Values[1], // group.displayName
+				"principalType":         "User", // Members are typically users or service principals
+			}
+
+			// Add optional fields if they exist
+			if roleDefId := record.Values[5]; roleDefId != nil {
+				permission["roleDefinitionId"] = roleDefId
+			}
+			if roleName := record.Values[6]; roleName != nil {
+				permission["roleName"] = roleName
+			}
+			if roleId := record.Values[7]; roleId != nil {
+				permission["roleId"] = roleId
+			}
+			if grantedAt := record.Values[9]; grantedAt != nil {
+				permission["grantedAt"] = grantedAt
+			}
+			if targetResourceType := record.Values[11]; targetResourceType != nil {
+				permission["targetResourceType"] = targetResourceType
+			}
+
+			permissions = append(permissions, permission)
+		}
+
+		return permissions, result.Err()
+	})
+
+	if err != nil {
+		l.Logger.Error("Error querying for group permissions and memberships", "error", err)
+		return false
+	}
+
+	permissions, ok := result.([]map[string]interface{})
+	if !ok || len(permissions) == 0 {
+		message.Info("No group member permissions to materialize")
+		return false
+	}
+
+	message.Info("Found %d group member permissions to materialize", len(permissions))
+
+	// Process in batches
+	batchSize := 10000
+	totalEdgesCreated := 0
+
+	for i := 0; i < len(permissions); i += batchSize {
+		end := i + batchSize
+		if end > len(permissions) {
+			end = len(permissions)
+		}
+
+		batch := permissions[i:end]
+
+		createCypher := `
+		UNWIND $permissions AS perm
+		WITH perm
+		WHERE perm.memberId IS NOT NULL AND perm.permission IS NOT NULL AND perm.targetId IS NOT NULL
+		MATCH (member:Resource {id: perm.memberId})
+		MATCH (target:Resource {id: perm.targetId})
+		MERGE (member)-[r:HAS_PERMISSION]->(target)
+		SET r.permission = perm.permission,
+			r.source = perm.source,
+			r.groupId = perm.groupId,
+			r.groupName = perm.groupName,
+			r.principalType = perm.principalType,
+			r.createdAt = datetime()
+		`
+
+		// Add optional properties if they exist
+		if len(batch) > 0 {
+			// Check if we have roleDefinitionId in the first item to determine which properties to set
+			if batch[0]["roleDefinitionId"] != nil {
+				createCypher += `, r.roleDefinitionId = perm.roleDefinitionId`
+			}
+			if batch[0]["roleName"] != nil {
+				createCypher += `, r.roleName = perm.roleName`
+			}
+			if batch[0]["roleId"] != nil {
+				createCypher += `, r.roleId = perm.roleId`
+			}
+			if batch[0]["grantedAt"] != nil {
+				createCypher += `, r.grantedAt = perm.grantedAt`
+			}
+			if batch[0]["targetResourceType"] != nil {
+				createCypher += `, r.targetResourceType = perm.targetResourceType`
+			}
+		}
+
+		session := l.driver.NewSession(ctx, neo4j.SessionConfig{})
+
+		result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+			result, err := tx.Run(ctx, createCypher, map[string]interface{}{"permissions": batch})
+			if err != nil {
+				return nil, err
+			}
+
+			summary, err := result.Consume(ctx)
+			if err != nil {
+				return nil, err
+			}
+
+			return summary.Counters().RelationshipsCreated(), nil
+		})
+
+		session.Close(ctx)
+
+		if err != nil {
+			l.Logger.Error("Error creating group member HAS_PERMISSION edges for batch", "error", err, "batch", i/batchSize+1)
+			continue
+		}
+
+		if edgesCreated, ok := l.convertToInt64(result); ok {
+			totalEdgesCreated += int(edgesCreated)
+			message.Info("Batch %d/%d: Created %d group member HAS_PERMISSION edges", i/batchSize+1, (len(permissions)+batchSize-1)/batchSize, edgesCreated)
+		}
+	}
+
+	// Add group member edges to the existing HAS_PERMISSION count
+	currentCount := l.edgeCounts["HAS_PERMISSION"]
+	l.edgeCounts["HAS_PERMISSION"] = currentCount + totalEdgesCreated
+
+	message.Info("Created %d total group member HAS_PERMISSION edges", totalEdgesCreated)
 	return totalEdgesCreated > 0
 }
 

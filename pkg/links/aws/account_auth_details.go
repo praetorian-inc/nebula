@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/url"
 	"strings"
 
@@ -22,15 +21,15 @@ type JanusAWSAuthorizationDetails struct {
 }
 
 func NewJanusAWSAuthorizationDetails(configs ...cfg.Config) chain.Link {
-	slog.Debug("Creating JanusAWSAuthorizationDetails link")
 	ad := &JanusAWSAuthorizationDetails{}
-	slog.Debug("config:", "config", configs)
 	ad.AwsReconBaseLink = base.NewAwsReconBaseLink(ad, configs...)
+	ad.Logger.Debug("Creating JanusAWSAuthorizationDetails link")
+	ad.Logger.Debug("config:", "config", configs)
 	return ad
 }
 
 func (ad *JanusAWSAuthorizationDetails) Initialize() error {
-	slog.Debug("Initializing JanusAWSAuthorizationDetails")
+	ad.Logger.Debug("Initializing JanusAWSAuthorizationDetails")
 	if err := ad.AwsReconBaseLink.Initialize(); err != nil {
 		return err
 	}
@@ -38,7 +37,7 @@ func (ad *JanusAWSAuthorizationDetails) Initialize() error {
 }
 
 func (ad *JanusAWSAuthorizationDetails) Process(resource string) error {
-	slog.Debug("Beging processing JanusAWSAuthorizationDetails", "profile", ad.Profile)
+	ad.Logger.Debug("Beging processing JanusAWSAuthorizationDetails", "profile", ad.Profile)
 	return ad.GetAccountAuthorizationDetails()
 }
 
@@ -89,24 +88,23 @@ func GetOutputterFromContext(ctx context.Context) (chain.Outputter, bool) {
 	return outputter, ok
 }
 
-func (a *JanusAWSAuthorizationDetails) GetAccountAuthorizationDetails() error {
-	slog.Debug("Getting Account Authorization Details", "profile", a.Profile)
-	print("Getting Account Authorization Details", "profile", a.Profile)
+func (ad *JanusAWSAuthorizationDetails) GetAccountAuthorizationDetails() error {
+	ad.Logger.Debug("Getting Account Authorization Details", "profile", ad.Profile)
 
 	// We'll use us-east-1 for IAM since it's a global service
 	region := "us-east-1"
 
-	slog.Debug("Getting Account Authorization Details: Set region to ", "region", region)
+	ad.Logger.Debug("Getting Account Authorization Details: Set region to ", "region", region)
 
-	config, err := a.GetConfigWithRuntimeArgs(region)
+	config, err := ad.GetConfigWithRuntimeArgs(region)
 	if err != nil {
-		slog.Error("Failed to create AWS config", "error", err)
+		ad.Logger.Error("Failed to create AWS config", "error", err)
 		return err
 	}
 
 	accountId, err := helpers.GetAccountId(config)
 	if err != nil {
-		slog.Error("Failed to get account ID", "error", err, "region", region)
+		ad.Logger.Error("Failed to get account ID", "error", err, "region", region)
 		return err
 	}
 
@@ -127,7 +125,7 @@ func (a *JanusAWSAuthorizationDetails) GetAccountAuthorizationDetails() error {
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(context.TODO())
 		if err != nil {
-			slog.Error("Error retrieving authorization details page", "error", err)
+			ad.Logger.Error("Error retrieving authorization details page", "error", err)
 			return err
 		}
 
@@ -144,33 +142,33 @@ func (a *JanusAWSAuthorizationDetails) GetAccountAuthorizationDetails() error {
 	// Marshal and decode the output
 	rawData, err := json.Marshal(completeOutput)
 	if err != nil {
-		slog.Error("Error marshaling authorization details", "profile", a.Profile, "error", err)
+		ad.Logger.Error("Error marshaling authorization details", "profile", ad.Profile, "error", err)
 		return err
 	}
 
 	decodedData, err := replaceURLEncodedPolicies(rawData)
 	if err != nil {
-		slog.Error("Error replacing URL-encoded policies", "profile", a.Profile, "error", err)
+		ad.Logger.Error("Error replacing URL-encoded policies", "profile", ad.Profile, "error", err)
 		return err
 	}
 
 	// Unmarshal the decoded data back into a Go structure that can be sent to the outputter
 	var authDetails interface{}
 	if err := json.Unmarshal(decodedData, &authDetails); err != nil {
-		slog.Error("Error unmarshaling decoded data", "error", err)
+		ad.Logger.Error("Error unmarshaling decoded data", "error", err)
 		return err
 	}
 
-	filename := fmt.Sprintf("authorization-details-%s-%s-gaad.json", a.Profile, accountId)
+	filename := fmt.Sprintf("authorization-details-%s-%s-gaad.json", ad.Profile, accountId)
 
 	outputData := outputters.NamedOutputData{
 		OutputFilename: filename,
 		Data:           authDetails,
 	}
 
-	a.Send(outputData)
+	ad.Send(outputData)
 
-	slog.Info("Generated authorization details", "filename", filename)
+	ad.Logger.Info("Generated authorization details", "filename", filename)
 
 	return nil
 }

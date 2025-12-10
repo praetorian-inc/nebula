@@ -64,46 +64,55 @@ func (a *AwsApolloControlFlow) Initialize() error {
 }
 
 func (a *AwsApolloControlFlow) loadOrgPolicies() error {
-	orgPol, ok := a.Args()[options.AwsOrgPolicies().Name()]
-	if !ok || orgPol == nil {
+	orgPoliciesFilename, err := cfg.As[string](a.Arg("org-policies"))
+	if err != nil {
 		slog.Warn("No organization policies file provided, assuming p-FullAWSAccess.")
 		a.OrgPolicies = orgpolicies.NewDefaultOrgPolicies()
 		return nil
 	}
 
-	orgPolFile := orgPol.(string)
-	if orgPolFile == "" {
+	if orgPoliciesFilename == "" {
 		slog.Warn("Empty organization policies file path provided, assuming p-FullAWSAccess.")
 		a.OrgPolicies = orgpolicies.NewDefaultOrgPolicies()
 		return nil
 	}
 
-	fileBytes, err := os.ReadFile(orgPolFile)
+	fileBytes, err := os.ReadFile(orgPoliciesFilename)
 	if err != nil {
 		return fmt.Errorf("failed to read org policies file: %w", err)
 	}
 
+	orgPolicies, err := a.unmarshalOrgPolicies(fileBytes)
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal org policies file: %w", err)
+	}
+
+	a.OrgPolicies = orgPolicies
+	return nil
+}
+
+func (a *AwsApolloControlFlow) unmarshalOrgPolicies(orgPolicyBytes []byte) (*orgpolicies.OrgPolicies, error) {
 	// Try to unmarshal as slice first (current format)
-	if orgPolicies, err := a.unmarshalAsSlice(fileBytes); err == nil {
-		a.OrgPolicies = orgPolicies
+	if orgPolicies, err := a.unmarshalAsSlice(orgPolicyBytes); err == nil {
+		return orgPolicies, nil
 	}
 
 	// Fallback to single object format
-	if orgPolicies, err := a.unmarshalAsSingle(fileBytes); err == nil {
-		a.OrgPolicies = orgPolicies
+	if orgPolicies, err := a.unmarshalAsSingle(orgPolicyBytes); err == nil {
+		return orgPolicies, nil
 	}
 
-	return fmt.Errorf("failed to unmarshal org policies")
+	return nil, fmt.Errorf("failed to unmarshal org policies")
 }
 
 func (a *AwsApolloControlFlow) unmarshalAsSlice(orgPolicyBytes []byte) (*orgpolicies.OrgPolicies, error) {
-	var orgPoliciesArray []*orgpolicies.OrgPolicies
+	var orgPoliciesArray []orgpolicies.OrgPolicies
 	if err := json.Unmarshal(orgPolicyBytes, &orgPoliciesArray); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal org policies: %w", err)
 	}
 
 	if len(orgPoliciesArray) > 0 {
-		return orgPoliciesArray[0], nil
+		return &orgPoliciesArray[0], nil
 	}
 
 	slog.Warn("Empty organization policies array, assuming p-FullAWSAccess.")
@@ -218,7 +227,6 @@ func (a *AwsApolloControlFlow) gatherResourcePolicies(resources []types.Enriched
 	// Collect policies
 	resourcePolicies := map[string]*types.Policy{}
 	for {
-		slog.Info("gathering resource policy")
 		policy, ok := chain.RecvAs[*types.Policy](policyChain)
 		if !ok {
 			break
@@ -237,14 +245,12 @@ func (a *AwsApolloControlFlow) gatherGaadDetails() (*types.Gaad, error) {
 	gaadChain.Send("") // GAAD doesn't need a resource type
 	gaadChain.Close()
 
-	slog.Info("gathering gaad details")
 	gaadOutput, ok := chain.RecvAs[outputters.NamedOutputData](gaadChain)
 	if !ok {
 		return nil, fmt.Errorf("did not receive GAAD output")
 	}
 
 	// Convert GAAD output to PolicyData.Gaad
-	// First marshal the map to JSON bytes
 	jsonBytes, err := json.Marshal(gaadOutput.Data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal GAAD data: %w", err)
@@ -273,7 +279,8 @@ func (a *AwsApolloControlFlow) processAnalyzedSummary(summary *iam.PermissionsSu
 		}
 
 		a.Logger.Debug(fmt.Sprintf("DEBUG: Successfully transformed result %d, sending to outputter", i))
-		a.Send(rel)
+		source, target := rel.Nodes()
+		a.Send(source, target, rel)
 	}
 }
 

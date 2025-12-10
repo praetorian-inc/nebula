@@ -105,20 +105,20 @@ func (l *Neo4jImporterLink) Process(input interface{}) error {
 		l.Logger.Warn("No HAS_PERMISSION edges were created")
 	}
 
-	// Step 10.1: Create transitive HAS_PERMISSION edges for group members
-	message.Info("🔐 Phase 2b.1: Creating transitive HAS_PERMISSION edges for group members")
+	// Step 11: Create transitive HAS_PERMISSION edges for group members
+	message.Info("🔐 Phase 2c: Creating transitive HAS_PERMISSION edges for group members")
 	if !l.createGroupMemberPermissionEdges() {
 		l.Logger.Warn("No group member HAS_PERMISSION edges were created")
 	}
 
-	// Step 10.5: Create HAS_GRAPH_PERMISSION edges (Graph API permissions)
-	message.Info("🔐 Phase 2c: Creating HAS_GRAPH_PERMISSION edges (Graph API permissions)")
+	// Step 12: Create HAS_GRAPH_PERMISSION edges (Graph API permissions)
+	message.Info("🔐 Phase 2d: Creating HAS_GRAPH_PERMISSION edges (Graph API permissions)")
 	if err := l.createGraphPermissionEdges(); err != nil {
 		l.Logger.Error("Failed to create Graph permission edges", "error", err)
 	}
 
-	// Step 10.6: Create application ownership edges
-	message.Info("🔐 Phase 2d: Creating application ownership edges")
+	// Step 13: Create application ownership edges
+	message.Info("🔐 Phase 2e: Creating application ownership edges")
 	if err := l.createApplicationOwnershipEdges(); err != nil {
 		l.Logger.Error("Failed to create application ownership edges", "error", err)
 	}

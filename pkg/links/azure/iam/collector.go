@@ -851,8 +851,8 @@ func (l *IAMComprehensiveCollectorLink) collectAllGraphData(accessToken string) 
 		{"groups", "/groups?$select=id,displayName,description,groupTypes,membershipRule,mailEnabled,securityEnabled,createdDateTime"},
 		// Service Principals - include all fields needed by Neo4j importer
 		{"servicePrincipals", "/servicePrincipals?$select=id,appId,displayName,servicePrincipalType,accountEnabled,createdDateTime,replyUrls,signInAudience"},
-		// Applications - include all fields needed by Neo4j importer
-		{"applications", "/applications?$select=id,appId,displayName,createdDateTime,signInAudience,replyUrls"},
+		// Applications - include all fields needed by Neo4j importer including credentials
+		{"applications", "/applications?$select=id,appId,displayName,createdDateTime,signInAudience,replyUrls,keyCredentials,passwordCredentials"},
 		// Devices - include all fields needed by Neo4j importer
 		{"devices", "/devices?$select=id,displayName,deviceId,operatingSystem,operatingSystemVersion,isCompliant,isManaged,accountEnabled,createdDateTime"},
 		// Directory roles and conditional access policies (these already work)
@@ -948,6 +948,10 @@ func (l *IAMComprehensiveCollectorLink) collectAllGraphData(accessToken string) 
 	} else {
 		azureADData["applicationRBACPermissions"] = appRBAC
 	}
+
+	// Process application credentials and embed metadata
+	l.Logger.Info("Processing application credential metadata")
+	l.enrichApplicationsWithCredentialMetadata(azureADData)
 
 	return azureADData, nil
 }
@@ -3677,4 +3681,113 @@ func (l *IAMComprehensiveCollectorLink) collectApplicationRBACPermissions(access
 
 	l.Logger.Info(fmt.Sprintf("Collected %d application RBAC permission mappings", len(rbacPermissions)))
 	return rbacPermissions, nil
+}
+
+// enrichApplicationsWithCredentialMetadata processes application data and embeds credential metadata
+func (l *IAMComprehensiveCollectorLink) enrichApplicationsWithCredentialMetadata(azureADData map[string]interface{}) {
+	applicationsData, ok := azureADData["applications"]
+	if !ok {
+		l.Logger.Warn("No applications data found for credential enrichment")
+		return
+	}
+
+	applications, ok := applicationsData.([]interface{})
+	if !ok {
+		l.Logger.Warn("Applications data is not in expected format")
+		return
+	}
+
+	enrichedCount := 0
+	for _, appInterface := range applications {
+		app, ok := appInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Analyze key credentials (certificates)
+		keyCredentials := l.analyzeKeyCredentials(app)
+		if len(keyCredentials) > 0 {
+			app["credentialSummary_keyCredentials"] = keyCredentials
+			enrichedCount++
+		}
+
+		// Analyze password credentials (client secrets)
+		passwordCredentials := l.analyzePasswordCredentials(app)
+		if len(passwordCredentials) > 0 {
+			app["credentialSummary_passwordCredentials"] = passwordCredentials
+			enrichedCount++
+		}
+
+		// Add overall credential summary
+		app["credentialSummary_totalCredentials"] = len(keyCredentials) + len(passwordCredentials)
+		app["credentialSummary_hasCredentials"] = (len(keyCredentials) + len(passwordCredentials)) > 0
+	}
+
+	l.Logger.Info(fmt.Sprintf("Enriched %d applications with credential metadata", enrichedCount))
+}
+
+// analyzeKeyCredentials processes keyCredentials array and returns summary
+func (l *IAMComprehensiveCollectorLink) analyzeKeyCredentials(app map[string]interface{}) []map[string]interface{} {
+	keyCredsInterface, ok := app["keyCredentials"]
+	if !ok {
+		return []map[string]interface{}{}
+	}
+
+	keyCreds, ok := keyCredsInterface.([]interface{})
+	if !ok {
+		return []map[string]interface{}{}
+	}
+
+	var credSummary []map[string]interface{}
+	for _, credInterface := range keyCreds {
+		cred, ok := credInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		summary := map[string]interface{}{
+			"type":        "certificate",
+			"keyId":       cred["keyId"],
+			"displayName": cred["displayName"],
+			"usage":       cred["usage"],
+			"startDateTime": cred["startDateTime"],
+			"endDateTime":   cred["endDateTime"],
+		}
+		credSummary = append(credSummary, summary)
+	}
+
+	return credSummary
+}
+
+// analyzePasswordCredentials processes passwordCredentials array and returns summary
+func (l *IAMComprehensiveCollectorLink) analyzePasswordCredentials(app map[string]interface{}) []map[string]interface{} {
+	passwordCredsInterface, ok := app["passwordCredentials"]
+	if !ok {
+		return []map[string]interface{}{}
+	}
+
+	passwordCreds, ok := passwordCredsInterface.([]interface{})
+	if !ok {
+		return []map[string]interface{}{}
+	}
+
+	var credSummary []map[string]interface{}
+	for _, credInterface := range passwordCreds {
+		cred, ok := credInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		summary := map[string]interface{}{
+			"type":        "clientSecret",
+			"keyId":       cred["keyId"],
+			"displayName": cred["displayName"],
+			"hint":        cred["hint"],
+			"startDateTime": cred["startDateTime"],
+			"endDateTime":   cred["endDateTime"],
+		}
+		credSummary = append(credSummary, summary)
+	}
+
+	return credSummary
 }

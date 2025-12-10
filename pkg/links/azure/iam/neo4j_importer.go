@@ -525,6 +525,16 @@ func (l *Neo4jImporterLink) createIdentityResources() int {
 					"displayName": l.getStringValue(appMap, "displayName"),
 					"appId": l.getStringValue(appMap, "appId"),
 					"signInAudience": l.getStringValue(appMap, "signInAudience"),
+					"credentialSummary_hasCredentials": l.getBoolValue(appMap, "credentialSummary_hasCredentials"),
+					"credentialSummary_totalCredentials": l.getIntValue(appMap, "credentialSummary_totalCredentials"),
+				}
+
+				// Add credential metadata if present
+				if credentialSummary, ok := appMap["credentialSummary_passwordCredentials"]; ok {
+					resourceNode["credentialSummary_passwordCredentials"] = credentialSummary
+				}
+				if keyCredentials, ok := appMap["credentialSummary_keyCredentials"]; ok {
+					resourceNode["credentialSummary_keyCredentials"] = keyCredentials
 				}
 
 				// Add metadata with application attributes
@@ -2546,6 +2556,27 @@ func (l *Neo4jImporterLink) getStringValue(data map[string]interface{}, key stri
 		}
 	}
 	return ""
+}
+
+func (l *Neo4jImporterLink) getBoolValue(data map[string]interface{}, key string) bool {
+	if value, ok := data[key]; ok {
+		if boolValue, ok := value.(bool); ok {
+			return boolValue
+		}
+	}
+	return false
+}
+
+func (l *Neo4jImporterLink) getIntValue(data map[string]interface{}, key string) int {
+	if value, ok := data[key]; ok {
+		if intValue, ok := value.(int); ok {
+			return intValue
+		}
+		if floatValue, ok := value.(float64); ok {
+			return int(floatValue)
+		}
+	}
+	return 0
 }
 
 func (l *Neo4jImporterLink) getMapKeys(data map[string]interface{}) []string {

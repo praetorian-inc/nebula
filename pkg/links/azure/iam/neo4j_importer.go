@@ -3459,7 +3459,7 @@ func (l *Neo4jImporterLink) getValidatedGlobalAdminQuery() string {
 	WITH user
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user
-	MERGE (user)-[r:CAN_ESCALATE]->(escalate_target)
+	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "GlobalAdministrator",
 	    r.condition = "Global Administrator role provides complete tenant control and can elevate to Owner on any Azure subscription",
 	    r.category = "DirectoryRole"
@@ -3475,7 +3475,7 @@ func (l *Neo4jImporterLink) getValidatedPrivilegedRoleAdminQuery() string {
 	WITH user
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user
-	MERGE (user)-[r:CAN_ESCALATE]->(escalate_target)
+	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "PrivilegedRoleAdmin",
 	    r.condition = "Privileged Role Administrator can assign Global Administrator or any other directory role to any principal",
 	    r.category = "DirectoryRole"
@@ -3491,7 +3491,7 @@ func (l *Neo4jImporterLink) getValidatedPrivilegedAuthAdminQuery() string {
 	WITH user
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user AND escalate_target.resourceType = "Microsoft.DirectoryServices/users"
-	MERGE (user)-[r:CAN_ESCALATE]->(escalate_target)
+	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "PrivilegedAuthenticationAdmin",
 	    r.condition = "Can reset passwords and authentication methods for ANY user including Global Administrators",
 	    r.category = "DirectoryRole"
@@ -3507,7 +3507,7 @@ func (l *Neo4jImporterLink) getValidatedApplicationAdminQuery() string {
 	WITH user
 	MATCH (app:Resource)
 	WHERE app.resourceType IN ["Microsoft.DirectoryServices/applications", "Microsoft.DirectoryServices/servicePrincipals"]
-	MERGE (user)-[r:CAN_ESCALATE]->(app)
+	CREATE (user)-[r:CAN_ESCALATE]->(app)
 	SET r.method = "ApplicationAdmin",
 	    r.condition = "Application Administrator can add credentials to applications/service principals to assume their identity and inherit permissions",
 	    r.category = "DirectoryRole"
@@ -3523,7 +3523,7 @@ func (l *Neo4jImporterLink) getValidatedCloudApplicationAdminQuery() string {
 	WITH user
 	MATCH (app:Resource)
 	WHERE app.resourceType IN ["Microsoft.DirectoryServices/applications", "Microsoft.DirectoryServices/servicePrincipals"]
-	MERGE (user)-[r:CAN_ESCALATE]->(app)
+	CREATE (user)-[r:CAN_ESCALATE]->(app)
 	SET r.method = "CloudApplicationAdmin",
 	    r.condition = "Cloud Application Administrator can add credentials to applications and service principals",
 	    r.category = "DirectoryRole"
@@ -3539,7 +3539,7 @@ func (l *Neo4jImporterLink) getValidatedGroupsAdminQuery() string {
 	WITH user
 	MATCH (group:Resource)
 	WHERE group.resourceType = "Microsoft.DirectoryServices/groups"
-	MERGE (user)-[r:CAN_ESCALATE]->(group)
+	CREATE (user)-[r:CAN_ESCALATE]->(group)
 	SET r.method = "GroupsAdministrator",
 	    r.condition = "Groups Administrator can create, delete, and manage all aspects of groups including privileged group memberships",
 	    r.category = "DirectoryRole"
@@ -3556,7 +3556,7 @@ func (l *Neo4jImporterLink) getValidatedUserAdminQuery() string {
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user AND escalate_target.resourceType = "Microsoft.DirectoryServices/users"
 	  AND NOT EXISTS((escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource) WHERE admin_perm.roleName CONTAINS "Administrator")
-	MERGE (user)-[r:CAN_ESCALATE]->(escalate_target)
+	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "UserAdministrator",
 	    r.condition = "Can reset passwords and modify properties of non-administrator users",
 	    r.category = "DirectoryRole"
@@ -3573,7 +3573,7 @@ func (l *Neo4jImporterLink) getValidatedAuthenticationAdminQuery() string {
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user AND escalate_target.resourceType = "Microsoft.DirectoryServices/users"
 	  AND NOT EXISTS((escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource) WHERE admin_perm.roleName CONTAINS "Administrator")
-	MERGE (user)-[r:CAN_ESCALATE]->(escalate_target)
+	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "AuthenticationAdmin",
 	    r.condition = "Can reset authentication methods including passwords and MFA for non-administrator users",
 	    r.category = "DirectoryRole"
@@ -3593,7 +3593,7 @@ func (l *Neo4jImporterLink) getValidatedGraphRoleManagementQuery() string {
 	WITH sp
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> sp
-	MERGE (sp)-[r:CAN_ESCALATE]->(escalate_target)
+	CREATE (sp)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "GraphRoleManagement",
 	    r.condition = "Service Principal with RoleManagement.ReadWrite.Directory can directly assign Global Administrator or any directory role to any principal",
 	    r.category = "GraphPermission"
@@ -3611,7 +3611,7 @@ func (l *Neo4jImporterLink) getValidatedGraphDirectoryReadWriteQuery() string {
 	WITH sp
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> sp
-	MERGE (sp)-[r:CAN_ESCALATE]->(escalate_target)
+	CREATE (sp)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "GraphDirectoryReadWrite",
 	    r.condition = "Service Principal with Directory.ReadWrite.All can modify any directory object including role assignments",
 	    r.category = "GraphPermission"
@@ -3629,7 +3629,7 @@ func (l *Neo4jImporterLink) getValidatedGraphApplicationReadWriteQuery() string 
 	WITH sp
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target.resourceType IN ["Microsoft.DirectoryServices/applications", "Microsoft.DirectoryServices/servicePrincipals"] AND escalate_target <> sp
-	MERGE (sp)-[r:CAN_ESCALATE]->(escalate_target)
+	CREATE (sp)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "GraphApplicationReadWrite",
 	    r.condition = "Service Principal with Application.ReadWrite.All can add credentials to any application or service principal then authenticate as them",
 	    r.category = "GraphPermission"
@@ -3644,7 +3644,7 @@ func (l *Neo4jImporterLink) getValidatedGraphAppRoleAssignmentQuery() string {
 	WHERE perm.permission = "AppRoleAssignment.ReadWrite.All"
 	  AND perm.permissionType = "Application"
 	  AND perm.consentType = "AllPrincipals"
-	MERGE (sp)-[r:CAN_ESCALATE]->(sp)
+	CREATE (sp)-[r:CAN_ESCALATE]->(sp)
 	SET r.method = "GraphAppRoleAssignment",
 	    r.condition = "Service Principal with AppRoleAssignment.ReadWrite.All can grant itself any permission including RoleManagement.ReadWrite.Directory",
 	    r.category = "GraphPermission"
@@ -3662,7 +3662,7 @@ func (l *Neo4jImporterLink) getValidatedGraphUserReadWriteQuery() string {
 	WITH sp
 	MATCH (user:Resource)
 	WHERE user.resourceType = "Microsoft.DirectoryServices/users" AND user <> sp
-	MERGE (sp)-[r:CAN_ESCALATE]->(user)
+	CREATE (sp)-[r:CAN_ESCALATE]->(user)
 	SET r.method = "GraphUserReadWrite",
 	    r.condition = "Service Principal with User.ReadWrite.All can reset passwords, modify profiles, and disable accounts for any user",
 	    r.category = "GraphPermission"
@@ -3680,7 +3680,7 @@ func (l *Neo4jImporterLink) getValidatedGraphGroupReadWriteQuery() string {
 	WITH sp
 	MATCH (group:Resource)
 	WHERE group.resourceType = "Microsoft.DirectoryServices/groups" AND group <> sp
-	MERGE (sp)-[r:CAN_ESCALATE]->(group)
+	CREATE (sp)-[r:CAN_ESCALATE]->(group)
 	SET r.method = "GraphGroupReadWrite",
 	    r.condition = "Service Principal with Group.ReadWrite.All can modify group memberships to add users to privileged groups",
 	    r.category = "GraphPermission"
@@ -3698,7 +3698,7 @@ func (l *Neo4jImporterLink) getValidatedRBACOwnerQuery() string {
 	WITH principal
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> principal
-	MERGE (principal)-[r:CAN_ESCALATE]->(escalate_target)
+	CREATE (principal)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "AzureOwner",
 	    r.condition = "Owner role at any scope provides full control AND can assign roles to compromise other identities",
 	    r.category = "RBAC"
@@ -3714,7 +3714,7 @@ func (l *Neo4jImporterLink) getValidatedRBACUserAccessAdminQuery() string {
 	WITH principal
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> principal
-	MERGE (principal)-[r:CAN_ESCALATE]->(escalate_target)
+	CREATE (principal)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "UserAccessAdmin",
 	    r.condition = "User Access Administrator can assign any Azure role within scope to compromise identities",
 	    r.category = "RBAC"
@@ -3734,7 +3734,7 @@ func (l *Neo4jImporterLink) getValidatedGroupOwnerAddMemberQuery() string {
 	WITH owner, group
 	MATCH (target:Resource)
 	WHERE target <> owner AND target.resourceType IN ["Microsoft.DirectoryServices/users", "Microsoft.DirectoryServices/servicePrincipals"]
-	MERGE (owner)-[r:CAN_ESCALATE]->(target)
+	CREATE (owner)-[r:CAN_ESCALATE]->(target)
 	SET r.method = "GroupOwnerAddMember",
 	    r.condition = "Group owner can add any user to privileged group granting them all group's role assignments",
 	    r.category = "GroupOwnership"
@@ -3749,7 +3749,7 @@ func (l *Neo4jImporterLink) getValidatedGroupMembershipInheritanceQuery() string
 	      (group)-[group_perm:HAS_PERMISSION]->(role:Resource)
 	WHERE group.resourceType = "Microsoft.DirectoryServices/groups"
 	  AND group_perm.roleName IS NOT NULL
-	MERGE (member)-[r:CAN_ESCALATE]->(role)
+	CREATE (member)-[r:CAN_ESCALATE]->(role)
 	SET r.method = "GroupDirectoryRoleInheritance",
 	    r.condition = "Member of group with directory role assignment inherits that role automatically",
 	    r.category = "GroupMembership"
@@ -3764,7 +3764,7 @@ func (l *Neo4jImporterLink) getValidatedSPOwnerAddSecretQuery() string {
 	return `
 	MATCH (owner:Resource)-[:OWNS]->(sp:Resource)
 	WHERE sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
-	MERGE (owner)-[r:CAN_ESCALATE]->(sp)
+	CREATE (owner)-[r:CAN_ESCALATE]->(sp)
 	SET r.method = "ServicePrincipalAddSecret",
 	    r.condition = "Service Principal owner can add client secrets and modify SP configuration",
 	    r.category = "ApplicationOwnership"
@@ -3780,7 +3780,7 @@ func (l *Neo4jImporterLink) getValidatedAppOwnerAddSecretQuery() string {
 	WITH owner, app
 	MATCH (app)-[:CONTAINS]->(sp:Resource)
 	WHERE sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
-	MERGE (owner)-[r:CAN_ESCALATE]->(sp)
+	CREATE (owner)-[r:CAN_ESCALATE]->(sp)
 	SET r.method = "ApplicationAddSecret",
 	    r.condition = "Application owner can add secrets to corresponding service principal",
 	    r.category = "ApplicationOwnership"
@@ -3794,7 +3794,7 @@ func (l *Neo4jImporterLink) getValidatedApplicationToServicePrincipalQuery() str
 	MATCH (app:Resource)-[:CONTAINS]->(sp:Resource)
 	WHERE app.resourceType = "Microsoft.DirectoryServices/applications"
 	  AND sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
-	MERGE (app)-[r:CAN_ESCALATE]->(sp)
+	CREATE (app)-[r:CAN_ESCALATE]->(sp)
 	SET r.method = "ApplicationToServicePrincipal",
 	    r.condition = "Application compromise (credential addition) provides access to corresponding Service Principal and all its permissions",
 	    r.category = "ApplicationIdentity"

@@ -406,7 +406,7 @@ func (l *Neo4jImporterLink) createIdentityResources() int {
 		for _, user := range users {
 			if userMap, ok := user.(map[string]interface{}); ok {
 				resourceNode := map[string]interface{}{
-					"id": l.getStringValue(userMap, "id"),
+					"id": l.normalizeResourceId(l.getStringValue(userMap, "id")),
 					"resourceType": "Microsoft.DirectoryServices/users",
 					"displayName": l.getStringValue(userMap, "displayName"),
 					"userPrincipalName": l.getStringValue(userMap, "userPrincipalName"),
@@ -444,7 +444,7 @@ func (l *Neo4jImporterLink) createIdentityResources() int {
 		for _, group := range groups {
 			if groupMap, ok := group.(map[string]interface{}); ok {
 				resourceNode := map[string]interface{}{
-					"id": l.getStringValue(groupMap, "id"),
+					"id": l.normalizeResourceId(l.getStringValue(groupMap, "id")),
 					"resourceType": "Microsoft.DirectoryServices/groups",
 					"displayName": l.getStringValue(groupMap, "displayName"),
 					"description": l.getStringValue(groupMap, "description"),
@@ -496,7 +496,7 @@ func (l *Neo4jImporterLink) createIdentityResources() int {
 		for _, sp := range servicePrincipals {
 			if spMap, ok := sp.(map[string]interface{}); ok {
 				resourceNode := map[string]interface{}{
-					"id": l.getStringValue(spMap, "id"),
+					"id": l.normalizeResourceId(l.getStringValue(spMap, "id")),
 					"resourceType": "Microsoft.DirectoryServices/servicePrincipals",
 					"displayName": l.getStringValue(spMap, "displayName"),
 					"appId": l.getStringValue(spMap, "appId"),
@@ -532,7 +532,7 @@ func (l *Neo4jImporterLink) createIdentityResources() int {
 		for _, app := range applications {
 			if appMap, ok := app.(map[string]interface{}); ok {
 				resourceNode := map[string]interface{}{
-					"id": l.getStringValue(appMap, "id"),
+					"id": l.normalizeResourceId(l.getStringValue(appMap, "id")),
 					"resourceType": "Microsoft.DirectoryServices/applications",
 					"displayName": l.getStringValue(appMap, "displayName"),
 					"appId": l.getStringValue(appMap, "appId"),
@@ -583,7 +583,7 @@ func (l *Neo4jImporterLink) createHierarchyResources() int {
 	if tenantID != "" {
 		// Create tenant metadata with domain and collection info
 		tenantMetadata := map[string]interface{}{
-			"tenantId": tenantID,
+			"tenantId": strings.ToLower(tenantID),
 		}
 		if domain := l.getStringValue(metadata, "domain"); domain != "" {
 			tenantMetadata["domain"] = domain
@@ -597,10 +597,10 @@ func (l *Neo4jImporterLink) createHierarchyResources() int {
 
 		tenantNodes := []map[string]interface{}{
 			{
-				"id": tenantID,
+				"id": l.normalizeResourceId(tenantID),
 				"resourceType": "Microsoft.DirectoryServices/tenant",
 				"displayName": "Azure AD Tenant",
-				"tenantId": tenantID,
+				"tenantId": strings.ToLower(tenantID),
 				"metadata": l.toJSONString(tenantMetadata),
 			},
 		}
@@ -611,7 +611,7 @@ func (l *Neo4jImporterLink) createHierarchyResources() int {
 		}
 
 		// Create Root Management Group (always exists in Azure with tenant ID)
-		rootMgId := "/providers/Microsoft.Management/managementGroups/" + tenantID
+		rootMgId := l.normalizeResourceId("/providers/Microsoft.Management/managementGroups/" + tenantID)
 		rootMgMetadata := map[string]interface{}{
 			"managementGroupId": tenantID,
 			"tenantId":          tenantID,
@@ -620,7 +620,7 @@ func (l *Neo4jImporterLink) createHierarchyResources() int {
 
 		rootMgNodes := []map[string]interface{}{
 			{
-				"id":                 rootMgId,
+				"id":                 l.normalizeResourceId(rootMgId),
 				"resourceType":       "Microsoft.Management/managementGroups",
 				"displayName":        "Tenant Root Group",
 				"managementGroupId":  tenantID,
@@ -674,7 +674,7 @@ func (l *Neo4jImporterLink) createHierarchyResources() int {
 					}
 
 					managementGroupNode := map[string]interface{}{
-						"id":           "/providers/Microsoft.Management/managementGroups/" + mgID,
+						"id":           l.normalizeResourceId("/providers/Microsoft.Management/managementGroups/" + mgID),
 						"resourceType": "Microsoft.Management/managementGroups",
 						"displayName":  mgDisplayName,
 						"tenantId":      tenantID,
@@ -706,7 +706,7 @@ func (l *Neo4jImporterLink) createHierarchyResources() int {
 				"subscriptionId": subscriptionId,
 			}
 			subscriptionNodes = append(subscriptionNodes, map[string]interface{}{
-				"id": "/subscriptions/" + subscriptionId,
+				"id": l.normalizeResourceId("/subscriptions/" + subscriptionId),
 				"resourceType": "Microsoft.Resources/subscriptions",
 				"displayName": "Subscription " + subscriptionId,
 				"subscriptionId": subscriptionId,
@@ -726,7 +726,7 @@ func (l *Neo4jImporterLink) createHierarchyResources() int {
 						if rgId != "" && rgName != "" {
 							// Normalize resource group name to lowercase for consistency
 							normalizedRgName := strings.ToLower(rgName)
-							normalizedRgId := "/subscriptions/" + subscriptionId + "/resourceGroups/" + normalizedRgName
+							normalizedRgId := l.normalizeResourceId(rgId)
 
 							// Use normalized ID for deduplication
 							if !seenResourceGroups[normalizedRgId] {
@@ -822,7 +822,7 @@ func (l *Neo4jImporterLink) createAzureResourceNodes() int {
 						l.processIdentityData(resourceMap)
 
 						resourceNode := map[string]interface{}{
-							"id": l.getStringValue(resourceMap, "id"),
+							"id": l.normalizeResourceId(l.getStringValue(resourceMap, "id")),
 							"resourceType": l.getStringValue(resourceMap, "type"),
 							"displayName": l.getStringValue(resourceMap, "name"),
 						}
@@ -1051,7 +1051,7 @@ func (l *Neo4jImporterLink) createTenantToRootManagementGroupContains(session ne
 		MATCH (tenant:Resource {id: $tenantId})
 		MATCH (rootMg:Resource)
 		WHERE rootMg.resourceType = "Microsoft.Management/managementGroups"
-		AND rootMg.id = "/providers/Microsoft.Management/managementGroups/" + $tenantId
+		AND rootMg.id = "/providers/microsoft.management/managementgroups/" + $tenantId
 		MERGE (tenant)-[:CONTAINS]->(rootMg)
 	`
 
@@ -1100,11 +1100,11 @@ func (l *Neo4jImporterLink) createManagementGroupToManagementGroupContains(sessi
 					if strings.HasPrefix(parentId, "/providers/Microsoft.Management/managementGroups/") {
 						fullParentId = parentId
 					} else {
-						fullParentId = "/providers/Microsoft.Management/managementGroups/" + parentId
+						fullParentId = l.normalizeResourceId("/providers/Microsoft.Management/managementGroups/" + parentId)
 					}
 
 					managementGroupHierarchy = append(managementGroupHierarchy, map[string]interface{}{
-						"childMgId":  mgId,
+						"childMgId":  l.normalizeResourceId(mgId),
 						"parentMgId": fullParentId,
 					})
 				}
@@ -1193,7 +1193,7 @@ func (l *Neo4jImporterLink) createManagementGroupToSubscriptionContains(session 
 					cypher := `
 						MATCH (mg:Resource)
 						WHERE mg.resourceType = "Microsoft.Management/managementGroups"
-						AND mg.id = "/providers/Microsoft.Management/managementGroups/" + $mgId
+						AND mg.id = "/providers/microsoft.management/managementgroups/" + $mgId
 						MATCH (subscription:Resource {id: "/subscriptions/" + $subscriptionId})
 						WHERE subscription.resourceType = "Microsoft.Resources/subscriptions"
 						MERGE (mg)-[:CONTAINS]->(subscription)
@@ -1201,7 +1201,7 @@ func (l *Neo4jImporterLink) createManagementGroupToSubscriptionContains(session 
 
 					result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
 						result, err := tx.Run(ctx, cypher, map[string]interface{}{
-							"mgId":          parentMgId,
+							"mgId":          strings.ToLower(parentMgId),
 							"subscriptionId": itemName,
 						})
 						if err != nil {
@@ -1263,7 +1263,7 @@ func (l *Neo4jImporterLink) createTenantToOrphanSubscriptionContains(session neo
 	cypher := `
 		MATCH (rootMg:Resource)
 		WHERE rootMg.resourceType = "Microsoft.Management/managementGroups"
-		AND rootMg.id = "/providers/Microsoft.Management/managementGroups/" + $tenantId
+		AND rootMg.id = "/providers/microsoft.management/managementgroups/" + $tenantId
 		MATCH (subscription:Resource)
 		WHERE subscription.resourceType = "Microsoft.Resources/subscriptions"
 		AND LAST(SPLIT(subscription.id, "/")) IN $orphanSubscriptions
@@ -1288,7 +1288,7 @@ func (l *Neo4jImporterLink) createTenantToOrphanSubscriptionContains(session neo
 
 	result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
 		result, err := tx.Run(ctx, cypher, map[string]interface{}{
-			"tenantId":           tenantID,
+			"tenantId":           strings.ToLower(tenantID),
 			"orphanSubscriptions": orphanSubscriptions,
 		})
 		if err != nil {
@@ -1358,12 +1358,12 @@ func (l *Neo4jImporterLink) createResourceGroupToResourceContains(session neo4j.
 		MATCH (rg:Resource)
 		WHERE rg.resourceType = "Microsoft.Resources/resourceGroups"
 		MATCH (resource:Resource)
-		WHERE toLower(resource.resourceType) STARTS WITH "microsoft."
+		WHERE resource.resourceType STARTS WITH "microsoft."
 		AND resource.resourceType <> "Microsoft.Resources/subscriptions"
 		AND resource.resourceType <> "Microsoft.Resources/resourceGroups"
 		AND resource.resourceType <> "Microsoft.DirectoryServices/tenant"
 		AND resource.resourceGroup IS NOT NULL
-		AND toLower(resource.resourceGroup) = toLower(rg.displayName)
+		AND resource.resourceGroup = rg.displayName
 		MERGE (rg)-[:CONTAINS]->(resource)
 	`
 
@@ -1398,7 +1398,7 @@ func (l *Neo4jImporterLink) createManagedIdentityToServicePrincipalContains(sess
 	// Debug: Check what managed identity resources exist
 	debugCypher := `
 		MATCH (mi:Resource)
-		WHERE toLower(mi.resourceType) CONTAINS "managedidentity"
+		WHERE mi.resourceType CONTAINS "managedidentity"
 		RETURN mi.displayName, mi.principalId, mi.resourceType
 	`
 
@@ -1430,7 +1430,7 @@ func (l *Neo4jImporterLink) createManagedIdentityToServicePrincipalContains(sess
 
 	cypher := `
 		MATCH (mi:Resource)
-		WHERE toLower(mi.resourceType) CONTAINS "managedidentity"
+		WHERE mi.resourceType CONTAINS "managedidentity"
 		AND mi.principalId IS NOT NULL
 		MATCH (sp:Resource {id: mi.principalId})
 		WHERE sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
@@ -1688,7 +1688,7 @@ func (l *Neo4jImporterLink) createEntraIDPermissionEdges() bool {
 		UNWIND $permissions AS perm
 		WITH perm
 		WHERE perm.principalId IS NOT NULL AND perm.permission IS NOT NULL
-		MATCH (principal:Resource {id: perm.principalId})
+		MATCH (principal:Resource {principalId: perm.principalId})
 		MATCH (tenant:Resource {resourceType: "Microsoft.DirectoryServices/tenant"})
 		CREATE (principal)-[r:HAS_PERMISSION]->(tenant)
 		SET r.roleId = perm.roleId,
@@ -1826,7 +1826,10 @@ func (l *Neo4jImporterLink) createRBACPermissionEdges() bool {
 		UNWIND $permissions AS perm
 		WITH perm
 		WHERE perm.principalId IS NOT NULL AND perm.permission IS NOT NULL AND perm.targetResourceId IS NOT NULL
-		MATCH (principal:Resource {id: perm.principalId})
+		OPTIONAL MATCH (miPrincipal:Resource {principalId: perm.principalId})
+		OPTIONAL MATCH (spPrincipal:Resource {id: perm.principalId})
+		WITH perm, COALESCE(miPrincipal, spPrincipal) as principal
+		WHERE principal IS NOT NULL
 		MATCH (target:Resource {id: perm.targetResourceId})
 		CREATE (principal)-[r:HAS_PERMISSION]->(target)
 		SET r.roleDefinitionId = perm.roleDefinitionId,
@@ -2086,7 +2089,7 @@ func (l *Neo4jImporterLink) buildRoleDefinitionsCache() error {
 							// Also store with normalized key format to match role assignments
 							// Extract role GUID and create normalized key
 							if roleGUID := l.getStringValue(roleDefMap, "name"); roleGUID != "" {
-								normalizedKey := "/providers/Microsoft.Authorization/RoleDefinitions/" + roleGUID
+								normalizedKey := l.normalizeResourceId("/providers/Microsoft.Authorization/RoleDefinitions/" + roleGUID)
 								l.roleDefinitionsMap[normalizedKey] = roleDefMap
 								l.Logger.Debug("Cached role definition with both keys", "fullId", roleDefinitionId, "normalizedKey", normalizedKey)
 							}
@@ -2599,7 +2602,7 @@ func (l *Neo4jImporterLink) processScopedRBACAssignments(assignments []interface
 					permissions = append(permissions, map[string]interface{}{
 						"principalId":        principalId,
 						"permission":         dangPerm,
-						"targetResourceId":   targetResourceId,
+						"targetResourceId":   l.normalizeResourceId(targetResourceId),
 						"targetResourceType": targetResourceType,
 						"grantedAt":          scopeType,
 						"roleDefinitionId":   roleDefinitionId,
@@ -2630,7 +2633,7 @@ func (l *Neo4jImporterLink) parseAssignmentScope(scope string) (resourceType, re
 		metadata := l.getMapValue(l.consolidatedData, "collection_metadata")
 		tenantID := l.getStringValue(metadata, "tenant_id")
 		if tenantID != "" {
-			return "ManagementGroup", fmt.Sprintf("/providers/Microsoft.Management/managementGroups/%s", tenantID)
+			return "ManagementGroup", l.normalizeResourceId(fmt.Sprintf("/providers/Microsoft.Management/managementGroups/%s", tenantID))
 		}
 		return "Tenant", "/"
 	}
@@ -2651,12 +2654,12 @@ func (l *Neo4jImporterLink) parseAssignmentScope(scope string) (resourceType, re
 	// Format: /providers/Microsoft.Management/managementGroups/{management-group-id}
 	if len(parts) >= 4 && parts[0] == "providers" && parts[1] == "Microsoft.Management" && parts[2] == "managementGroups" {
 		managementGroupId := parts[3]
-		return "ManagementGroup", fmt.Sprintf("/providers/Microsoft.Management/managementGroups/%s", managementGroupId)
+		return "ManagementGroup", l.normalizeResourceId(fmt.Sprintf("/providers/Microsoft.Management/managementGroups/%s", managementGroupId))
 	}
 
 	// Check if it's a subscription-level scope
 	if len(parts) == 2 && parts[0] == "subscriptions" {
-		return "Microsoft.Resources/subscriptions", fmt.Sprintf("/subscriptions/%s", parts[1])
+		return "Microsoft.Resources/subscriptions", l.normalizeResourceId(fmt.Sprintf("/subscriptions/%s", parts[1]))
 	}
 
 	// Check if it's a resource group-level scope
@@ -2665,7 +2668,7 @@ func (l *Neo4jImporterLink) parseAssignmentScope(scope string) (resourceType, re
 		subscriptionId := parts[1]
 		resourceGroupName := parts[3]
 		resourceId := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s", subscriptionId, resourceGroupName)
-		return "ResourceGroup", resourceId
+		return "ResourceGroup", l.normalizeResourceId(resourceId)
 	}
 
 	// Check if it's a resource-level scope
@@ -2709,6 +2712,12 @@ func (l *Neo4jImporterLink) toJSONString(data map[string]interface{}) string {
 	}
 
 	return string(jsonBytes)
+}
+
+// normalizeResourceId normalizes Azure resource IDs to lowercase for consistent matching
+// This fixes case sensitivity issues between RBAC assignments and resource node IDs
+func (l *Neo4jImporterLink) normalizeResourceId(resourceId string) string {
+	return strings.ToLower(resourceId)
 }
 
 // Helper utility methods
@@ -2941,15 +2950,15 @@ func (l *Neo4jImporterLink) processBatchGraphPermissions(permissions []CompleteG
 	var permissionMaps []map[string]interface{}
 	for _, perm := range permissions {
 		permissionMaps = append(permissionMaps, map[string]interface{}{
-			"id":                   perm.ID,
+			"id":                   l.normalizeResourceId(perm.ID),
 			"type":                 perm.Type,
-			"servicePrincipalId":   perm.ServicePrincipalID,
+			"servicePrincipalId":   l.normalizeResourceId(perm.ServicePrincipalID),
 			"servicePrincipalName": perm.ServicePrincipalName,
-			"userId":               perm.UserID,
+			"userId":               l.normalizeResourceId(perm.UserID),
 			"userName":             perm.UserName,
-			"groupId":              perm.GroupID,
+			"groupId":              l.normalizeResourceId(perm.GroupID),
 			"groupName":            perm.GroupName,
-			"resourceAppId":        perm.ResourceAppID,
+			"resourceAppId":        l.normalizeResourceId(perm.ResourceAppID),
 			"resourceAppName":      perm.ResourceAppName,
 			"permissionType":       perm.PermissionType,
 			"permission":           perm.Permission,

@@ -892,7 +892,12 @@ func (l *Neo4jImporterLink) createResourceNodesBatch(session neo4j.SessionWithCo
 			location: resource.location,
 			subscriptionId: resource.subscriptionId,
 			resourceGroup: resource.resourceGroup,
-			principalId: resource.principalId
+			principalId: resource.principalId,
+			appId: resource.appId,
+			userPrincipalName: resource.userPrincipalName,
+			servicePrincipalType: resource.servicePrincipalType,
+			signInAudience: resource.signInAudience,
+			accountEnabled: resource.accountEnabled
 		})
 	`, labelString)
 
@@ -1322,7 +1327,7 @@ func (l *Neo4jImporterLink) createSubscriptionToResourceGroupContains(session ne
 		WHERE subscription.resourceType = "Microsoft.Resources/subscriptions"
 		MATCH (rg:Resource)
 		WHERE rg.resourceType = "Microsoft.Resources/resourceGroups"
-		AND rg.id STARTS WITH subscription.id + "/resourceGroups/"
+		AND rg.id STARTS WITH subscription.id + "/resourcegroups/"
 		MERGE (subscription)-[:CONTAINS]->(rg)
 	`
 
@@ -1577,6 +1582,8 @@ func (l *Neo4jImporterLink) createPermissionEdges() bool {
 		entraIDEdgeCount = l.edgeCounts["HAS_PERMISSION"] - initialEdgeCount
 	}
 
+	// OAuth2 Graph API permissions are handled by createGraphPermissionEdges() below
+
 	// Process Azure RBAC permissions (new logic)
 	rbacEdgesCreated := l.createRBACPermissionEdges()
 	rbacEdgeCount := 0
@@ -1639,30 +1646,20 @@ func (l *Neo4jImporterLink) createEntraIDPermissionEdges() bool {
 			continue
 		}
 
-		// Expand role to individual permissions using roleTemplateId
-		expandedPermissions := l.expandRoleToPermissions(roleTemplateId)
+		// Create direct directory role relationship with roleName and templateId
+		// This enables escalation logic to match on roleName and templateId fields
+		permissions = append(permissions, map[string]interface{}{
+			"principalId":     principalId,
+			"permission":      roleName, // Use role name as permission
+			"scope":           "/",      // Entra ID roles are tenant-scoped
+			"roleId":          roleId,
+			"roleName":        roleName,
+			"roleTemplateId":  roleTemplateId, // Add template ID for escalation matching
+			"principalType":   principalType,
+			"source":          "Entra ID Directory Role",
+		})
 
-		// Only process if we have expanded permissions (requires roleDefinitions data)
-		if len(expandedPermissions) > 0 {
-			l.Logger.Debug("Found expanded permissions", "roleName", roleName, "permissionCount", len(expandedPermissions))
-			// Create edges for each dangerous permission
-			for _, permission := range expandedPermissions {
-				if l.isDangerousEntraPermission(permission) {
-					l.Logger.Debug("Found dangerous Entra permission", "roleName", roleName, "permission", permission, "principalId", principalId)
-					permissions = append(permissions, map[string]interface{}{
-						"principalId":   principalId,
-						"permission":    permission,
-						"scope":         "/",  // Entra ID roles are tenant-scoped
-						"roleId":        roleId,
-						"roleName":      roleName,
-						"principalType": principalType,
-						"source":        "Entra ID",
-					})
-				}
-			}
-		} else {
-			l.Logger.Debug("No expanded permissions found - skipping role assignment", "roleName", roleName, "roleTemplateId", roleTemplateId)
-		}
+		l.Logger.Debug("Created directory role assignment", "roleName", roleName, "roleTemplateId", roleTemplateId, "principalId", principalId)
 	}
 
 	if len(permissions) == 0 {
@@ -1688,12 +1685,13 @@ func (l *Neo4jImporterLink) createEntraIDPermissionEdges() bool {
 		UNWIND $permissions AS perm
 		WITH perm
 		WHERE perm.principalId IS NOT NULL AND perm.permission IS NOT NULL
-		MATCH (principal:Resource {principalId: perm.principalId})
+		MATCH (principal:Resource {id: perm.principalId})
 		MATCH (tenant:Resource {resourceType: "Microsoft.DirectoryServices/tenant"})
 		CREATE (principal)-[r:HAS_PERMISSION]->(tenant)
 		SET r.roleId = perm.roleId,
 			r.permission = perm.permission,
 			r.roleName = perm.roleName,
+			r.templateId = perm.roleTemplateId,
 			r.principalType = perm.principalType,
 			r.source = perm.source,
 			r.createdAt = datetime()
@@ -1735,6 +1733,7 @@ func (l *Neo4jImporterLink) createEntraIDPermissionEdges() bool {
 	return totalEdgesCreated > 0
 }
 
+
 // createRBACPermissionEdges creates HAS_PERMISSION edges for Azure RBAC role assignments
 func (l *Neo4jImporterLink) createRBACPermissionEdges() bool {
 	message.Info("Creating HAS_PERMISSION edges for Azure RBAC roles...")
@@ -1756,6 +1755,7 @@ func (l *Neo4jImporterLink) createRBACPermissionEdges() bool {
 
 			// Process subscription-level RBAC assignments
 			if subRBACAssignments := l.getArrayValue(subData, "subscriptionRoleAssignments"); len(subRBACAssignments) > 0 {
+				l.Logger.Debug("*** DEFINITELY CALLING NEW RBAC LOGIC FOR SUBSCRIPTIONS ***")
 				scopePermissions := l.processScopedRBACAssignments(subRBACAssignments, "subscription")
 				permissions = append(permissions, scopePermissions...)
 				totalAssignments += len(subRBACAssignments)
@@ -1834,6 +1834,7 @@ func (l *Neo4jImporterLink) createRBACPermissionEdges() bool {
 		CREATE (principal)-[r:HAS_PERMISSION]->(target)
 		SET r.roleDefinitionId = perm.roleDefinitionId,
 			r.permission = perm.permission,
+			r.roleName = perm.roleName,
 			r.principalType = perm.principalType,
 			r.source = perm.source,
 			r.grantedAt = perm.grantedAt,
@@ -2141,12 +2142,44 @@ func (l *Neo4jImporterLink) expandRoleToPermissions(roleTemplateId string) []str
 	return permissions
 }
 
-// expandRBACRoleToPermissions expands an RBAC role definition to its individual permissions
-func (l *Neo4jImporterLink) expandRBACRoleToPermissions(roleDefinitionId string) []string {
-	var permissions []string
+// getGraphPermissionName maps well-known Graph permission GUIDs to their permission names
+func (l *Neo4jImporterLink) getGraphPermissionName(appRoleId string) string {
+	// Map of well-known Microsoft Graph permission GUIDs to their names
+	graphPermissionMap := map[string]string{
+		// Critical Permissions for Escalation
+		"7ab1d382-f21e-4acd-a863-ba3e13f7da61": "RoleManagement.ReadWrite.Directory",
+		"19dbc75e-c2e2-444c-a770-ec69d8559fc7": "Directory.ReadWrite.All",
+		"741f803b-c850-494e-b5df-cde7c675a1ca": "User.ReadWrite.All",
+		"62a82d76-70ea-41e2-9197-370581804d09": "Group.ReadWrite.All",
+		"1bfefb4e-e0b5-418b-a88f-73c46d2cc8e9": "Application.ReadWrite.All",
+		"18a4783c-866b-4cc7-a460-3d5e5662c884": "AppRoleAssignment.ReadWrite.All",
 
-	l.Logger.Debug("Attempting to expand RBAC role", "roleDefinitionId", roleDefinitionId)
+		// Additional Graph Permissions
+		"df021288-bdef-4463-88db-98f22de89214": "User.Read.All",
+		"5b567255-7703-4780-807c-7be8301ae99b": "Group.Read.All",
+		"9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30": "Application.Read.All",
+		"246dd0d5-5bd0-4def-940b-0421030a5b68": "Directory.Read.All",
+		"c7fbd983-d9aa-4fa7-84b8-17382c103bc4": "Directory.ReadWrite.All", // Alternative GUID
+		"fdc4c997-9942-4479-bfcb-75a36d1138df": "Application.ReadWrite.All", // Alternative GUID
+		"69e67828-780e-47fd-b28c-7b27d14864e6": "User.ReadWrite.All", // Alternative GUID
+		"ff278e11-4a33-4d0c-83d2-d01dc58929a5": "RoleManagement.ReadWrite.Directory", // Alternative GUID
+		"483bed4a-2ad3-4361-a73b-c83ccdbdc53c": "AppRoleAssignment.ReadWrite.All", // Alternative GUID
 
+		// Special cases
+		"00000000-0000-0000-0000-000000000000": "User.Read", // Default permission
+		"5df6fe86-1be0-44eb-b916-7bd443a71236": "Directory.Read.All", // Another common one
+	}
+
+	if permissionName, exists := graphPermissionMap[appRoleId]; exists {
+		return permissionName
+	}
+
+	// Return the GUID if no mapping found - for debugging
+	return appRoleId
+}
+
+// getRBACRoleName gets the display name for an RBAC role definition
+func (l *Neo4jImporterLink) getRBACRoleName(roleDefinitionId string) string {
 	// Look up role definition by roleDefinitionId
 	roleDef, exists := l.roleDefinitionsMap[roleDefinitionId]
 	if !exists {
@@ -2157,7 +2190,7 @@ func (l *Neo4jImporterLink) expandRBACRoleToPermissions(roleDefinitionId string)
 				roleGUID := parts[len(parts)-1]
 				for cachedKey, cachedRoleDef := range l.roleDefinitionsMap {
 					if strings.HasSuffix(cachedKey, roleGUID) {
-						l.Logger.Debug("Found RBAC role via fallback lookup", "searchKey", roleDefinitionId, "foundKey", cachedKey)
+						l.Logger.Debug("Found RBAC role via fallback lookup for name", "searchKey", roleDefinitionId, "foundKey", cachedKey)
 						roleDef = cachedRoleDef
 						exists = true
 						break
@@ -2167,58 +2200,36 @@ func (l *Neo4jImporterLink) expandRBACRoleToPermissions(roleDefinitionId string)
 		}
 
 		if !exists {
-			l.Logger.Debug("RBAC role definition not found", "roleDefinitionId", roleDefinitionId)
-			return permissions
+			l.Logger.Debug("RBAC role definition not found for name lookup", "roleDefinitionId", roleDefinitionId)
+			return ""
 		}
 	}
 
-	l.Logger.Debug("Found RBAC role definition", "roleDefinitionId", roleDefinitionId)
-
-	roleDefMap, ok := roleDef.(map[string]interface{})
-	if !ok {
-		l.Logger.Debug("Invalid RBAC role definition format", "roleDefinitionId", roleDefinitionId)
-		return permissions
-	}
-
-	// Handle both SDK collector format (direct permissions array) and legacy Azure REST API format (properties.permissions)
-	var rbacPermissions []interface{}
-
-	// Try SDK collector format first: permissions[] directly on role definition
-	if directPermissions := l.getArrayValue(roleDefMap, "permissions"); len(directPermissions) > 0 {
-		l.Logger.Debug("Using SDK collector format for RBAC permissions", "roleDefinitionId", roleDefinitionId)
-		rbacPermissions = directPermissions
-	} else {
-		// Fallback to Azure REST API format: properties.permissions[]
-		l.Logger.Debug("Using Azure REST API format for RBAC permissions", "roleDefinitionId", roleDefinitionId)
-		properties := l.getMapValue(roleDefMap, "properties")
-		if properties == nil {
-			l.Logger.Debug("No properties found in RBAC role definition", "roleDefinitionId", roleDefinitionId)
-			return permissions
-		}
-		rbacPermissions = l.getArrayValue(properties, "permissions")
-	}
-
-	// Process permissions array
-	for _, permSet := range rbacPermissions {
-		if permSetMap, ok := permSet.(map[string]interface{}); ok {
-			// Get actions array (RBAC uses "actions" for both formats)
-			actions := l.getArrayValue(permSetMap, "actions")
-			l.Logger.Debug("Processing RBAC permission set", "roleDefinitionId", roleDefinitionId, "actionCount", len(actions))
-			for _, action := range actions {
-				if actionStr, ok := action.(string); ok {
-					permissions = append(permissions, actionStr)
-					l.Logger.Debug("Found RBAC action", "roleDefinitionId", roleDefinitionId, "action", actionStr)
-				}
+	// Extract role name - Azure RBAC role definitions use "displayName" field
+	if roleDefMap, ok := roleDef.(map[string]interface{}); ok {
+		// First check properties.displayName (most common for Azure RBAC)
+		if properties := l.getMapValue(roleDefMap, "properties"); properties != nil {
+			if displayName := l.getStringValue(properties, "displayName"); displayName != "" {
+				return displayName
+			}
+			if roleName := l.getStringValue(properties, "roleName"); roleName != "" {
+				return roleName
 			}
 		}
+		// Then try direct fields
+		if displayName := l.getStringValue(roleDefMap, "displayName"); displayName != "" {
+			return displayName
+		}
+		if roleName := l.getStringValue(roleDefMap, "roleName"); roleName != "" {
+			return roleName
+		}
+		// Don't use "name" field as it's the GUID, not the display name
 	}
 
-	l.Logger.Debug("Expanded RBAC role to permissions", "roleDefinitionId", roleDefinitionId, "permissionCount", len(permissions))
-	if len(permissions) > 0 {
-		l.Logger.Debug("Sample RBAC permissions", "roleDefinitionId", roleDefinitionId, "first5Permissions", l.getSamplePermissions(permissions, 5))
-	}
-	return permissions
+	l.Logger.Debug("Could not extract role name from definition", "roleDefinitionId", roleDefinitionId)
+	return ""
 }
+
 
 // getSamplePermissions returns first n permissions for debugging
 func (l *Neo4jImporterLink) getSamplePermissions(permissions []string, n int) []string {
@@ -2548,6 +2559,7 @@ func (l *Neo4jImporterLink) expandRBACWildcardToDangerousPermissions(permission 
 
 // processScopedRBACAssignments processes RBAC assignments for a specific scope type and creates HAS_PERMISSION edges
 func (l *Neo4jImporterLink) processScopedRBACAssignments(assignments []interface{}, scopeType string) []map[string]interface{} {
+	l.Logger.Debug("*** ENTERING processScopedRBACAssignments ***", "assignmentCount", len(assignments), "scopeType", scopeType)
 	var permissions []map[string]interface{}
 
 	for _, assignment := range assignments {
@@ -2587,30 +2599,28 @@ func (l *Neo4jImporterLink) processScopedRBACAssignments(assignments []interface
 			continue
 		}
 
-		// Expand RBAC role to individual permissions using roleDefinitionId
-		expandedPermissions := l.expandRBACRoleToPermissions(roleDefinitionId)
+		// Get RBAC role name instead of expanding to individual permissions
+		l.Logger.Debug("*** NEW RBAC LOGIC: Getting role name ***", "roleDefinitionId", roleDefinitionId)
+		roleName := l.getRBACRoleName(roleDefinitionId)
+		l.Logger.Debug("*** NEW RBAC LOGIC: Got role name ***", "roleDefinitionId", roleDefinitionId, "roleName", roleName)
 
-		// Only process if we have expanded permissions
-		if len(expandedPermissions) > 0 {
-			l.Logger.Debug("Found expanded RBAC permissions", "roleDefinitionId", roleDefinitionId, "permissionCount", len(expandedPermissions), "scopeType", scopeType)
-			// Create edges for each dangerous permission at the granted scope only
-			for _, permission := range expandedPermissions {
-				// Expand wildcards to specific dangerous permissions
-				dangerousPerms := l.expandRBACWildcardToDangerousPermissions(permission)
-				for _, dangPerm := range dangerousPerms {
-					l.Logger.Debug("Found dangerous RBAC permission at granted scope", "roleDefinitionId", roleDefinitionId, "permission", dangPerm, "principalId", principalId, "targetResource", targetResourceId, "scopeType", scopeType)
-					permissions = append(permissions, map[string]interface{}{
-						"principalId":        principalId,
-						"permission":         dangPerm,
-						"targetResourceId":   l.normalizeResourceId(targetResourceId),
-						"targetResourceType": targetResourceType,
-						"grantedAt":          scopeType,
-						"roleDefinitionId":   roleDefinitionId,
-						"principalType":      principalType,
-						"source":             "Azure RBAC",
-					})
-				}
-			}
+		// Create direct RBAC role assignment with role name as permission
+		// This aligns with the simplified Entra ID approach
+		if roleName != "" {
+			l.Logger.Debug("Created RBAC role assignment", "roleName", roleName, "roleDefinitionId", roleDefinitionId, "principalId", principalId, "targetResource", targetResourceId, "scopeType", scopeType)
+			permissions = append(permissions, map[string]interface{}{
+				"principalId":        principalId,
+				"permission":         roleName, // Use role name as permission
+				"targetResourceId":   l.normalizeResourceId(targetResourceId),
+				"targetResourceType": targetResourceType,
+				"grantedAt":          scopeType,
+				"roleDefinitionId":   roleDefinitionId,
+				"roleName":          roleName, // Store role name for escalation matching
+				"principalType":      principalType,
+				"source":             "Azure RBAC",
+			})
+		} else {
+			l.Logger.Debug("Could not get role name - skipping role assignment", "roleDefinitionId", roleDefinitionId, "principalId", principalId)
 		}
 	}
 
@@ -3041,7 +3051,7 @@ func (l *Neo4jImporterLink) extractGraphPermissionsFromAzureAD(azureADMap map[st
 						ResourceAppID:     l.getStringField(roleData, "resourceId"),
 						ResourceAppName:   "", // Will be resolved by Neo4j query
 						PermissionType:    "Application",
-						Permission:        l.getStringField(roleData, "appRoleId"),
+						Permission:        l.getGraphPermissionName(l.getStringField(roleData, "appRoleId")),
 						ConsentType:       "AllPrincipals",
 						GrantedFor:        "Application",
 						CreatedDateTime:   l.getStringField(roleData, "createdDateTime"),
@@ -3075,6 +3085,28 @@ func (l *Neo4jImporterLink) createApplicationOwnershipEdges() error {
 		}
 		totalEdges += count
 		l.edgeCounts["OWNS"] = count
+	}
+
+	// Process group ownership - direct ownership relationships
+	groupOwnership := l.getArrayValue(azureAD, "groupOwnership")
+	if len(groupOwnership) > 0 {
+		count, err := l.createGroupOwnershipDirectEdges(groupOwnership)
+		if err != nil {
+			return fmt.Errorf("failed to create group ownership edges: %w", err)
+		}
+		totalEdges += count
+		l.edgeCounts["OWNS"] += count // Add to existing OWNS count
+	}
+
+	// Process service principal ownership - direct ownership relationships
+	servicePrincipalOwnership := l.getArrayValue(azureAD, "servicePrincipalOwnership")
+	if len(servicePrincipalOwnership) > 0 {
+		count, err := l.createServicePrincipalOwnershipDirectEdges(servicePrincipalOwnership)
+		if err != nil {
+			return fmt.Errorf("failed to create service principal ownership edges: %w", err)
+		}
+		totalEdges += count
+		l.edgeCounts["OWNS"] += count // Add to existing OWNS count
 	}
 
 	// Process application credential management permissions - role-based permissions
@@ -3191,6 +3223,180 @@ func (l *Neo4jImporterLink) createApplicationOwnershipDirectEdges(applicationOwn
 	}
 
 	l.Logger.Info("Created direct ownership edges", "count", totalProcessed)
+	return totalProcessed, nil
+}
+
+func (l *Neo4jImporterLink) createGroupOwnershipDirectEdges(groupOwnership []interface{}) (int, error) {
+	if len(groupOwnership) == 0 {
+		return 0, nil
+	}
+
+	l.Logger.Info("Creating direct group ownership edges", "count", len(groupOwnership))
+
+	var edges []map[string]interface{}
+	currentTime := time.Now().Unix()
+
+	for _, item := range groupOwnership {
+		ownershipMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		groupID := l.getStringValue(ownershipMap, "groupId")
+		if groupID == "" {
+			continue
+		}
+
+		ownerID := l.getStringValue(ownershipMap, "ownerId")
+		if ownerID == "" {
+			continue
+		}
+
+		edge := map[string]interface{}{
+			"sourceId":    ownerID,
+			"targetId":    groupID,
+			"source":      "GroupOwnership",
+			"createdAt":   currentTime,
+		}
+		edges = append(edges, edge)
+	}
+
+	if len(edges) == 0 {
+		l.Logger.Info("No valid group ownership edges to create")
+		return 0, nil
+	}
+
+	// Process in batches (same pattern as application ownership)
+	ctx := context.Background()
+	session := l.driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+
+	batchSize := 1000
+	totalProcessed := 0
+
+	for i := 0; i < len(edges); i += batchSize {
+		end := i + batchSize
+		if end > len(edges) {
+			end = len(edges)
+		}
+		batch := edges[i:end]
+
+		query := `
+		UNWIND $edges AS edge
+		MATCH (source {id: edge.sourceId})
+		MATCH (target {id: edge.targetId})
+		WHERE target.resourceType = "Microsoft.DirectoryServices/groups"
+		MERGE (source)-[r:OWNS]->(target)
+		SET r.source = edge.source,
+		    r.createdAt = edge.createdAt
+		RETURN count(r) as created`
+
+		result, err := session.Run(ctx, query, map[string]interface{}{"edges": batch})
+		if err != nil {
+			return totalProcessed, fmt.Errorf("failed to create group ownership edges batch: %w", err)
+		}
+
+		if result.Next(ctx) {
+			if count, ok := result.Record().Get("created"); ok {
+				if c, ok := count.(int64); ok {
+					totalProcessed += int(c)
+				}
+			}
+		}
+
+		if err := result.Err(); err != nil {
+			return totalProcessed, fmt.Errorf("error processing group ownership edges batch: %w", err)
+		}
+	}
+
+	l.Logger.Info("Created direct group ownership edges", "count", totalProcessed)
+	return totalProcessed, nil
+}
+
+func (l *Neo4jImporterLink) createServicePrincipalOwnershipDirectEdges(servicePrincipalOwnership []interface{}) (int, error) {
+	if len(servicePrincipalOwnership) == 0 {
+		return 0, nil
+	}
+
+	l.Logger.Info("Creating direct service principal ownership edges", "count", len(servicePrincipalOwnership))
+
+	var edges []map[string]interface{}
+	currentTime := time.Now().Unix()
+
+	for _, item := range servicePrincipalOwnership {
+		ownershipMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		servicePrincipalID := l.getStringValue(ownershipMap, "servicePrincipalId")
+		if servicePrincipalID == "" {
+			continue
+		}
+
+		ownerID := l.getStringValue(ownershipMap, "ownerId")
+		if ownerID == "" {
+			continue
+		}
+
+		edge := map[string]interface{}{
+			"sourceId":    ownerID,
+			"targetId":    servicePrincipalID,
+			"source":      "ServicePrincipalOwnership",
+			"createdAt":   currentTime,
+		}
+		edges = append(edges, edge)
+	}
+
+	if len(edges) == 0 {
+		l.Logger.Info("No valid service principal ownership edges to create")
+		return 0, nil
+	}
+
+	// Process in batches (same pattern as others)
+	ctx := context.Background()
+	session := l.driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+
+	batchSize := 1000
+	totalProcessed := 0
+
+	for i := 0; i < len(edges); i += batchSize {
+		end := i + batchSize
+		if end > len(edges) {
+			end = len(edges)
+		}
+		batch := edges[i:end]
+
+		query := `
+		UNWIND $edges AS edge
+		MATCH (source {id: edge.sourceId})
+		MATCH (target {id: edge.targetId})
+		WHERE target.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
+		MERGE (source)-[r:OWNS]->(target)
+		SET r.source = edge.source,
+		    r.createdAt = edge.createdAt
+		RETURN count(r) as created`
+
+		result, err := session.Run(ctx, query, map[string]interface{}{"edges": batch})
+		if err != nil {
+			return totalProcessed, fmt.Errorf("failed to create service principal ownership edges batch: %w", err)
+		}
+
+		if result.Next(ctx) {
+			if count, ok := result.Record().Get("created"); ok {
+				if c, ok := count.(int64); ok {
+					totalProcessed += int(c)
+				}
+			}
+		}
+
+		if err := result.Err(); err != nil {
+			return totalProcessed, fmt.Errorf("error processing service principal ownership edges batch: %w", err)
+		}
+	}
+
+	l.Logger.Info("Created direct service principal ownership edges", "count", totalProcessed)
 	return totalProcessed, nil
 }
 
@@ -3463,14 +3669,15 @@ func (l *Neo4jImporterLink) createValidatedEscalationEdges() bool {
 // getValidatedGlobalAdminQuery - Global Administrator complete tenant control
 func (l *Neo4jImporterLink) getValidatedGlobalAdminQuery() string {
 	return `
-	MATCH (user:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
+	MATCH (user:Resource)-[perm:HAS_PERMISSION]->(tenant:Resource)
 	WHERE perm.roleName = "Global Administrator" OR perm.templateId = "62e90394-69f5-4237-9190-012177145e10"
-	WITH user
-	MATCH (escalate_target:Resource)
+	WITH user, tenant
+	MATCH (tenant)-[:CONTAINS*]->(escalate_target:Resource)
 	WHERE escalate_target <> user
+	WITH DISTINCT user, escalate_target
 	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "GlobalAdministrator",
-	    r.condition = "Global Administrator role provides complete tenant control and can elevate to Owner on any Azure subscription",
+	    r.condition = "Global Administrator role provides complete tenant control and can escalate to all resources in tenant hierarchy",
 	    r.category = "DirectoryRole"
 	RETURN count(r) as created
 	`
@@ -3484,6 +3691,8 @@ func (l *Neo4jImporterLink) getValidatedPrivilegedRoleAdminQuery() string {
 	WITH user
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user
+	  AND escalate_target.resourceType IN ["Microsoft.DirectoryServices/users", "Microsoft.DirectoryServices/servicePrincipals", "Microsoft.DirectoryServices/groups"]
+	WITH DISTINCT user, escalate_target
 	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "PrivilegedRoleAdmin",
 	    r.condition = "Privileged Role Administrator can assign Global Administrator or any other directory role to any principal",
@@ -3500,6 +3709,7 @@ func (l *Neo4jImporterLink) getValidatedPrivilegedAuthAdminQuery() string {
 	WITH user
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user AND escalate_target.resourceType = "Microsoft.DirectoryServices/users"
+	WITH DISTINCT user, escalate_target
 	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "PrivilegedAuthenticationAdmin",
 	    r.condition = "Can reset passwords and authentication methods for ANY user including Global Administrators",
@@ -3516,6 +3726,7 @@ func (l *Neo4jImporterLink) getValidatedApplicationAdminQuery() string {
 	WITH user
 	MATCH (app:Resource)
 	WHERE app.resourceType IN ["Microsoft.DirectoryServices/applications", "Microsoft.DirectoryServices/servicePrincipals"]
+	WITH DISTINCT user, app
 	CREATE (user)-[r:CAN_ESCALATE]->(app)
 	SET r.method = "ApplicationAdmin",
 	    r.condition = "Application Administrator can add credentials to applications/service principals to assume their identity and inherit permissions",
@@ -3532,6 +3743,7 @@ func (l *Neo4jImporterLink) getValidatedCloudApplicationAdminQuery() string {
 	WITH user
 	MATCH (app:Resource)
 	WHERE app.resourceType IN ["Microsoft.DirectoryServices/applications", "Microsoft.DirectoryServices/servicePrincipals"]
+	WITH DISTINCT user, app
 	CREATE (user)-[r:CAN_ESCALATE]->(app)
 	SET r.method = "CloudApplicationAdmin",
 	    r.condition = "Cloud Application Administrator can add credentials to applications and service principals",
@@ -3548,6 +3760,7 @@ func (l *Neo4jImporterLink) getValidatedGroupsAdminQuery() string {
 	WITH user
 	MATCH (group:Resource)
 	WHERE group.resourceType = "Microsoft.DirectoryServices/groups"
+	WITH DISTINCT user, group
 	CREATE (user)-[r:CAN_ESCALATE]->(group)
 	SET r.method = "GroupsAdministrator",
 	    r.condition = "Groups Administrator can create, delete, and manage all aspects of groups including privileged group memberships",
@@ -3564,7 +3777,8 @@ func (l *Neo4jImporterLink) getValidatedUserAdminQuery() string {
 	WITH user
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user AND escalate_target.resourceType = "Microsoft.DirectoryServices/users"
-	  AND NOT EXISTS((escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource) WHERE admin_perm.roleName CONTAINS "Administrator")
+	  AND NOT EXISTS { (escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource) WHERE admin_perm.roleName CONTAINS "Administrator" }
+	WITH DISTINCT user, escalate_target
 	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "UserAdministrator",
 	    r.condition = "Can reset passwords and modify properties of non-administrator users",
@@ -3581,7 +3795,8 @@ func (l *Neo4jImporterLink) getValidatedAuthenticationAdminQuery() string {
 	WITH user
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user AND escalate_target.resourceType = "Microsoft.DirectoryServices/users"
-	  AND NOT EXISTS((escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource) WHERE admin_perm.roleName CONTAINS "Administrator")
+	  AND NOT EXISTS { (escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource) WHERE admin_perm.roleName CONTAINS "Administrator" }
+	WITH DISTINCT user, escalate_target
 	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "AuthenticationAdmin",
 	    r.condition = "Can reset authentication methods including passwords and MFA for non-administrator users",
@@ -3602,6 +3817,8 @@ func (l *Neo4jImporterLink) getValidatedGraphRoleManagementQuery() string {
 	WITH sp
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> sp
+	  AND escalate_target.resourceType IN ["Microsoft.DirectoryServices/users", "Microsoft.DirectoryServices/servicePrincipals", "Microsoft.DirectoryServices/groups"]
+	WITH DISTINCT sp, escalate_target
 	CREATE (sp)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "GraphRoleManagement",
 	    r.condition = "Service Principal with RoleManagement.ReadWrite.Directory can directly assign Global Administrator or any directory role to any principal",
@@ -3613,15 +3830,25 @@ func (l *Neo4jImporterLink) getValidatedGraphRoleManagementQuery() string {
 // getValidatedGraphDirectoryReadWriteQuery - Directory.ReadWrite.All permission
 func (l *Neo4jImporterLink) getValidatedGraphDirectoryReadWriteQuery() string {
 	return `
-	MATCH (sp:Resource)-[perm:HAS_GRAPH_PERMISSION]->(target:Resource)
-	WHERE perm.permission = "Directory.ReadWrite.All"
-	  AND perm.permissionType = "Application"
-	  AND perm.consentType = "AllPrincipals"
+	// Match both HAS_GRAPH_PERMISSION and HAS_PERMISSION for Directory.ReadWrite.All
+	MATCH (sp:Resource)
+	WHERE EXISTS {
+		(sp)-[perm:HAS_GRAPH_PERMISSION]->(target:Resource)
+		WHERE perm.permission = "Directory.ReadWrite.All"
+		  AND perm.permissionType = "Application"
+		  AND perm.consentType = "AllPrincipals"
+	} OR EXISTS {
+		(sp)-[perm:HAS_PERMISSION]->(target:Resource)
+		WHERE perm.permission = "Directory.ReadWrite.All"
+		  AND perm.source = "Graph API OAuth2 Grant"
+	}
 	WITH sp
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> sp
+	  AND escalate_target.resourceType STARTS WITH "Microsoft.DirectoryServices/"
+	WITH DISTINCT sp, escalate_target
 	CREATE (sp)-[r:CAN_ESCALATE]->(escalate_target)
-	SET r.method = "GraphDirectoryReadWrite",
+	SET r.method = "Directory.ReadWrite.All",
 	    r.condition = "Service Principal with Directory.ReadWrite.All can modify any directory object including role assignments",
 	    r.category = "GraphPermission"
 	RETURN count(r) as created
@@ -3671,6 +3898,7 @@ func (l *Neo4jImporterLink) getValidatedGraphUserReadWriteQuery() string {
 	WITH sp
 	MATCH (user:Resource)
 	WHERE user.resourceType = "Microsoft.DirectoryServices/users" AND user <> sp
+	WITH DISTINCT sp, user
 	CREATE (sp)-[r:CAN_ESCALATE]->(user)
 	SET r.method = "GraphUserReadWrite",
 	    r.condition = "Service Principal with User.ReadWrite.All can reset passwords, modify profiles, and disable accounts for any user",
@@ -3689,6 +3917,7 @@ func (l *Neo4jImporterLink) getValidatedGraphGroupReadWriteQuery() string {
 	WITH sp
 	MATCH (group:Resource)
 	WHERE group.resourceType = "Microsoft.DirectoryServices/groups" AND group <> sp
+	WITH DISTINCT sp, group
 	CREATE (sp)-[r:CAN_ESCALATE]->(group)
 	SET r.method = "GraphGroupReadWrite",
 	    r.condition = "Service Principal with Group.ReadWrite.All can modify group memberships to add users to privileged groups",
@@ -3702,14 +3931,16 @@ func (l *Neo4jImporterLink) getValidatedGraphGroupReadWriteQuery() string {
 // getValidatedRBACOwnerQuery - Owner role at any scope
 func (l *Neo4jImporterLink) getValidatedRBACOwnerQuery() string {
 	return `
-	MATCH (principal:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
-	WHERE perm.permission = "Owner"
-	WITH principal
-	MATCH (escalate_target:Resource)
+	MATCH (principal:Resource)-[perm:HAS_PERMISSION]->(scope:Resource)
+	WHERE perm.roleName = "Owner" OR perm.roleDefinitionId CONTAINS "8e3af657-a8ff-443c-a75c-2fe8c4bcb635"
+	WITH DISTINCT principal, scope
+	MATCH (scope)-[:CONTAINS*0..]->(escalate_target:Resource)
 	WHERE escalate_target <> principal
+	  AND NOT escalate_target.resourceType STARTS WITH "Microsoft.DirectoryServices/"
+	WITH DISTINCT principal, escalate_target
 	CREATE (principal)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "AzureOwner",
-	    r.condition = "Owner role at any scope provides full control AND can assign roles to compromise other identities",
+	    r.condition = "Owner role at any scope provides full control over Azure resources within that scope and can assign roles",
 	    r.category = "RBAC"
 	RETURN count(r) as created
 	`
@@ -3718,14 +3949,16 @@ func (l *Neo4jImporterLink) getValidatedRBACOwnerQuery() string {
 // getValidatedRBACUserAccessAdminQuery - User Access Administrator role
 func (l *Neo4jImporterLink) getValidatedRBACUserAccessAdminQuery() string {
 	return `
-	MATCH (principal:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
-	WHERE perm.permission = "User Access Administrator"
-	WITH principal
-	MATCH (escalate_target:Resource)
+	MATCH (principal:Resource)-[perm:HAS_PERMISSION]->(scope:Resource)
+	WHERE perm.roleName = "User Access Administrator" OR perm.roleDefinitionId CONTAINS "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"
+	WITH DISTINCT principal, scope
+	MATCH (scope)-[:CONTAINS*0..]->(escalate_target:Resource)
 	WHERE escalate_target <> principal
+	  AND NOT escalate_target.resourceType STARTS WITH "Microsoft.DirectoryServices/"
+	WITH DISTINCT principal, escalate_target
 	CREATE (principal)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "UserAccessAdmin",
-	    r.condition = "User Access Administrator can assign any Azure role within scope to compromise identities",
+	    r.condition = "User Access Administrator can assign any Azure role within scope to compromise identities in that scope",
 	    r.category = "RBAC"
 	RETURN count(r) as created
 	`
@@ -3738,11 +3971,12 @@ func (l *Neo4jImporterLink) getValidatedGroupOwnerAddMemberQuery() string {
 	return `
 	MATCH (owner:Resource)-[:OWNS]->(group:Resource)
 	WHERE group.resourceType = "Microsoft.DirectoryServices/groups"
-	  AND (EXISTS((group)-[role_perm:HAS_PERMISSION]->(:Resource) WHERE role_perm.roleName IS NOT NULL)
-	       OR EXISTS((group)-[rbac_perm:HAS_PERMISSION]->(:Resource) WHERE rbac_perm.permission = "Owner")))
+	  AND (EXISTS { (group)-[role_perm:HAS_PERMISSION]->(:Resource) WHERE role_perm.roleName IS NOT NULL }
+	       OR EXISTS { (group)-[rbac_perm:HAS_PERMISSION]->(:Resource) WHERE rbac_perm.permission = "Owner" })
 	WITH owner, group
 	MATCH (target:Resource)
 	WHERE target <> owner AND target.resourceType IN ["Microsoft.DirectoryServices/users", "Microsoft.DirectoryServices/servicePrincipals"]
+	WITH DISTINCT owner, target
 	CREATE (owner)-[r:CAN_ESCALATE]->(target)
 	SET r.method = "GroupOwnerAddMember",
 	    r.condition = "Group owner can add any user to privileged group granting them all group's role assignments",
@@ -3758,6 +3992,7 @@ func (l *Neo4jImporterLink) getValidatedGroupMembershipInheritanceQuery() string
 	      (group)-[group_perm:HAS_PERMISSION]->(role:Resource)
 	WHERE group.resourceType = "Microsoft.DirectoryServices/groups"
 	  AND group_perm.roleName IS NOT NULL
+	WITH DISTINCT member, role
 	CREATE (member)-[r:CAN_ESCALATE]->(role)
 	SET r.method = "GroupDirectoryRoleInheritance",
 	    r.condition = "Member of group with directory role assignment inherits that role automatically",
@@ -3773,6 +4008,7 @@ func (l *Neo4jImporterLink) getValidatedSPOwnerAddSecretQuery() string {
 	return `
 	MATCH (owner:Resource)-[:OWNS]->(sp:Resource)
 	WHERE sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
+	WITH DISTINCT owner, sp
 	CREATE (owner)-[r:CAN_ESCALATE]->(sp)
 	SET r.method = "ServicePrincipalAddSecret",
 	    r.condition = "Service Principal owner can add client secrets and modify SP configuration",
@@ -3789,6 +4025,7 @@ func (l *Neo4jImporterLink) getValidatedAppOwnerAddSecretQuery() string {
 	WITH owner, app
 	MATCH (app)-[:CONTAINS]->(sp:Resource)
 	WHERE sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
+	WITH DISTINCT owner, sp
 	CREATE (owner)-[r:CAN_ESCALATE]->(sp)
 	SET r.method = "ApplicationAddSecret",
 	    r.condition = "Application owner can add secrets to corresponding service principal",
@@ -3803,6 +4040,7 @@ func (l *Neo4jImporterLink) getValidatedApplicationToServicePrincipalQuery() str
 	MATCH (app:Resource)-[:CONTAINS]->(sp:Resource)
 	WHERE app.resourceType = "Microsoft.DirectoryServices/applications"
 	  AND sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
+	WITH DISTINCT app, sp
 	CREATE (app)-[r:CAN_ESCALATE]->(sp)
 	SET r.method = "ApplicationToServicePrincipal",
 	    r.condition = "Application compromise (credential addition) provides access to corresponding Service Principal and all its permissions",

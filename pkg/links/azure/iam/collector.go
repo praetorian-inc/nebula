@@ -887,8 +887,23 @@ func (l *IAMComprehensiveCollectorLink) collectAllGraphData(accessToken string) 
 		azureADData["groupMemberships"] = groupMemberships
 	}
 
+	// Group ownership
+	groupOwnership, err := l.collectGroupOwnership(accessToken)
+	if err != nil {
+		l.Logger.Error("Failed to collect group ownership", "error", err)
+	} else {
+		azureADData["groupOwnership"] = groupOwnership
+	}
+
+	// Service Principal ownership
+	servicePrincipalOwnership, err := l.collectServicePrincipalOwnership(accessToken)
+	if err != nil {
+		l.Logger.Error("Failed to collect service principal ownership", "error", err)
+	} else {
+		azureADData["servicePrincipalOwnership"] = servicePrincipalOwnership
+	}
+
 	// Directory role assignments
-	l.Logger.Info("*** TRACE PRE-CALL: About to call collectDirectoryRoleAssignments ***")
 
 	// Get the already-collected service principals to pass to the function
 	var servicePrincipalsForDirectoryRoles []interface{}
@@ -899,7 +914,6 @@ func (l *IAMComprehensiveCollectorLink) collectAllGraphData(accessToken string) 
 	}
 
 	roleAssignments, err := l.collectDirectoryRoleAssignments(accessToken, servicePrincipalsForDirectoryRoles)
-	l.Logger.Info("*** TRACE POST-CALL: Returned from collectDirectoryRoleAssignments ***")
 	if err != nil {
 		l.Logger.Error("Failed to collect directory role assignments", "error", err)
 	} else {
@@ -1418,26 +1432,222 @@ func (l *IAMComprehensiveCollectorLink) collectGroupMemberships(accessToken stri
 	return memberships, nil
 }
 
-// collectDirectoryRoleAssignments collects directory role assignments
-func (l *IAMComprehensiveCollectorLink) collectDirectoryRoleAssignments(accessToken string, servicePrincipals []interface{}) ([]interface{}, error) {
-	l.Logger.Info("*** TRACE 1: Entering collectDirectoryRoleAssignments function ***")
-	roles, err := l.collectPaginatedGraphData(accessToken, "/directoryRoles")
+// collectGroupOwnership collects group ownership relationships using batch API
+func (l *IAMComprehensiveCollectorLink) collectGroupOwnership(accessToken string) ([]interface{}, error) {
+	groups, err := l.collectPaginatedGraphData(accessToken, "/groups")
 	if err != nil {
-		l.Logger.Error("*** TRACE 2: Failed to get directory roles, exiting early ***", "error", err)
 		return nil, err
 	}
-	l.Logger.Info(fmt.Sprintf("*** TRACE 3: Successfully got %d directory roles ***", len(roles)))
+
+	var ownerships []interface{}
+	l.Logger.Info(fmt.Sprintf("Getting owners for %d groups using batch API...", len(groups)))
+
+	// Process groups in batches of 10 (same as memberships)
+	batchSize := 10
+
+	for i := 0; i < len(groups); i += batchSize {
+		end := i + batchSize
+		if end > len(groups) {
+			end = len(groups)
+		}
+		batchGroups := groups[i:end]
+
+		// Create batch requests for group owners
+		var batchRequests []map[string]interface{}
+		groupDataMap := make(map[string]interface{})
+
+		for j, group := range batchGroups {
+			groupMap, ok := group.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			groupID, ok := groupMap["id"].(string)
+			if !ok {
+				continue
+			}
+
+			groupDataMap[fmt.Sprintf("group_%d", j)] = groupMap
+
+			// Add owners request - using same parameters as your example
+			batchRequests = append(batchRequests, map[string]interface{}{
+				"id":     fmt.Sprintf("group_%d_owners", j),
+				"method": "GET",
+				"url":    fmt.Sprintf("/groups/%s/owners?$select=id,displayName,userType,appId,mail,onPremisesSyncEnabled", groupID),
+			})
+		}
+
+		// Execute batch request
+		if len(batchRequests) > 0 {
+			batchResults, err := l.callGraphBatchAPI(accessToken, batchRequests)
+			if err != nil {
+				l.Logger.Error("Batch request failed for group ownership", "error", err)
+				continue
+			}
+
+			// Process batch results
+			if responses, ok := batchResults["responses"].([]interface{}); ok {
+				for _, response := range responses {
+					if respMap, ok := response.(map[string]interface{}); ok {
+						if body, ok := respMap["body"].(map[string]interface{}); ok {
+							if value, ok := body["value"].([]interface{}); ok {
+								for _, owner := range value {
+									if ownerMap, ok := owner.(map[string]interface{}); ok {
+										ownerID := ownerMap["id"].(string)
+
+										// Extract group ID from request ID
+										requestID := respMap["id"].(string)
+										groupIndex := strings.Replace(strings.Replace(requestID, "group_", "", 1), "_owners", "", 1)
+
+										// Find corresponding group
+										if groupData, exists := groupDataMap[fmt.Sprintf("group_%s", groupIndex)]; exists {
+											if groupInfo, ok := groupData.(map[string]interface{}); ok {
+												groupID := groupInfo["id"].(string)
+												groupName := groupInfo["displayName"].(string)
+
+												ownership := map[string]interface{}{
+													"groupId":    groupID,
+													"groupName":  groupName,
+													"ownerId":    ownerID,
+													"ownerName":  ownerMap["displayName"].(string),
+													"ownerType":  ownerMap["@odata.type"].(string),
+													"permissionType": "GroupOwnership",
+													"role":       "Owner",
+												}
+												ownerships = append(ownerships, ownership)
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Add delay between batches (same as memberships)
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	return ownerships, nil
+}
+
+// collectServicePrincipalOwnership collects service principal ownership relationships using batch API
+func (l *IAMComprehensiveCollectorLink) collectServicePrincipalOwnership(accessToken string) ([]interface{}, error) {
+	servicePrincipals, err := l.collectPaginatedGraphData(accessToken, "/servicePrincipals")
+	if err != nil {
+		return nil, err
+	}
+
+	var ownerships []interface{}
+	l.Logger.Info(fmt.Sprintf("Getting owners for %d service principals using batch API...", len(servicePrincipals)))
+
+	// Process service principals in batches of 10 (same as groups)
+	batchSize := 10
+
+	for i := 0; i < len(servicePrincipals); i += batchSize {
+		end := i + batchSize
+		if end > len(servicePrincipals) {
+			end = len(servicePrincipals)
+		}
+		batchSPs := servicePrincipals[i:end]
+
+		// Create batch requests for service principal owners
+		var batchRequests []map[string]interface{}
+		spDataMap := make(map[string]interface{})
+
+		for j, sp := range batchSPs {
+			spMap, ok := sp.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			spID, ok := spMap["id"].(string)
+			if !ok {
+				continue
+			}
+
+			spDataMap[fmt.Sprintf("sp_%d", j)] = spMap
+
+			// Add owners request for service principals
+			batchRequests = append(batchRequests, map[string]interface{}{
+				"id":     fmt.Sprintf("sp_%d_owners", j),
+				"method": "GET",
+				"url":    fmt.Sprintf("/servicePrincipals/%s/owners?$select=id,displayName,userType,appId,mail,onPremisesSyncEnabled", spID),
+			})
+		}
+
+		// Execute batch request
+		if len(batchRequests) > 0 {
+			batchResults, err := l.callGraphBatchAPI(accessToken, batchRequests)
+			if err != nil {
+				l.Logger.Error("Batch request failed for service principal ownership", "error", err)
+				continue
+			}
+
+			// Process batch results
+			if responses, ok := batchResults["responses"].([]interface{}); ok {
+				for _, response := range responses {
+					if respMap, ok := response.(map[string]interface{}); ok {
+						if body, ok := respMap["body"].(map[string]interface{}); ok {
+							if value, ok := body["value"].([]interface{}); ok {
+								for _, owner := range value {
+									if ownerMap, ok := owner.(map[string]interface{}); ok {
+										ownerID := ownerMap["id"].(string)
+
+										// Extract SP ID from request ID
+										requestID := respMap["id"].(string)
+										spIndex := strings.Replace(strings.Replace(requestID, "sp_", "", 1), "_owners", "", 1)
+
+										// Find corresponding service principal
+										if spData, exists := spDataMap[fmt.Sprintf("sp_%s", spIndex)]; exists {
+											if spInfo, ok := spData.(map[string]interface{}); ok {
+												spID := spInfo["id"].(string)
+												spName := spInfo["displayName"].(string)
+
+												ownership := map[string]interface{}{
+													"servicePrincipalId":   spID,
+													"servicePrincipalName": spName,
+													"ownerId":    ownerID,
+													"ownerName":  ownerMap["displayName"].(string),
+													"ownerType":  ownerMap["@odata.type"].(string),
+													"permissionType": "ServicePrincipalOwnership",
+													"role":       "Owner",
+												}
+												ownerships = append(ownerships, ownership)
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Add delay between batches (same as others)
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	return ownerships, nil
+}
+
+// collectDirectoryRoleAssignments collects directory role assignments
+func (l *IAMComprehensiveCollectorLink) collectDirectoryRoleAssignments(accessToken string, servicePrincipals []interface{}) ([]interface{}, error) {
+	roles, err := l.collectPaginatedGraphData(accessToken, "/directoryRoles")
+	if err != nil {
+		return nil, err
+	}
 
 	var assignments []interface{}
 
 	l.Logger.Info(fmt.Sprintf("Getting members for %d directory roles using batch API...", len(roles)))
-	l.Logger.Info("*** TRACE 4: About to start main directory role loop ***")
 
 	// Process directory roles in batches for member collection
 	batchSize := 20 // Larger batch since these are simpler calls
-	l.Logger.Info(fmt.Sprintf("*** TRACE 5: Starting loop with batchSize=%d, total roles=%d ***", batchSize, len(roles)))
 	for batchIdx := 0; batchIdx < len(roles); batchIdx += batchSize {
-		l.Logger.Info(fmt.Sprintf("*** TRACE 6: Processing batch starting at index %d ***", batchIdx))
 
 		// Ensure batchIdx is within bounds
 		if batchIdx >= len(roles) {
@@ -1473,18 +1683,14 @@ func (l *IAMComprehensiveCollectorLink) collectDirectoryRoleAssignments(accessTo
 		}
 
 		if len(batchRequests) == 0 {
-			l.Logger.Warn("*** TRACE 7: Empty batch requests, continuing to next batch ***")
 			continue
 		}
 
 		// Make batch API call
-		l.Logger.Info(fmt.Sprintf("*** TRACE 8: Making batch API call with %d requests ***", len(batchRequests)))
 		batchResponse, err := l.callGraphBatchAPI(accessToken, batchRequests)
 		if err != nil {
-			l.Logger.Error("*** TRACE 9: Batch API call failed, continuing to next batch ***", "error", err, "batchIdx", batchIdx)
 			continue
 		}
-		l.Logger.Info("*** TRACE 10: Batch API call succeeded ***")
 
 		responses, ok := batchResponse["responses"].([]interface{})
 		if !ok {
@@ -1542,41 +1748,32 @@ func (l *IAMComprehensiveCollectorLink) collectDirectoryRoleAssignments(accessTo
 			}
 		}
 
-		l.Logger.Info(fmt.Sprintf("*** TRACE 11: Finished processing batch at index %d ***", batchIdx))
 		time.Sleep(500 * time.Millisecond) // Brief pause between batches
 	}
 
-	l.Logger.Info("*** TRACE 12: MAIN LOOP COMPLETE - Exited normally after processing all batches ***")
 
 	// BUGFIX: Also collect directory roles for service principals using memberOf approach
 	// The /directoryRoles/{roleId}/members endpoint has a known asymmetry bug where service principals
 	// don't appear in role membership lists, but they do appear when querying their memberOf
-	l.Logger.Info("*** TRACE 13: About to start service principal collection ***")
 	l.Logger.Info("Collecting service principal directory role assignments using memberOf approach...")
 	servicePrincipalAssignments, err := l.collectServicePrincipalDirectoryRoles(accessToken, servicePrincipals)
 	if err != nil {
-		l.Logger.Error("*** TRACE 14: Service principal collection FAILED ***", "error", err)
 	} else {
 		assignments = append(assignments, servicePrincipalAssignments...)
-		l.Logger.Info(fmt.Sprintf("*** TRACE 15: Successfully found %d additional directory role assignments from service principals ***", len(servicePrincipalAssignments)))
 	}
 
-	l.Logger.Info(fmt.Sprintf("*** TRACE 16: Returning from collectDirectoryRoleAssignments with %d total assignments ***", len(assignments)))
 	return assignments, nil
 }
 
 // collectServicePrincipalDirectoryRoles collects directory role assignments for service principals
 // using the memberOf approach to work around Graph API asymmetry bug
 func (l *IAMComprehensiveCollectorLink) collectServicePrincipalDirectoryRoles(accessToken string, servicePrincipals []interface{}) ([]interface{}, error) {
-	l.Logger.Info("*** TRACE SP-1: Entering collectServicePrincipalDirectoryRoles ***")
 
 	// Use the already-collected service principals passed as parameter
 	if servicePrincipals == nil || len(servicePrincipals) == 0 {
-		l.Logger.Error("*** TRACE SP-2: No service principals provided ***")
 		return nil, fmt.Errorf("no service principals provided")
 	}
 
-	l.Logger.Info(fmt.Sprintf("*** TRACE SP-3: Got %d service principals, checking for directory roles ***", len(servicePrincipals)))
 
 	var assignments []interface{}
 
@@ -1594,7 +1791,6 @@ func (l *IAMComprehensiveCollectorLink) collectServicePrincipalDirectoryRoles(ac
 		}
 		batchSPs := servicePrincipals[batchIdx:end]
 
-		l.Logger.Info(fmt.Sprintf("*** TRACE SP-4: Processing SP batch %d with %d service principals ***", batchIdx/batchSize, len(batchSPs)))
 
 		// Create batch requests for service principal memberOf
 		var batchRequests []map[string]interface{}
@@ -1620,22 +1816,18 @@ func (l *IAMComprehensiveCollectorLink) collectServicePrincipalDirectoryRoles(ac
 			continue
 		}
 
-		l.Logger.Info(fmt.Sprintf("*** TRACE SP-5: Making batch API call for %d SP memberOf requests ***", len(batchRequests)))
 
 		// Make batch API call
 		batchResponse, err := l.callGraphBatchAPI(accessToken, batchRequests)
 		if err != nil {
-			l.Logger.Error("*** TRACE SP-6: Failed batch API call for SP memberOf ***", "error", err)
 			continue
 		}
 
 		responses, ok := batchResponse["responses"].([]interface{})
 		if !ok {
-			l.Logger.Error("*** TRACE SP-7: Invalid batch response format for service principal memberOf ***")
 			continue
 		}
 
-		l.Logger.Info(fmt.Sprintf("*** TRACE SP-8: Processing %d responses from batch ***", len(responses)))
 
 		// Process batch responses
 		for i, sp := range batchSPs {
@@ -1679,7 +1871,6 @@ func (l *IAMComprehensiveCollectorLink) collectServicePrincipalDirectoryRoles(ac
 								continue
 							}
 
-							l.Logger.Info(fmt.Sprintf("*** TRACE SP-9: Found SP %s has directory role %s ***", spID, roleID))
 
 							assignment := map[string]interface{}{
 								"roleId":         roleID,
@@ -1698,7 +1889,6 @@ func (l *IAMComprehensiveCollectorLink) collectServicePrincipalDirectoryRoles(ac
 		time.Sleep(500 * time.Millisecond) // Brief pause between batches
 	}
 
-	l.Logger.Info(fmt.Sprintf("*** TRACE SP-10: Completed SP directory role collection, found %d assignments ***", len(assignments)))
 	return assignments, nil
 }
 

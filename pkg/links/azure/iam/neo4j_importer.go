@@ -2145,29 +2145,35 @@ func (l *Neo4jImporterLink) expandRoleToPermissions(roleTemplateId string) []str
 // getGraphPermissionName maps well-known Graph permission GUIDs to their permission names
 func (l *Neo4jImporterLink) getGraphPermissionName(appRoleId string) string {
 	// Map of well-known Microsoft Graph permission GUIDs to their names
+	// IMPORTANT: These GUIDs are verified against Microsoft Graph API (2024)
+	// Verified with: az rest --method GET --url "https://graph.microsoft.com/v1.0/servicePrincipals?\$filter=appId eq '00000003-0000-0000-c000-000000000000'" --query "value[0].appRoles"
 	graphPermissionMap := map[string]string{
-		// Critical Permissions for Escalation
-		"7ab1d382-f21e-4acd-a863-ba3e13f7da61": "RoleManagement.ReadWrite.Directory",
+		// Critical Permissions for Escalation (VERIFIED)
+		"9e3f62cf-ca93-4989-b6ce-bf83c28f9fe8": "RoleManagement.ReadWrite.Directory",
 		"19dbc75e-c2e2-444c-a770-ec69d8559fc7": "Directory.ReadWrite.All",
 		"741f803b-c850-494e-b5df-cde7c675a1ca": "User.ReadWrite.All",
 		"62a82d76-70ea-41e2-9197-370581804d09": "Group.ReadWrite.All",
 		"1bfefb4e-e0b5-418b-a88f-73c46d2cc8e9": "Application.ReadWrite.All",
-		"18a4783c-866b-4cc7-a460-3d5e5662c884": "AppRoleAssignment.ReadWrite.All",
+		"06b708a9-e830-4db3-a914-8e69da51d44f": "AppRoleAssignment.ReadWrite.All",
 
-		// Additional Graph Permissions
+		// Read permissions (VERIFIED)
 		"df021288-bdef-4463-88db-98f22de89214": "User.Read.All",
 		"5b567255-7703-4780-807c-7be8301ae99b": "Group.Read.All",
 		"9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30": "Application.Read.All",
-		"246dd0d5-5bd0-4def-940b-0421030a5b68": "Directory.Read.All",
-		"c7fbd983-d9aa-4fa7-84b8-17382c103bc4": "Directory.ReadWrite.All", // Alternative GUID
-		"fdc4c997-9942-4479-bfcb-75a36d1138df": "Application.ReadWrite.All", // Alternative GUID
-		"69e67828-780e-47fd-b28c-7b27d14864e6": "User.ReadWrite.All", // Alternative GUID
-		"ff278e11-4a33-4d0c-83d2-d01dc58929a5": "RoleManagement.ReadWrite.Directory", // Alternative GUID
-		"483bed4a-2ad3-4361-a73b-c83ccdbdc53c": "AppRoleAssignment.ReadWrite.All", // Alternative GUID
+		"7ab1d382-f21e-4acd-a863-ba3e13f7da61": "Directory.Read.All",
+		"483bed4a-2ad3-4361-a73b-c83ccdbdc53c": "RoleManagement.Read.Directory",
+
+		// Additional permissions (VERIFIED)
+		"18a4783c-866b-4cc7-a460-3d5e5662c884": "Application.ReadWrite.OwnedBy",
+		"246dd0d5-5bd0-4def-940b-0421030a5b68": "Policy.Read.All",
+		"c7fbd983-d9aa-4fa7-84b8-17382c103bc4": "RoleManagement.Read.All",
+		"fdc4c997-9942-4479-bfcb-75a36d1138df": "RoleManagementPolicy.Read.Directory",
+		"69e67828-780e-47fd-b28c-7b27d14864e6": "RoleManagementPolicy.Read.AzureADGroup",
+		"ff278e11-4a33-4d0c-83d2-d01dc58929a5": "RoleEligibilitySchedule.Read.Directory",
+		"5df6fe86-1be0-44eb-b916-7bd443a71236": "PrivilegedAccess.Read.AzureResources",
 
 		// Special cases
 		"00000000-0000-0000-0000-000000000000": "User.Read", // Default permission
-		"5df6fe86-1be0-44eb-b916-7bd443a71236": "Directory.Read.All", // Another common one
 	}
 
 	if permissionName, exists := graphPermissionMap[appRoleId]; exists {

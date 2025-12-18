@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1698,24 +1699,43 @@ func (l *IAMComprehensiveCollectorLink) collectDirectoryRoleAssignments(accessTo
 			continue
 		}
 
-		// Process batch responses
+		// Process batch responses - MUST match by response ID, not array index!
+		// Microsoft Graph batch API does NOT guarantee response order matches request order.
+		// Build a map of role index to role data for O(1) lookup
+		roleIndexMap := make(map[int]map[string]interface{})
 		for i, role := range batchRoles {
 			roleMap, ok := role.(map[string]interface{})
 			if !ok {
 				continue
 			}
+			roleIndexMap[i+1] = roleMap // +1 because request IDs are 1-indexed
+		}
 
-			roleID, ok := roleMap["id"].(string)
+		for _, responseInterface := range responses {
+			response, ok := responseInterface.(map[string]interface{})
 			if !ok {
 				continue
 			}
 
-			if i >= len(responses) {
+			// Extract the response ID to match with the correct role
+			respIDStr, ok := response["id"].(string)
+			if !ok {
+				continue
+			}
+			respID, err := strconv.Atoi(respIDStr)
+			if err != nil {
+				l.Logger.Debug("Failed to parse response ID", "id", respIDStr, "error", err)
 				continue
 			}
 
-			responseInterface := responses[i]
-			response, ok := responseInterface.(map[string]interface{})
+			// Look up the role by the response ID
+			roleMap, exists := roleIndexMap[respID]
+			if !exists {
+				l.Logger.Debug("No role found for response ID", "id", respID)
+				continue
+			}
+
+			roleID, ok := roleMap["id"].(string)
 			if !ok {
 				continue
 			}
@@ -1829,24 +1849,43 @@ func (l *IAMComprehensiveCollectorLink) collectServicePrincipalDirectoryRoles(ac
 		}
 
 
-		// Process batch responses
+		// Process batch responses - MUST match by response ID, not array index!
+		// Microsoft Graph batch API does NOT guarantee response order matches request order.
+		// Build a map of SP index to SP data for O(1) lookup
+		spIndexMap := make(map[int]map[string]interface{})
 		for i, sp := range batchSPs {
 			spMap, ok := sp.(map[string]interface{})
 			if !ok {
 				continue
 			}
+			spIndexMap[i+1] = spMap // +1 because request IDs are 1-indexed
+		}
 
-			spID, ok := spMap["id"].(string)
+		for _, responseInterface := range responses {
+			response, ok := responseInterface.(map[string]interface{})
 			if !ok {
 				continue
 			}
 
-			if i >= len(responses) {
+			// Extract the response ID to match with the correct service principal
+			respIDStr, ok := response["id"].(string)
+			if !ok {
+				continue
+			}
+			respID, err := strconv.Atoi(respIDStr)
+			if err != nil {
+				l.Logger.Debug("Failed to parse response ID", "id", respIDStr, "error", err)
 				continue
 			}
 
-			responseInterface := responses[i]
-			response, ok := responseInterface.(map[string]interface{})
+			// Look up the service principal by the response ID
+			spMap, exists := spIndexMap[respID]
+			if !exists {
+				l.Logger.Debug("No service principal found for response ID", "id", respID)
+				continue
+			}
+
+			spID, ok := spMap["id"].(string)
 			if !ok {
 				continue
 			}
@@ -1870,7 +1909,6 @@ func (l *IAMComprehensiveCollectorLink) collectServicePrincipalDirectoryRoles(ac
 							if !ok {
 								continue
 							}
-
 
 							assignment := map[string]interface{}{
 								"roleId":         roleID,

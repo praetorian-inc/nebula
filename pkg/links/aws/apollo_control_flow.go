@@ -121,6 +121,14 @@ func (a *AwsApolloControlFlow) Process(resourceType string) error {
 		return err
 	}
 
+	// Send all GAAD principals as nodes BEFORE sending relationships
+	// This ensures all roles/users/groups have full properties from GAAD
+	// even if they only appear as relationship targets
+	err = a.sendGaadPrincipals()
+	if err != nil {
+		a.Logger.Error("Failed to send GAAD principals: " + err.Error())
+	}
+
 	analyzer := iam.NewGaadAnalyzer(a.pd)
 	summary, err := analyzer.AnalyzePrincipalPermissions()
 	if err != nil {
@@ -246,6 +254,56 @@ func (a *AwsApolloControlFlow) gatherGaadDetails() error {
 		return fmt.Errorf("failed to collect GAAD (GetAccountAuthorizationDetails) data - the IAM authorization details chain did not produce output")
 	}
 
+	return nil
+}
+
+// sendGaadPrincipals sends all GAAD principals (users, roles, groups) as graph nodes
+// This ensures that all principals have full properties from GAAD, even if they
+// only appear as relationship targets (e.g., roles that can be assumed but have no permissions)
+func (a *AwsApolloControlFlow) sendGaadPrincipals() error {
+	if a.pd == nil || a.pd.Gaad == nil {
+		return nil
+	}
+
+	var nodeCount int
+
+	// Send all roles from GAAD
+	for i := range a.pd.Gaad.RoleDetailList {
+		role := &a.pd.Gaad.RoleDetailList[i]
+		roleNode, err := TransformRoleDLToAWSResource(role)
+		if err != nil {
+			a.Logger.Error(fmt.Sprintf("Failed to transform role %s: %s", role.Arn, err.Error()))
+			continue
+		}
+		a.Send(roleNode)
+		nodeCount++
+	}
+
+	// Send all users from GAAD
+	for i := range a.pd.Gaad.UserDetailList {
+		user := &a.pd.Gaad.UserDetailList[i]
+		userNode, err := TransformUserDLToAWSResource(user)
+		if err != nil {
+			a.Logger.Error(fmt.Sprintf("Failed to transform user %s: %s", user.Arn, err.Error()))
+			continue
+		}
+		a.Send(userNode)
+		nodeCount++
+	}
+
+	// Send all groups from GAAD
+	for i := range a.pd.Gaad.GroupDetailList {
+		group := &a.pd.Gaad.GroupDetailList[i]
+		groupNode, err := TransformGroupDLToAWSResource(group)
+		if err != nil {
+			a.Logger.Error(fmt.Sprintf("Failed to transform group %s: %s", group.Arn, err.Error()))
+			continue
+		}
+		a.Send(groupNode)
+		nodeCount++
+	}
+
+	a.Logger.Info(fmt.Sprintf("Sent %d GAAD principal nodes (roles, users, groups)", nodeCount))
 	return nil
 }
 

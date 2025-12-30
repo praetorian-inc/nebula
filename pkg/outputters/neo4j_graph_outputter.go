@@ -155,6 +155,19 @@ func (o *Neo4jGraphOutputter) Complete() error {
 			graphRels[i] = o.tabullariumRelationshipToGraphRelationship(rel)
 		}
 
+		// DEBUG: Print first 3 relationships to see structure
+		debugLimit := 3
+		if len(graphRels) < debugLimit {
+			debugLimit = len(graphRels)
+		}
+		for i := 0; i < debugLimit; i++ {
+			r := graphRels[i]
+			slog.Info(fmt.Sprintf("DEBUG REL[%d]: Type=%s, StartNode.Labels=%v, StartNode.UniqueKey=%v, StartNode.Props=%v",
+				i, r.Type, r.StartNode.Labels, r.StartNode.UniqueKey, r.StartNode.Properties))
+			slog.Info(fmt.Sprintf("DEBUG REL[%d]: EndNode.Labels=%v, EndNode.UniqueKey=%v, EndNode.Props=%v",
+				i, r.EndNode.Labels, r.EndNode.UniqueKey, r.EndNode.Properties))
+		}
+
 		slog.Info(fmt.Sprintf("Creating %d relationships in Neo4j", len(graphRels)))
 		relResult, err := o.db.CreateRelationships(o.ctx, graphRels)
 		if err != nil {
@@ -333,9 +346,17 @@ func (o *Neo4jGraphOutputter) tabullariumRelationshipToGraphRelationship(rel mod
 	}
 
 	// Add specific properties based on relationship type
-	switch rel.(type) {
-	default:
-		// Default case for unknown relationship types
+	// Use interface to check for SSM relationship properties (avoids import cycle)
+	type ssmRelationship interface {
+		GetSSMDocumentRestrictions() []string
+		GetAllowsShellExecution() bool
+	}
+	if ssmRel, ok := rel.(ssmRelationship); ok {
+		// Add SSM-specific properties
+		if docs := ssmRel.GetSSMDocumentRestrictions(); len(docs) > 0 {
+			properties["ssmDocumentRestrictions"] = docs
+		}
+		properties["ssmAllowsShellExecution"] = ssmRel.GetAllowsShellExecution()
 	}
 
 	return &graph.Relationship{
@@ -349,6 +370,9 @@ func (o *Neo4jGraphOutputter) tabullariumRelationshipToGraphRelationship(rel mod
 // sanitizeNeo4jProperty converts complex types to Neo4j-compatible primitive types
 func sanitizeNeo4jProperty(value any) any {
 	switch v := value.(type) {
+	case []string:
+		// Handle string arrays - Neo4j supports these natively
+		return v
 	case []any:
 		// Handle arrays - recursively sanitize each element
 		sanitized := make([]any, len(v))

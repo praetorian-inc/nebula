@@ -121,6 +121,13 @@ func (a *AwsApolloControlFlow) Process(resourceType string) error {
 		return err
 	}
 
+	// Initialize ResourcePolicies map and populate with role trust policies
+	// This is required for the evaluator to check trust relationships for sts:AssumeRole
+	if a.pd.ResourcePolicies == nil {
+		a.pd.ResourcePolicies = make(map[string]*types.Policy)
+	}
+	a.pd.AddResourcePolicies()
+
 	// Send all GAAD principals as nodes BEFORE sending relationships
 	// This ensures all roles/users/groups have full properties from GAAD
 	// even if they only appear as relationship targets

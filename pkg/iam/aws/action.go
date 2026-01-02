@@ -55,6 +55,8 @@ var privEscActions = []string{
 	"iam:SetDefaultPolicyVersion",
 	"iam:UpdateAssumeRolePolicy",
 	"iam:UpdateLoginProfile",
+	"autoscaling:CreateAutoScalingGroup",
+	"autoscaling:CreateLaunchConfiguration",
 	"lambda:CreateEventSourceMapping",
 	"lambda:CreateFunction",
 	"lambda:InvokeFunction",

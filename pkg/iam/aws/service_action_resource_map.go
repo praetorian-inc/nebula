@@ -234,11 +234,12 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 	},
 	"ec2": {
 		ResourcePatterns: map[string]*regexp.Regexp{
-			"service":  regexp.MustCompile(`^ec2.amazonaws.com$`),
-			"instance": regexp.MustCompile(`^arn:aws:ec2:[a-z-0-9]+:\d{12}:instance/.*`),
-			"volume":   regexp.MustCompile(`^arn:aws:ec2:[a-z-0-9]+:\d{12}:volume/.*`),
-			"snapshot": regexp.MustCompile(`^arn:aws:ec2:[a-z-0-9]+:\d{12}:snapshot/.*`),
-			"image":    regexp.MustCompile(`^arn:aws:ec2:[a-z-0-9]+:\d{12}:image/.*`),
+			"service":         regexp.MustCompile(`^ec2.amazonaws.com$`),
+			"instance":        regexp.MustCompile(`^arn:aws:ec2:[a-z-0-9]+:\d{12}:instance/.*`),
+			"volume":          regexp.MustCompile(`^arn:aws:ec2:[a-z-0-9]+:\d{12}:volume/.*`),
+			"snapshot":        regexp.MustCompile(`^arn:aws:ec2:[a-z-0-9]+:\d{12}:snapshot/.*`),
+			"image":           regexp.MustCompile(`^arn:aws:ec2:[a-z-0-9]+:\d{12}:image/.*`),
+			"launch-template": regexp.MustCompile(`^arn:aws:ec2:[a-z-0-9]+:\d{12}:launch-template/.*`),
 		},
 		ActionResourceMap: map[string][]string{
 			"runinstances": {"service"},
@@ -375,6 +376,45 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 		ActionResourceMap: map[string][]string{
 			"createdevendpoint": {"service"},
 			"updatedevendpoint": {"devEndpoint"},
+		},
+	},
+	"codebuild": {
+		ResourcePatterns: map[string]*regexp.Regexp{
+			"project": regexp.MustCompile(`^arn:aws:codebuild:[a-z0-9-]+:\d{12}:project/.*$`),
+			"service": regexp.MustCompile(`^codebuild.amazonaws.com$`),
+		},
+		ActionResourceMap: map[string][]string{
+			"createproject":   {"service"},
+			"startbuild":      {"project", "service"},
+			"startbuildbatch": {"project", "service"},
+			"updateproject":   {"project", "service"},
+		},
+	},
+	"sagemaker": {
+		ResourcePatterns: map[string]*regexp.Regexp{
+			"notebook-instance": regexp.MustCompile(`^arn:aws:sagemaker:[a-z0-9-]+:\d{12}:notebook-instance/.*$`),
+			"training-job":      regexp.MustCompile(`^arn:aws:sagemaker:[a-z0-9-]+:\d{12}:training-job/.*$`),
+			"processing-job":    regexp.MustCompile(`^arn:aws:sagemaker:[a-z0-9-]+:\d{12}:processing-job/.*$`),
+			"service":           regexp.MustCompile(`^sagemaker.amazonaws.com$`),
+		},
+		ActionResourceMap: map[string][]string{
+			"createnotebookinstance":             {"service"},
+			"createpresignednotebookinstanceurl": {"notebook-instance", "service"},
+			"createtrainingjob":                  {"service"},
+			"createprocessingjob":                {"service"},
+			"createhyperparametertuningjob":      {"service"},
+		},
+	},
+	"autoscaling": {
+		ResourcePatterns: map[string]*regexp.Regexp{
+			"autoScalingGroup":    regexp.MustCompile(`^arn:aws:autoscaling:[a-z0-9-]+:\d{12}:autoScalingGroup:.*$`),
+			"launchTemplate":      regexp.MustCompile(`^arn:aws:ec2:[a-z0-9-]+:\d{12}:launch-template/.*$`),
+			"launchConfiguration": regexp.MustCompile(`^arn:aws:autoscaling:[a-z0-9-]+:\d{12}:launchConfiguration:.*$`),
+			"service":             regexp.MustCompile(`^autoscaling.amazonaws.com$`),
+		},
+		ActionResourceMap: map[string][]string{
+			"createautoscalinggroup":    {"service", "launchTemplate"},
+			"createlaunchconfiguration": {"service"},
 		},
 	},
 }

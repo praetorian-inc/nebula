@@ -135,12 +135,11 @@ func (o *Neo4jGraphOutputter) Complete() error {
 			graphNodes[i] = o.tabullariumNodeToGraphNode(node)
 		}
 
-		slog.Info(fmt.Sprintf("Creating %d nodes in Neo4j", len(graphNodes)))
 		nodeResult, err := o.db.CreateNodes(o.ctx, graphNodes)
 		if err != nil {
 			return fmt.Errorf("failed to create nodes: %w", err)
 		}
-		slog.Info(fmt.Sprintf("Nodes created: %d, updated: %d", nodeResult.NodesCreated, nodeResult.NodesUpdated))
+		message.Success("Neo4j: %d nodes created, %d nodes updated", nodeResult.NodesCreated, nodeResult.NodesUpdated)
 		if len(nodeResult.Errors) > 0 {
 			for _, err := range nodeResult.Errors {
 				slog.Error(fmt.Sprintf("Node creation error: %s", err.Error()))
@@ -168,12 +167,11 @@ func (o *Neo4jGraphOutputter) Complete() error {
 				i, r.EndNode.Labels, r.EndNode.UniqueKey, r.EndNode.Properties))
 		}
 
-		slog.Info(fmt.Sprintf("Creating %d relationships in Neo4j", len(graphRels)))
 		relResult, err := o.db.CreateRelationships(o.ctx, graphRels)
 		if err != nil {
 			return fmt.Errorf("failed to create relationships: %w", err)
 		}
-		slog.Info(fmt.Sprintf("Relationships created: %d, updated: %d", relResult.RelationshipsCreated, relResult.RelationshipsUpdated))
+		message.Success("Neo4j: %d relationships created, %d relationships updated", relResult.RelationshipsCreated, relResult.RelationshipsUpdated)
 		if len(relResult.Errors) > 0 {
 			for _, err := range relResult.Errors {
 				slog.Error(fmt.Sprintf("Relationship creation error: %s", err.Error()))

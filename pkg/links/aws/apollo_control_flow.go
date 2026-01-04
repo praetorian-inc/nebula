@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -8,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws/arn"
+	"github.com/aws/aws-sdk-go-v2/service/codebuild"
+	"github.com/aws/aws-sdk-go-v2/service/sagemaker"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	iam "github.com/praetorian-inc/nebula/pkg/iam/aws"
@@ -34,6 +37,8 @@ func (a *AwsApolloControlFlow) SupportedResourceTypes() []model.CloudResourceTyp
 		model.AWSLambdaFunction,
 		model.AWSEC2Instance,
 		model.AWSCloudFormationStack,
+		model.CloudResourceType("AWS::CodeBuild::Project"),
+		model.CloudResourceType("AWS::SageMaker::NotebookInstance"),
 	}
 }
 
@@ -109,6 +114,20 @@ func (a *AwsApolloControlFlow) Process(resourceType string) error {
 	err := a.gatherResources(resourceType)
 	if err != nil {
 		return err
+	}
+
+	// Gather CodeBuild projects (not supported by CloudControl)
+	err = a.gatherCodeBuildProjects()
+	if err != nil {
+		a.Logger.Error("Failed to gather CodeBuild projects: " + err.Error())
+		// Don't return error - continue with other resources
+	}
+
+	// Gather SageMaker notebook instances (not supported by CloudControl)
+	err = a.gatherSageMakerNotebookInstances()
+	if err != nil {
+		a.Logger.Error("Failed to gather SageMaker notebook instances: " + err.Error())
+		// Don't return error - continue with other resources
 	}
 
 	err = a.gatherResourcePolicies()
@@ -252,6 +271,254 @@ func (a *AwsApolloControlFlow) gatherGaadDetails() error {
 
 	if a.pd.Gaad == nil {
 		return fmt.Errorf("failed to collect GAAD (GetAccountAuthorizationDetails) data - the IAM authorization details chain did not produce output")
+	}
+
+	return nil
+}
+
+// gatherCodeBuildProjects fetches CodeBuild projects from all regions
+// CodeBuild is not supported by CloudControl, so we use the CodeBuild API directly
+func (a *AwsApolloControlFlow) gatherCodeBuildProjects() error {
+	var totalProjects int
+
+	for _, region := range a.Regions {
+		config, err := a.GetConfigWithRuntimeArgs(region)
+		if err != nil {
+			a.Logger.Error(fmt.Sprintf("Failed to get AWS config for region %s: %s", region, err.Error()))
+			continue
+		}
+
+		client := codebuild.NewFromConfig(config)
+
+		// List all project names
+		var projectNames []string
+		var nextToken *string
+
+		for {
+			listInput := &codebuild.ListProjectsInput{
+				NextToken: nextToken,
+			}
+
+			listOutput, err := client.ListProjects(context.TODO(), listInput)
+			if err != nil {
+				a.Logger.Debug(fmt.Sprintf("Failed to list CodeBuild projects in region %s: %s", region, err.Error()))
+				break
+			}
+
+			projectNames = append(projectNames, listOutput.Projects...)
+
+			if listOutput.NextToken == nil {
+				break
+			}
+			nextToken = listOutput.NextToken
+		}
+
+		if len(projectNames) == 0 {
+			continue
+		}
+
+		// Batch get project details (max 100 per request)
+		for i := 0; i < len(projectNames); i += 100 {
+			end := i + 100
+			if end > len(projectNames) {
+				end = len(projectNames)
+			}
+			batch := projectNames[i:end]
+
+			batchInput := &codebuild.BatchGetProjectsInput{
+				Names: batch,
+			}
+
+			batchOutput, err := client.BatchGetProjects(context.TODO(), batchInput)
+			if err != nil {
+				a.Logger.Error(fmt.Sprintf("Failed to get CodeBuild project details in region %s: %s", region, err.Error()))
+				continue
+			}
+
+			for _, project := range batchOutput.Projects {
+				if project.Name == nil || project.Arn == nil {
+					continue
+				}
+
+				// Parse the ARN to get account ID
+				parsedArn, err := arn.Parse(*project.Arn)
+				if err != nil {
+					a.Logger.Error(fmt.Sprintf("Failed to parse CodeBuild project ARN %s: %s", *project.Arn, err.Error()))
+					continue
+				}
+
+				// Build properties map
+				properties := map[string]any{
+					"Name": *project.Name,
+					"Arn":  *project.Arn,
+				}
+
+				if project.ServiceRole != nil {
+					properties["Role"] = *project.ServiceRole
+				}
+
+				if project.Description != nil {
+					properties["Description"] = *project.Description
+				}
+
+				if project.Source != nil {
+					sourceProps := map[string]any{}
+					if project.Source.Type != "" {
+						sourceProps["Type"] = string(project.Source.Type)
+					}
+					if project.Source.Location != nil {
+						sourceProps["Location"] = *project.Source.Location
+					}
+					properties["Source"] = sourceProps
+				}
+
+				if project.Environment != nil {
+					envProps := map[string]any{}
+					if project.Environment.ComputeType != "" {
+						envProps["ComputeType"] = string(project.Environment.ComputeType)
+					}
+					if project.Environment.Image != nil {
+						envProps["Image"] = *project.Environment.Image
+					}
+					if project.Environment.PrivilegedMode != nil {
+						envProps["PrivilegedMode"] = *project.Environment.PrivilegedMode
+					}
+					properties["Environment"] = envProps
+				}
+
+				// Convert properties to JSON string (to match CloudControl format)
+				propsJSON, err := json.Marshal(properties)
+				if err != nil {
+					a.Logger.Error(fmt.Sprintf("Failed to marshal CodeBuild project properties: %s", err.Error()))
+					continue
+				}
+
+				// Create EnrichedResourceDescription
+				erd := types.NewEnrichedResourceDescription(
+					*project.Arn, // Use ARN as identifier for CodeBuild
+					"AWS::CodeBuild::Project",
+					region,
+					parsedArn.AccountID,
+					string(propsJSON),
+				)
+
+				*a.pd.Resources = append(*a.pd.Resources, erd)
+				totalProjects++
+			}
+		}
+	}
+
+	if totalProjects > 0 {
+		a.Logger.Info(fmt.Sprintf("Gathered %d CodeBuild projects", totalProjects))
+	}
+
+	return nil
+}
+
+// gatherSageMakerNotebookInstances fetches SageMaker notebook instances from all regions
+// SageMaker notebook instances are not supported by CloudControl, so we use the SageMaker API directly
+func (a *AwsApolloControlFlow) gatherSageMakerNotebookInstances() error {
+	var totalInstances int
+
+	for _, region := range a.Regions {
+		config, err := a.GetConfigWithRuntimeArgs(region)
+		if err != nil {
+			a.Logger.Error(fmt.Sprintf("Failed to get AWS config for region %s: %s", region, err.Error()))
+			continue
+		}
+
+		client := sagemaker.NewFromConfig(config)
+
+		// List all notebook instances with pagination
+		var nextToken *string
+
+		for {
+			listInput := &sagemaker.ListNotebookInstancesInput{
+				NextToken: nextToken,
+			}
+
+			listOutput, err := client.ListNotebookInstances(context.TODO(), listInput)
+			if err != nil {
+				a.Logger.Debug(fmt.Sprintf("Failed to list SageMaker notebook instances in region %s: %s", region, err.Error()))
+				break
+			}
+
+			for _, instance := range listOutput.NotebookInstances {
+				if instance.NotebookInstanceName == nil || instance.NotebookInstanceArn == nil {
+					continue
+				}
+
+				// Parse the ARN to get account ID
+				parsedArn, err := arn.Parse(*instance.NotebookInstanceArn)
+				if err != nil {
+					a.Logger.Error(fmt.Sprintf("Failed to parse SageMaker notebook instance ARN %s: %s", *instance.NotebookInstanceArn, err.Error()))
+					continue
+				}
+
+				// Build properties map
+				properties := map[string]any{
+					"NotebookInstanceName": *instance.NotebookInstanceName,
+					"Arn":                  *instance.NotebookInstanceArn,
+				}
+
+				// Get the role ARN - need to call DescribeNotebookInstance for full details
+				descInput := &sagemaker.DescribeNotebookInstanceInput{
+					NotebookInstanceName: instance.NotebookInstanceName,
+				}
+
+				descOutput, err := client.DescribeNotebookInstance(context.TODO(), descInput)
+				if err != nil {
+					a.Logger.Debug(fmt.Sprintf("Failed to describe SageMaker notebook instance %s: %s", *instance.NotebookInstanceName, err.Error()))
+				} else {
+					if descOutput.RoleArn != nil {
+						properties["Role"] = *descOutput.RoleArn
+					}
+					if descOutput.InstanceType != "" {
+						properties["InstanceType"] = string(descOutput.InstanceType)
+					}
+					if descOutput.NotebookInstanceStatus != "" {
+						properties["Status"] = string(descOutput.NotebookInstanceStatus)
+					}
+					if descOutput.Url != nil {
+						properties["Url"] = *descOutput.Url
+					}
+					if descOutput.DirectInternetAccess != "" {
+						properties["DirectInternetAccess"] = string(descOutput.DirectInternetAccess)
+					}
+					if descOutput.RootAccess != "" {
+						properties["RootAccess"] = string(descOutput.RootAccess)
+					}
+				}
+
+				// Convert properties to JSON string (to match CloudControl format)
+				propsJSON, err := json.Marshal(properties)
+				if err != nil {
+					a.Logger.Error(fmt.Sprintf("Failed to marshal SageMaker notebook instance properties: %s", err.Error()))
+					continue
+				}
+
+				// Create EnrichedResourceDescription
+				erd := types.NewEnrichedResourceDescription(
+					*instance.NotebookInstanceArn, // Use ARN as identifier
+					"AWS::SageMaker::NotebookInstance",
+					region,
+					parsedArn.AccountID,
+					string(propsJSON),
+				)
+
+				*a.pd.Resources = append(*a.pd.Resources, erd)
+				totalInstances++
+			}
+
+			if listOutput.NextToken == nil {
+				break
+			}
+			nextToken = listOutput.NextToken
+		}
+	}
+
+	if totalInstances > 0 {
+		a.Logger.Info(fmt.Sprintf("Gathered %d SageMaker notebook instances", totalInstances))
 	}
 
 	return nil

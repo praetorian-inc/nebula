@@ -35,6 +35,7 @@ var privEscActions = []string{
 	"codebuild:UpdateProject",
 	"codestar:AssociateTeamMember",
 	"codestar:CreateProject",
+	"ec2:CreateLaunchTemplate",
 	"ec2:RunInstances",
 	"ecs:RunTask",
 	"glue:CreateDevEndpoint",

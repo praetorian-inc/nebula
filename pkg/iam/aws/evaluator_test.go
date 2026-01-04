@@ -1355,6 +1355,190 @@ func TestHasExplicitPrincipalAllow(t *testing.T) {
 	}
 }
 
+// TestPolicyEvaluator_SameAccountAssumeRole_TrustPolicyValidation tests that same-account
+// sts:AssumeRole requests require BOTH:
+// 1. Source role has sts:AssumeRole permission in identity policy
+// 2. Target role's trust policy explicitly allows the source role
+//
+// This is a regression test for the bug where same-account AssumeRole edges were created
+// even when the target role's trust policy did not allow the source role.
+func TestPolicyEvaluator_SameAccountAssumeRole_TrustPolicyValidation(t *testing.T) {
+	accountID := "460568892256"
+	sourceRoleArn := "arn:aws:iam::" + accountID + ":role/attacker-role"
+	targetRoleArn := "arn:aws:iam::" + accountID + ":role/restricted-role"
+	allowedRoleArn := "arn:aws:iam::" + accountID + ":role/allowed-role"
+
+	// Source role's identity policy - allows sts:AssumeRole on any role
+	identityStatements := &types.PolicyStatementList{
+		{
+			Effect:   "Allow",
+			Action:   types.NewDynaString([]string{"sts:AssumeRole"}),
+			Resource: types.NewDynaString([]string{"arn:aws:iam::" + accountID + ":role/*"}),
+		},
+	}
+
+	// Target role's trust policy - only allows a specific role, NOT the source role
+	targetTrustPolicy := &types.Policy{
+		Version: "2012-10-17",
+		Statement: &types.PolicyStatementList{
+			{
+				Effect: "Allow",
+				Principal: &types.Principal{
+					AWS: types.NewDynaString([]string{allowedRoleArn}), // Only allows allowedRole, not attacker-role
+				},
+				Action:   types.NewDynaString([]string{"sts:AssumeRole"}),
+				Resource: types.NewDynaString([]string{targetRoleArn}),
+			},
+		},
+	}
+
+	// Create PolicyData with the trust policy in ResourcePolicies (as done in AddResourcePolicies)
+	policyData := &PolicyData{
+		ResourcePolicies: map[string]*types.Policy{
+			targetRoleArn: targetTrustPolicy,
+		},
+	}
+
+	evaluator := NewPolicyEvaluator(policyData)
+
+	tests := []struct {
+		name         string
+		principalArn string
+		wantAllowed  bool
+		description  string
+	}{
+		{
+			name:         "Source role NOT in trust policy - should be DENIED",
+			principalArn: sourceRoleArn,
+			wantAllowed:  false,
+			description:  "Source role has sts:AssumeRole permission but target's trust policy does not allow it",
+		},
+		{
+			name:         "Allowed role in trust policy - should be ALLOWED",
+			principalArn: allowedRoleArn,
+			wantAllowed:  true,
+			description:  "Allowed role has both sts:AssumeRole permission AND is in target's trust policy",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := createRequestContext(tt.principalArn)
+			ctx.PrincipalAccount = accountID
+			ctx.PopulateDefaultRequestConditionKeys(targetRoleArn)
+
+			req := &EvaluationRequest{
+				Action:             "sts:AssumeRole",
+				Resource:           targetRoleArn,
+				Context:            ctx,
+				IdentityStatements: identityStatements,
+			}
+
+			result, err := evaluator.Evaluate(req)
+			assert.NoError(t, err)
+
+			t.Logf("Test: %s", tt.name)
+			t.Logf("Description: %s", tt.description)
+			t.Logf("Principal: %s", tt.principalArn)
+			t.Logf("Target: %s", targetRoleArn)
+			t.Logf("Expected Allowed: %v, Got: %v", tt.wantAllowed, result.Allowed)
+			t.Logf("CrossAccountAccess: %v", result.CrossAccountAccess)
+			t.Logf("EvaluationDetails: %s", result.EvaluationDetails)
+			t.Logf("PolicyResult: %+v", result.PolicyResult)
+
+			assert.Equal(t, tt.wantAllowed, result.Allowed,
+				"For same-account AssumeRole, access should only be allowed when BOTH "+
+					"identity policy grants sts:AssumeRole AND trust policy allows the principal")
+		})
+	}
+}
+
+// TestPolicyEvaluator_CrossAccountAssumeRole_TrustPolicyValidation verifies that
+// cross-account AssumeRole correctly requires both identity and trust policy allows.
+// This test should pass (cross-account logic is correct).
+func TestPolicyEvaluator_CrossAccountAssumeRole_TrustPolicyValidation(t *testing.T) {
+	sourceAccountID := "111122223333"
+	targetAccountID := "999988887777"
+	sourceRoleArn := "arn:aws:iam::" + sourceAccountID + ":role/cross-account-attacker"
+	targetRoleArn := "arn:aws:iam::" + targetAccountID + ":role/target-role"
+	allowedRoleArn := "arn:aws:iam::" + sourceAccountID + ":role/allowed-cross-account"
+
+	// Source role's identity policy - allows sts:AssumeRole on any role
+	identityStatements := &types.PolicyStatementList{
+		{
+			Effect:   "Allow",
+			Action:   types.NewDynaString([]string{"sts:AssumeRole"}),
+			Resource: types.NewDynaString([]string{"*"}),
+		},
+	}
+
+	// Target role's trust policy - only allows a specific cross-account role
+	targetTrustPolicy := &types.Policy{
+		Version: "2012-10-17",
+		Statement: &types.PolicyStatementList{
+			{
+				Effect: "Allow",
+				Principal: &types.Principal{
+					AWS: types.NewDynaString([]string{allowedRoleArn}),
+				},
+				Action:   types.NewDynaString([]string{"sts:AssumeRole"}),
+				Resource: types.NewDynaString([]string{targetRoleArn}),
+			},
+		},
+	}
+
+	policyData := &PolicyData{
+		ResourcePolicies: map[string]*types.Policy{
+			targetRoleArn: targetTrustPolicy,
+		},
+	}
+
+	evaluator := NewPolicyEvaluator(policyData)
+
+	tests := []struct {
+		name         string
+		principalArn string
+		wantAllowed  bool
+	}{
+		{
+			name:         "Cross-account source NOT in trust policy - should be DENIED",
+			principalArn: sourceRoleArn,
+			wantAllowed:  false,
+		},
+		{
+			name:         "Cross-account allowed role - should be ALLOWED",
+			principalArn: allowedRoleArn,
+			wantAllowed:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := createRequestContext(tt.principalArn)
+			ctx.PrincipalAccount = sourceAccountID
+			ctx.PopulateDefaultRequestConditionKeys(targetRoleArn)
+
+			req := &EvaluationRequest{
+				Action:             "sts:AssumeRole",
+				Resource:           targetRoleArn,
+				Context:            ctx,
+				IdentityStatements: identityStatements,
+			}
+
+			result, err := evaluator.Evaluate(req)
+			assert.NoError(t, err)
+
+			t.Logf("Test: %s", tt.name)
+			t.Logf("Principal: %s -> Target: %s", tt.principalArn, targetRoleArn)
+			t.Logf("CrossAccountAccess: %v", result.CrossAccountAccess)
+			t.Logf("Expected: %v, Got: %v", tt.wantAllowed, result.Allowed)
+
+			assert.True(t, result.CrossAccountAccess, "Should be detected as cross-account")
+			assert.Equal(t, tt.wantAllowed, result.Allowed)
+		})
+	}
+}
+
 func TestPolicyEvaluator_SSMDocumentRestrictions(t *testing.T) {
 	tests := []struct {
 		name                      string

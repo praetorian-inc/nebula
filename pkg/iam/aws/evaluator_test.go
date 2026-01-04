@@ -856,21 +856,27 @@ func TestPolicyEvaluator_SCPRegionGuardRails(t *testing.T) {
 }
 
 func TestPolicyEvaluator_AssumeRolePolicyDocument(t *testing.T) {
-	// Define the assume role trust document
-	assumeRolePolicy := &types.PolicyStatementList{
-		{
-			Effect: "Allow",
-			Principal: &types.Principal{
-				AWS: types.NewDynaString([]string{
-					"arn:aws:iam::111122223333:root",
-					"arn:aws:iam::123456789012:role/cross-account",
-				}),
-				Service: types.NewDynaString([]string{"glue.amazonaws.com"}),
+	targetRoleArn := "arn:aws:iam::111122223333:role/role-name"
+
+	// Define the assume role trust policy - this should be in ResourcePolicies
+	// (as it would be via AddResourcePolicies in real usage)
+	trustPolicy := &types.Policy{
+		Version: "2012-10-17",
+		Statement: &types.PolicyStatementList{
+			{
+				Effect: "Allow",
+				Principal: &types.Principal{
+					AWS: types.NewDynaString([]string{
+						"arn:aws:iam::111122223333:root",
+						"arn:aws:iam::123456789012:role/cross-account",
+					}),
+					Service: types.NewDynaString([]string{"glue.amazonaws.com"}),
+				},
+				Action:    types.NewDynaString([]string{"sts:AssumeRole"}),
+				Condition: &types.Condition{},
+				OriginArn: "arn:aws:iam::111122223333:role/role-name/assume-role-policy",
+				Resource:  types.NewDynaString([]string{targetRoleArn}),
 			},
-			Action:    types.NewDynaString([]string{"sts:AssumeRole"}),
-			Condition: &types.Condition{},
-			OriginArn: "arn:aws:iam::111122223333:role/role-name/assume-role-policy",
-			Resource:  types.NewDynaString([]string{"arn:aws:iam::111122223333:role/role-name"}), // we need to inject this into the ARPD
 		},
 	}
 
@@ -882,7 +888,14 @@ func TestPolicyEvaluator_AssumeRolePolicyDocument(t *testing.T) {
 		},
 	}
 
-	evaluator := NewPolicyEvaluator(&PolicyData{})
+	// Trust policy must be in ResourcePolicies for proper AssumeRole evaluation
+	policyData := &PolicyData{
+		ResourcePolicies: map[string]*types.Policy{
+			targetRoleArn: trustPolicy,
+		},
+	}
+
+	evaluator := NewPolicyEvaluator(policyData)
 
 	tests := []struct {
 		name             string
@@ -893,34 +906,34 @@ func TestPolicyEvaluator_AssumeRolePolicyDocument(t *testing.T) {
 		wantExplicitDeny bool
 	}{
 		{
-			name:             "Allowed role",
+			name:             "Allowed role - same account via :root",
 			principalArn:     "arn:aws:iam::111122223333:user/test-user",
 			action:           "sts:AssumeRole",
-			resource:         "arn:aws:iam::111122223333:role/role-name",
+			resource:         targetRoleArn,
 			wantAllowed:      true,
 			wantExplicitDeny: false,
 		},
 		{
-			name:             "Denied different account",
+			name:             "Denied different account - not in trust policy",
 			principalArn:     "arn:aws:iam::111122223334:user/some-other-user",
 			action:           "sts:AssumeRole",
-			resource:         "arn:aws:iam::111122223333:role/role-name",
+			resource:         targetRoleArn,
 			wantAllowed:      false,
-			wantExplicitDeny: true,
+			wantExplicitDeny: false, // Not explicit deny, just not allowed
 		},
 		{
-			name:             "Allowed cross-account role",
+			name:             "Allowed cross-account role - explicitly in trust policy",
 			principalArn:     "arn:aws:iam::123456789012:role/cross-account",
 			action:           "sts:AssumeRole",
-			resource:         "arn:aws:iam::111122223333:role/role-name",
+			resource:         targetRoleArn,
 			wantAllowed:      true,
 			wantExplicitDeny: false,
 		},
 		{
-			name:             "Service",
+			name:             "Service principal - in trust policy",
 			principalArn:     "glue.amazonaws.com",
 			action:           "sts:AssumeRole",
-			resource:         "arn:aws:iam::111122223333:role/role-name",
+			resource:         targetRoleArn,
 			wantAllowed:      true,
 			wantExplicitDeny: false,
 		},
@@ -928,12 +941,14 @@ func TestPolicyEvaluator_AssumeRolePolicyDocument(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			ctx := createRequestContext(tt.principalArn)
+			ctx.PopulateDefaultRequestConditionKeys(tt.resource)
+
 			req := &EvaluationRequest{
 				Action:             tt.action,
 				Resource:           tt.resource,
-				Context:            createRequestContext(tt.principalArn),
+				Context:            ctx,
 				IdentityStatements: identity,
-				BoundaryStatements: assumeRolePolicy,
 			}
 
 			result, err := evaluator.Evaluate(req)

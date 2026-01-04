@@ -431,12 +431,25 @@ func (e *PolicyEvaluator) Evaluate(req *EvaluationRequest) (*EvaluationResult, e
 			result.EvaluationDetails = "Cross-account access"
 		}
 	} else {
-		// Same account access allows if:
-		// - Principal is explicitly named in resource policy, OR
-		// - Either identity or resource policy allows (when not explicitly named)
-		result.Allowed = explicitPrincipalAllow && result.PolicyResult.hasTypeAllow(EvalTypeResource) ||
-			result.PolicyResult.hasTypeAllow(EvalTypeIdentity)
-		result.EvaluationDetails = "Same-account access"
+		// Same account access
+		if isAssumeRoleOperation {
+			// Special case: AssumeRole ALWAYS requires BOTH:
+			// 1. Identity policy grants sts:AssumeRole permission
+			// 2. Target role's trust policy allows the principal (resourceAllowed)
+			// This is different from other resources where same-account access
+			// can be granted by either identity OR resource policy alone.
+			// Note: resourceAllowed already includes principal matching since
+			// evaluateStatement() only sets ExplicitAllow when principal matches.
+			result.Allowed = result.PolicyResult.hasTypeAllow(EvalTypeIdentity) && resourceAllowed
+			result.EvaluationDetails = "Same-account assume role access"
+		} else {
+			// Normal same-account access allows if:
+			// - Principal is explicitly named in resource policy, OR
+			// - Either identity or resource policy allows (when not explicitly named)
+			result.Allowed = explicitPrincipalAllow && result.PolicyResult.hasTypeAllow(EvalTypeResource) ||
+				result.PolicyResult.hasTypeAllow(EvalTypeIdentity)
+			result.EvaluationDetails = "Same-account access"
+		}
 	}
 
 	// Extract SSM document restrictions for relevant actions

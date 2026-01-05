@@ -1468,6 +1468,195 @@ func TestPolicyEvaluator_SameAccountAssumeRole_TrustPolicyValidation(t *testing.
 	}
 }
 
+// TestPolicyEvaluator_SameAccountAssumeRole_WithGaadFlow tests the real GAAD flow
+// where trust policies are populated via NewPolicyData -> AddResourcePolicies
+func TestPolicyEvaluator_SameAccountAssumeRole_WithGaadFlow(t *testing.T) {
+	accountID := "460568892256"
+	attackerRoleArn := "arn:aws:iam::" + accountID + ":role/privesc-method24-sts-assumerole-attacker-55gvbw"
+	restrictedRoleArn := "arn:aws:iam::" + accountID + ":role/privesc-method24-test-restricted-role-55gvbw"
+	decoyRoleArn := "arn:aws:iam::" + accountID + ":role/privesc-method24-decoy-trusted-role-55gvbw"
+	assumableAdminRoleArn := "arn:aws:iam::" + accountID + ":role/privesc-shared-assumable-admin-role-55gvbw"
+
+	// Create a GAAD with the real structure
+	gaad := &types.Gaad{
+		RoleDetailList: []types.RoleDL{
+			{
+				Arn:      attackerRoleArn,
+				RoleName: "privesc-method24-sts-assumerole-attacker-55gvbw",
+				AssumeRolePolicyDocument: types.Policy{
+					Version: "2012-10-17",
+					Statement: &types.PolicyStatementList{
+						{
+							Effect: "Allow",
+							Principal: &types.Principal{
+								AWS: types.NewDynaString([]string{"arn:aws:iam::" + accountID + ":user/weili-sandbox"}),
+							},
+							Action: types.NewDynaString([]string{"sts:AssumeRole"}),
+						},
+					},
+				},
+				RolePolicyList: []types.PrincipalPL{
+					{
+						PolicyName: "privesc-method24-assumerole-policy",
+						PolicyDocument: types.Policy{
+							Version: "2012-10-17",
+							Statement: &types.PolicyStatementList{
+								{
+									Effect:   "Allow",
+									Action:   types.NewDynaString([]string{"sts:AssumeRole"}),
+									Resource: types.NewDynaString([]string{assumableAdminRoleArn, restrictedRoleArn}),
+								},
+							},
+						},
+					},
+				},
+			},
+			{
+				Arn:      restrictedRoleArn,
+				RoleName: "privesc-method24-test-restricted-role-55gvbw",
+				AssumeRolePolicyDocument: types.Policy{
+					Version: "2012-10-17",
+					Statement: &types.PolicyStatementList{
+						{
+							Effect: "Allow",
+							Principal: &types.Principal{
+								// ONLY allows decoy role, NOT attacker role
+								AWS: types.NewDynaString([]string{decoyRoleArn}),
+							},
+							Action: types.NewDynaString([]string{"sts:AssumeRole"}),
+						},
+					},
+				},
+			},
+			{
+				Arn:      assumableAdminRoleArn,
+				RoleName: "privesc-shared-assumable-admin-role-55gvbw",
+				AssumeRolePolicyDocument: types.Policy{
+					Version: "2012-10-17",
+					Statement: &types.PolicyStatementList{
+						{
+							Effect: "Allow",
+							Principal: &types.Principal{
+								// Allows anyone in the account via :root
+								AWS: types.NewDynaString([]string{"arn:aws:iam::" + accountID + ":root"}),
+							},
+							Action: types.NewDynaString([]string{"sts:AssumeRole"}),
+						},
+					},
+				},
+			},
+			{
+				Arn:      decoyRoleArn,
+				RoleName: "privesc-method24-decoy-trusted-role-55gvbw",
+				AssumeRolePolicyDocument: types.Policy{
+					Version: "2012-10-17",
+					Statement: &types.PolicyStatementList{
+						{
+							Effect: "Allow",
+							Principal: &types.Principal{
+								AWS: types.NewDynaString([]string{"arn:aws:iam::" + accountID + ":root"}),
+							},
+							Action: types.NewDynaString([]string{"sts:AssumeRole"}),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Use NewPolicyData which calls AddResourcePolicies() - this is the real flow
+	policyData := NewPolicyData(gaad, nil, nil, nil)
+
+	// Log the resource policies to debug
+	t.Logf("ResourcePolicies count: %d", len(policyData.ResourcePolicies))
+	for arn, policy := range policyData.ResourcePolicies {
+		policyJSON, _ := json.MarshalIndent(policy, "", "  ")
+		t.Logf("ResourcePolicy for %s: %s", arn, string(policyJSON))
+	}
+
+	evaluator := NewPolicyEvaluator(policyData)
+
+	// Extract identity statements from the attacker role using the same method as production
+	// (processRolePermissions in gaad_analyzer.go)
+	attackerRole := gaad.RoleDetailList[0] // First role is the attacker
+	identityStatements := types.PolicyStatementList{}
+
+	// Add inline policies (from RolePolicyList)
+	for _, policy := range attackerRole.RolePolicyList {
+		if policy.PolicyDocument.Statement != nil {
+			// Decorate with origin ARN like production does
+			for i := range *policy.PolicyDocument.Statement {
+				(*policy.PolicyDocument.Statement)[i].OriginArn = attackerRole.Arn
+			}
+			identityStatements = append(identityStatements, *policy.PolicyDocument.Statement...)
+		}
+	}
+
+	// Add managed policies (would use getRoleAttachedManagedPolicies in production)
+	// For this test, attacker has no managed policies
+	t.Logf("Identity statements extracted from role: %d", len(identityStatements))
+
+	tests := []struct {
+		name        string
+		targetRole  string
+		wantAllowed bool
+		description string
+	}{
+		{
+			name:        "Attacker -> assumable-admin (trust has :root) - should be ALLOWED",
+			targetRole:  assumableAdminRoleArn,
+			wantAllowed: true,
+			description: "Trust policy has :root which matches any principal in the account",
+		},
+		{
+			name:        "Attacker -> restricted-role (trust only allows decoy) - should be DENIED",
+			targetRole:  restrictedRoleArn,
+			wantAllowed: false,
+			description: "Trust policy only allows decoy role, not attacker role",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := createRequestContext(attackerRoleArn)
+			ctx.PrincipalAccount = accountID
+			ctx.PopulateDefaultRequestConditionKeys(tt.targetRole)
+
+			req := &EvaluationRequest{
+				Action:             "sts:AssumeRole",
+				Resource:           tt.targetRole,
+				Context:            ctx,
+				IdentityStatements: &identityStatements,
+			}
+
+			result, err := evaluator.Evaluate(req)
+			assert.NoError(t, err)
+
+			t.Logf("Test: %s", tt.name)
+			t.Logf("Description: %s", tt.description)
+			t.Logf("Principal: %s", attackerRoleArn)
+			t.Logf("Target: %s", tt.targetRole)
+			t.Logf("Expected Allowed: %v, Got: %v", tt.wantAllowed, result.Allowed)
+			t.Logf("CrossAccountAccess: %v", result.CrossAccountAccess)
+			t.Logf("EvaluationDetails: %s", result.EvaluationDetails)
+
+			// Log detailed policy result
+			if result.PolicyResult != nil {
+				for evalType, evals := range result.PolicyResult.Evaluations {
+					for i, eval := range evals {
+						t.Logf("%s[%d]: ExplicitAllow=%v, ExplicitDeny=%v, ImplicitDeny=%v, MatchedPrincipal=%v, MatchedAction=%v, MatchedResource=%v",
+							evalType, i, eval.ExplicitAllow, eval.ExplicitDeny, eval.ImplicitDeny,
+							eval.MatchedPrincipal, eval.MatchedAction, eval.MatchedResource)
+					}
+				}
+			}
+
+			assert.Equal(t, tt.wantAllowed, result.Allowed,
+				"For %s: %s", tt.name, tt.description)
+		})
+	}
+}
+
 // TestPolicyEvaluator_CrossAccountAssumeRole_TrustPolicyValidation verifies that
 // cross-account AssumeRole correctly requires both identity and trust policy allows.
 // This test should pass (cross-account logic is correct).

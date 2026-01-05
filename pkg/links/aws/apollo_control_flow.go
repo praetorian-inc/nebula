@@ -60,10 +60,11 @@ func (a *AwsApolloControlFlow) Initialize() error {
 	if err := a.AwsReconLink.Initialize(); err != nil {
 		return err
 	}
-	// Initialize PolicyData with an empty slice of resources
+	// Initialize PolicyData with an empty slice of resources and ResourcePolicies map
 	resources := make([]types.EnrichedResourceDescription, 0)
 	a.pd = &iam.PolicyData{
-		Resources: &resources,
+		Resources:        &resources,
+		ResourcePolicies: make(map[string]*types.Policy),
 	}
 	a.loadOrgPolicies()
 
@@ -147,6 +148,10 @@ func (a *AwsApolloControlFlow) Process(resourceType string) error {
 	if err != nil {
 		a.Logger.Error("Failed to send GAAD principals: " + err.Error())
 	}
+
+	// Add resource policies (trust policies) from GAAD roles
+	// This must be called after GAAD is loaded to populate ResourcePolicies map
+	a.pd.AddResourcePolicies()
 
 	analyzer := iam.NewGaadAnalyzer(a.pd)
 	summary, err := analyzer.AnalyzePrincipalPermissions()

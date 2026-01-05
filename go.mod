@@ -62,7 +62,7 @@ require (
 	github.com/microsoftgraph/msgraph-sdk-go-core v1.2.1
 	github.com/mpvl/unique v0.0.0-20150818121801-cbe035fff7de
 	github.com/praetorian-inc/janus-framework v0.0.0-20250918211123-5f90adc9184b
-	github.com/praetorian-inc/konstellation v0.0.0-20260104022942-b25c605d53df
+	github.com/praetorian-inc/konstellation v0.0.0-20260105061911-9412f445e2bc
 	github.com/praetorian-inc/tabularium v1.0.132-pre-0-jwh-cloud-relations
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.10.0

@@ -30,9 +30,10 @@ func NewAWSSummaryLink(configs ...cfg.Config) chain.Link {
 }
 
 func (s *AWSSummaryLink) Params() []cfg.Param {
-	return []cfg.Param{
+	params := s.AwsReconLink.Params()
+	return append(params,
 		cfg.NewParam[int]("days", "Number of days to look back for cost data").WithDefault(30),
-	}
+	)
 }
 
 func (s *AWSSummaryLink) Process(input string) error {

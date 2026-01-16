@@ -3590,7 +3590,7 @@ func (l *Neo4jImporterLink) getStringField(data map[string]interface{}, key stri
 
 // createValidatedEscalationEdges creates only validated, production-ready CAN_ESCALATE edges
 func (l *Neo4jImporterLink) createValidatedEscalationEdges() bool {
-	message.Info("Creating validated CAN_ESCALATE edges - 21 production-ready attack vectors...")
+	message.Info("Creating validated CAN_ESCALATE edges - 20 production-ready attack vectors...")
 
 	ctx := context.Background()
 	session := l.driver.NewSession(ctx, neo4j.SessionConfig{})
@@ -3625,9 +3625,8 @@ func (l *Neo4jImporterLink) createValidatedEscalationEdges() bool {
 		{"RBAC_Owner", l.getValidatedRBACOwnerQuery()},
 		{"RBAC_UserAccessAdmin", l.getValidatedRBACUserAccessAdminQuery()},
 
-		// GROUP-BASED (2 vectors) - Use OWNS, CONTAINS, HAS_PERMISSION
+		// GROUP-BASED (1 vector) - Use OWNS, CONTAINS
 		{"Group_OwnerAddMember", l.getValidatedGroupOwnerAddMemberQuery()},
-		{"Group_MembershipInheritance", l.getValidatedGroupMembershipInheritanceQuery()},
 
 		// APPLICATION/SP (3 vectors) - Use OWNS, CONTAINS
 		{"Application_SPOwnerAddSecret", l.getValidatedSPOwnerAddSecretQuery()},
@@ -3987,22 +3986,6 @@ func (l *Neo4jImporterLink) getValidatedGroupOwnerAddMemberQuery() string {
 	SET r.method = "GroupOwnerAddMember",
 	    r.condition = "Group owner can add any user to privileged group granting them all group's role assignments",
 	    r.category = "GroupOwnership"
-	RETURN count(r) as created
-	`
-}
-
-// getValidatedGroupMembershipInheritanceQuery - Group members inherit group permissions
-func (l *Neo4jImporterLink) getValidatedGroupMembershipInheritanceQuery() string {
-	return `
-	MATCH (group:Resource)-[:CONTAINS]->(member:Resource),
-	      (group)-[group_perm:HAS_PERMISSION]->(role:Resource)
-	WHERE group.resourceType = "Microsoft.DirectoryServices/groups"
-	  AND group_perm.roleName IS NOT NULL
-	WITH DISTINCT member, role
-	CREATE (member)-[r:CAN_ESCALATE]->(role)
-	SET r.method = "GroupDirectoryRoleInheritance",
-	    r.condition = "Member of group with directory role assignment inherits that role automatically",
-	    r.category = "GroupMembership"
 	RETURN count(r) as created
 	`
 }

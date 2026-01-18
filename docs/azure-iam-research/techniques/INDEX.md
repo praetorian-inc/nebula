@@ -1,23 +1,24 @@
 # Azure IAM Privilege Escalation Techniques - Index
 
-**Total Techniques**: 85
+**Total Techniques**: 97
 
-**Last Generated**: 2026-01-18 07:48:23 UTC
+**Last Generated**: 2026-01-18 07:57:32 UTC
 
 ---
 
 ## Category Breakdown
 
-- **directory-roles**: 8 techniques
+- **cross-domain**: 11 techniques
+- **directory-roles**: 9 techniques
 - **graph-permissions**: 6 techniques
 - **rbac**: 4 techniques
 - **unknown**: 67 techniques
 
 ## Severity Breakdown
 
-- **CRITICAL**: 6 techniques
-- **HIGH**: 8 techniques
-- **MEDIUM**: 70 techniques
+- **CRITICAL**: 8 techniques
+- **HIGH**: 14 techniques
+- **MEDIUM**: 74 techniques
 - **LOW**: 1 techniques
 
 ---
@@ -101,6 +102,7 @@
 | TECH-006 | [Groups Administrator Privileged Group Membership](./directory-roles/TECH-006-groups-administrator-privileged-group-membership.md) | directory-roles | medium | T1098.003 | 2026-01-18 |
 | TECH-007 | [User Administrator Password Reset for Limited Admins](./directory-roles/TECH-007-user-administrator-password-reset-for-limited-admins.md) | directory-roles | medium | T1098.003 | 2026-01-18 |
 | TECH-008 | [Authentication Administrator Password Reset for Non-Admins](./directory-roles/TECH-008-authentication-administrator-password-reset-for-non-admins.md) | directory-roles | low | T1098.003 | 2026-01-18 |
+| TECH-009 | [Privileged Identity Management (PIM) Activation Abuse](./directory-roles/TECH-009-privileged-identity-management-pim-activation-abuse.md) | directory-roles | medium | T1078.004 | 2026-01-18 |
 | TECH-100 | [RoleManagement.ReadWrite.Directory Application Permission](./graph-permissions/TECH-100-rolemanagementreadwritedirectory-application-permission.md) | graph-permissions | critical | T1098.003 | 2026-01-18 |
 | TECH-101 | [AppRoleAssignment.ReadWrite.All Application Permission](./graph-permissions/TECH-101-approleassignmentreadwriteall-application-permission.md) | graph-permissions | critical | T1098.003 | 2026-01-18 |
 | TECH-102 | [Directory.ReadWrite.All Application Permission](./graph-permissions/TECH-102-directoryreadwriteall-application-permission.md) | graph-permissions | high | T1098.003 | 2026-01-18 |
@@ -111,3 +113,14 @@
 | TECH-201 | [User Access Administrator Role Assignment](./rbac/TECH-201-user-access-administrator-role-assignment.md) | rbac | high | T1098 | 2026-01-18 |
 | TECH-202 | [Contributor with Key Vault Access](./rbac/TECH-202-contributor-with-key-vault-access.md) | rbac | high | T1555.005 | 2026-01-18 |
 | TECH-203 | [Automation Operator Runbook Execution](./rbac/TECH-203-automation-operator-runbook-execution.md) | rbac | medium | T1078.004 | 2026-01-18 |
+| TECH-300 | [Golden SAML Attack](./cross-domain/TECH-300-golden-saml-attack.md) | cross-domain | critical | T1606.002 | 2026-01-18 |
+| TECH-301 | [Azure AD Connect Sync Account Abuse](./cross-domain/TECH-301-azure-ad-connect-sync-account-abuse.md) | cross-domain | critical | T1556.007 | 2026-01-18 |
+| TECH-302 | [Pass-the-PRT (Primary Refresh Token)](./cross-domain/TECH-302-pass-the-prt-primary-refresh-token.md) | cross-domain | high | T1528 | 2026-01-18 |
+| TECH-303 | [Illicit Consent Grant Attack](./cross-domain/TECH-303-illicit-consent-grant-attack.md) | cross-domain | high | T1528 | 2026-01-18 |
+| TECH-304 | [Azure VM Metadata Service (IMDS) Token Theft](./cross-domain/TECH-304-azure-vm-metadata-service-imds-token-theft.md) | cross-domain | high | T1552.005 | 2026-01-18 |
+| TECH-305 | [Managed Identity Horizontal Escalation via Function Apps](./cross-domain/TECH-305-managed-identity-horizontal-escalation-via-function-apps.md) | cross-domain | high | T1078.004 | 2026-01-18 |
+| TECH-306 | [Azure Automation Runbook Credential Harvesting](./cross-domain/TECH-306-azure-automation-runbook-credential-harvesting.md) | cross-domain | high | T1555.005 | 2026-01-18 |
+| TECH-307 | [Cross-Tenant B2B Collaboration Abuse](./cross-domain/TECH-307-cross-tenant-b2b-collaboration-abuse.md) | cross-domain | medium | T1199 | 2026-01-18 |
+| TECH-308 | [Service Principal Secret Rotation Bypass](./cross-domain/TECH-308-service-principal-secret-rotation-bypass.md) | cross-domain | medium | T1098.001 | 2026-01-18 |
+| TECH-309 | [OAuth Token Hijacking via Refresh Token Theft](./cross-domain/TECH-309-oauth-token-hijacking-via-refresh-token-theft.md) | cross-domain | high | T1528 | 2026-01-18 |
+| TECH-310 | [Conditional Access Policy Bypass via Compliant Device](./cross-domain/TECH-310-conditional-access-policy-bypass-via-compliant-device.md) | cross-domain | medium | T1556.006 | 2026-01-18 |

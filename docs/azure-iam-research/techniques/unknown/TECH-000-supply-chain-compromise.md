@@ -1,0 +1,51 @@
+---
+id: TECH-000
+name: Supply Chain Compromise
+category: unknown
+subcategory: general
+severity: medium
+mitre_attack: T1195
+discovered_date: 2018-04-18T17:59:24.739Z
+last_validated: 2025-10-24T17:48:41.675Z
+sources:
+---
+
+# Supply Chain Compromise
+
+## Summary
+Adversaries may manipulate products or product delivery mechanisms prior to receipt by a final consumer for the purpose of data or system compromise.
+
+Supply chain compromise can take place at any stage of the supply chain including:
+
+* Manipulation of development tools
+* Manipulation of a development environment
+* Manipulation of source code repositories (public or private)
+* Manipulation of source code in open-source dependencies
+* Manipulation of software update/distribution mechanisms
+* Compromised/infected system images (removable media infected at the factory)(Citation: IBM Storwize)(Citation: Schneider Electric USB Malware) 
+* Replacement of legitimate software with modified versions
+* Sales of modified/counterfeit products to legitimate distributors
+* Shipment interdiction
+
+While supply chain compromise can impact any component of hardware or software, adversaries looking to gain execution have often focused on malicious additions to legitimate software in software distribution or update channels.(Citation: Avast CCleaner3 2018)(Citation: Microsoft Dofoil 2018)(Citation: Command Five SK 2011) Adversaries may limit targeting to a desired victim set or distribute malicious software to a broad set of consumers but only follow up with specific victims.(Citation: Symantec Elderwood Sept 2012)(Citation: Avast CCleaner3 2018)(Citation: Command Five SK 2011) Popular open-source projects that are used as dependencies in many applications may also be targeted as a means to add malicious code to users of the dependency.(Citation: Trendmicro NPM Compromise)
+
+In some cases, adversaries may conduct “second-order” supply chain compromises by leveraging the access gained from an initial supply chain compromise to further compromise a software component.(Citation: Krebs 3cx overview 2023) This may allow the threat actor to spread to even more victims.  
+
+## Required Starting Permissions
+- [To be documented]
+
+## Attack Path
+[To be documented]
+
+## Target Privilege Gained
+- Unknown
+
+## Real-World Examples
+[Space for documented incidents, pen test findings, or lab validations]
+
+## References
+- [To be added]
+
+## Validation Status
+- [ ] Tested in lab environment
+- [ ] Confirmed in production-like tenant

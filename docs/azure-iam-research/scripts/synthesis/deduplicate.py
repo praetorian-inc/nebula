@@ -48,8 +48,11 @@ class TechniqueDeduplicator:
         if ms_file.exists():
             with open(ms_file) as f:
                 ms_data = json.load(f)
-                # TODO: Extract techniques from Microsoft roles
-                logger.info(f"Loaded Microsoft documentation")
+                techniques = ms_data.get('techniques', [])
+                for tech in techniques:
+                    tech['source'] = "Microsoft Official Documentation"
+                all_techniques.extend(techniques)
+                logger.info(f"Loaded {len(techniques)} techniques from Microsoft documentation")
 
         # Load security research
         research_file = self.raw_data_dir / "security-research.json"

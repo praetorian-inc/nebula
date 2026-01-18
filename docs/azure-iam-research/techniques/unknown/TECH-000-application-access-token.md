@@ -1,0 +1,43 @@
+---
+id: TECH-000
+name: Application Access Token
+category: unknown
+subcategory: general
+severity: medium
+mitre_attack: T1527
+discovered_date: 2019-08-30T12:55:58.607Z
+last_validated: 2025-10-24T17:48:32.784Z
+sources:
+  - MITRE ATT&CK Framework
+---
+
+# Application Access Token
+
+## Summary
+Adversaries may use application access tokens to bypass the typical authentication process and access restricted accounts, information, or services on remote systems. These tokens are typically stolen from users and used in lieu of login credentials.
+
+Application access tokens are used to make authorized API requests on behalf of a user and are commonly used as a way to access resources in cloud-based applications and software-as-a-service (SaaS).(Citation: Auth0 - Why You Should Always Use Access Tokens to Secure APIs Sept 2019) OAuth is one commonly implemented framework that issues tokens to users for access to systems. These frameworks are used collaboratively to verify the user and determine what actions the user is allowed to perform. Once identity is established, the token allows actions to be authorized, without passing the actual credentials of the user. Therefore, compromise of the token can grant the adversary access to resources of other sites through a malicious application.(Citation: okta)
+
+For example, with a cloud-based email service once an OAuth access token is granted to a malicious application, it can potentially gain long-term access to features of the user account if a "refresh" token enabling background access is awarded.(Citation: Microsoft Identity Platform Access 2019) With an OAuth access token an adversary can use the user-granted REST API to perform functions such as email searching and contact enumeration.(Citation: Staaldraad Phishing with OAuth 2017)
+
+Compromised access tokens may be used as an initial step in compromising other services. For example, if a token grants access to a victim’s primary email, the adversary may be able to extend access to all other services which the target subscribes by triggering forgotten password routines. Direct API access through a token negates the effectiveness of a second authentication factor and may be immune to intuitive countermeasures like changing passwords. Access abuse over an API channel can be difficult to detect even from the service provider end, as the access can still align well with a legitimate workflow.
+
+
+## Required Starting Permissions
+- [To be documented]
+
+## Attack Path
+[To be documented]
+
+## Target Privilege Gained
+- Unknown
+
+## Real-World Examples
+[Space for documented incidents, pen test findings, or lab validations]
+
+## References
+- [To be added]
+
+## Validation Status
+- [ ] Tested in lab environment
+- [ ] Confirmed in production-like tenant

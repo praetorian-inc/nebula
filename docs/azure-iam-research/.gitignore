@@ -1,0 +1,17 @@
+# Exclude raw collector outputs (temporary, regenerated on each run)
+raw-data/
+
+# Exclude intermediate processing files (temporary, regenerated on each run)
+intermediate/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/

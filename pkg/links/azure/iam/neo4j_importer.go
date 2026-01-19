@@ -1591,14 +1591,21 @@ func (l *Neo4jImporterLink) createPermissionEdges() bool {
 		rbacEdgeCount = l.edgeCounts["HAS_PERMISSION"] - initialEdgeCount - entraIDEdgeCount
 	}
 
-	// Update final total edge count
+	// Process PIM assignments - enrich HAS_PERMISSION edges with PIM metadata and create CAN_ESCALATE edges
+	pimProcessed := l.createPIMEnrichedPermissionEdges()
+
+	// Update final total edge count (PIM enrichment doesn't create new HAS_PERMISSION edges, just updates existing)
 	totalEdgesCreated := entraIDEdgeCount + rbacEdgeCount
 	l.edgeCounts["HAS_PERMISSION"] = initialEdgeCount + totalEdgesCreated
 
-	success := entraIDEdgesCreated || rbacEdgesCreated
+	success := entraIDEdgesCreated || rbacEdgesCreated || pimProcessed
 	if success {
 		message.Info("✅ Permission edge creation completed successfully!")
-		message.Info("📊 Summary: %d Entra ID edges + %d RBAC edges = %d total HAS_PERMISSION edges", entraIDEdgeCount, rbacEdgeCount, totalEdgesCreated)
+		if pimProcessed {
+			message.Info("📊 Summary: %d Entra ID edges + %d RBAC edges = %d total HAS_PERMISSION edges (with PIM enrichment)", entraIDEdgeCount, rbacEdgeCount, totalEdgesCreated)
+		} else {
+			message.Info("📊 Summary: %d Entra ID edges + %d RBAC edges = %d total HAS_PERMISSION edges", entraIDEdgeCount, rbacEdgeCount, totalEdgesCreated)
+		}
 	} else {
 		message.Info("⚠️  No permission edges were created")
 	}
@@ -1731,6 +1738,264 @@ func (l *Neo4jImporterLink) createEntraIDPermissionEdges() bool {
 	message.Info("Created %d total Entra ID HAS_PERMISSION edges", totalEdgesCreated)
 
 	return totalEdgesCreated > 0
+}
+
+// createPIMEnrichedPermissionEdges processes PIM eligible assignments to mark HAS_PERMISSION edges
+// as either "PIM" or "Permanent" assignments. Ignores Active PIM (just transient state of Eligible).
+func (l *Neo4jImporterLink) createPIMEnrichedPermissionEdges() bool {
+	message.Info("Processing PIM eligible assignments to classify permission types...")
+
+	// Get PIM data
+	pimData := l.getMapValue(l.consolidatedData, "pim")
+	if pimData == nil {
+		message.Info("No PIM data found - marking all as Permanent")
+		return l.markAllAsPermanent()
+	}
+
+	// Get eligible PIM assignments (ignore active_assignments - that's just transient state)
+	eligiblePIMAssignments := l.getArrayValue(pimData, "eligible_assignments")
+
+	if len(eligiblePIMAssignments) == 0 {
+		message.Info("No eligible PIM assignments found - marking all as Permanent")
+		return l.markAllAsPermanent()
+	}
+
+	message.Info("Found %d eligible PIM assignments", len(eligiblePIMAssignments))
+
+	ctx := context.Background()
+	session := l.driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+
+	// Process eligible PIM assignments
+	pimEdgesMarked := 0
+	pimEdgesCreated := 0
+
+	for _, assignment := range eligiblePIMAssignments {
+		assignmentMap, ok := assignment.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Extract subject (principal) information
+		// Try SDK flat format first, then fall back to legacy nested format
+		principalId := l.getStringValue(assignmentMap, "principalId")
+		if principalId == "" {
+			// Fall back to legacy nested format
+			subject := l.getMapValue(assignmentMap, "subject")
+			if subject == nil {
+				l.Logger.Debug("Skipping PIM assignment: missing principalId and subject")
+				continue
+			}
+			principalId = l.getStringValue(subject, "id")
+			if principalId == "" {
+				l.Logger.Debug("Skipping PIM assignment: empty principalId in subject")
+				continue
+			}
+		}
+		// Normalize for case-consistent Neo4j matching
+		principalId = l.normalizeResourceId(principalId)
+
+		// Extract role definition information
+		// Try SDK flat format first
+		roleTemplateId := ""
+		roleDefinitionId := l.getStringValue(assignmentMap, "roleDefinitionId")
+		if roleDefinitionId != "" {
+			// Extract template ID from path: /subscriptions/.../roleDefinitions/GUID
+			parts := strings.Split(roleDefinitionId, "/")
+			if len(parts) > 0 {
+				roleTemplateId = parts[len(parts)-1]
+			}
+		} else {
+			// Fall back to legacy nested format
+			roleDefinition := l.getMapValue(assignmentMap, "roleDefinition")
+			if roleDefinition == nil {
+				l.Logger.Debug("Skipping PIM assignment: missing roleDefinitionId and roleDefinition", "principalId", principalId)
+				continue
+			}
+			roleTemplateId = l.getStringValue(roleDefinition, "templateId")
+		}
+
+		// Extract role name (both formats use displayName at top level or nested)
+		roleName := l.getStringValue(assignmentMap, "displayName")
+		if roleName == "" {
+			roleDefinition := l.getMapValue(assignmentMap, "roleDefinition")
+			if roleDefinition != nil {
+				roleName = l.getStringValue(roleDefinition, "displayName")
+			}
+		}
+
+		if principalId == "" || roleTemplateId == "" || roleName == "" {
+			continue
+		}
+
+		// Try to mark existing HAS_PERMISSION edge as PIM (if user is currently activated or permanent)
+		cypherUpdate := `
+		MATCH (principal:Resource {id: $principalId})-[r:HAS_PERMISSION]->(tenant:Resource {resourceType: "Microsoft.DirectoryServices/tenant"})
+		WHERE r.templateId = $roleTemplateId
+		SET r.assignmentType = "PIM",
+			r.pimProcessed = true
+		RETURN count(r) as updated
+		`
+
+		updateResult, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+			result, err := tx.Run(ctx, cypherUpdate, map[string]interface{}{
+				"principalId":    principalId,
+				"roleTemplateId": roleTemplateId,
+			})
+			if err != nil {
+				return 0, err
+			}
+
+			if result.Next(ctx) {
+				record := result.Record()
+				if updated, ok := record.Get("updated"); ok {
+					return updated, nil
+				}
+			}
+			return 0, nil
+		})
+
+		if err != nil {
+			l.Logger.Warn("Failed to mark existing HAS_PERMISSION as PIM", "principalId", principalId, "role", roleName, "error", err)
+			continue
+		}
+
+		if updated, ok := l.convertToInt64(updateResult); ok && updated > 0 {
+			pimEdgesMarked += int(updated)
+			l.Logger.Debug("Marked existing HAS_PERMISSION as PIM", "principalId", principalId, "role", roleName)
+			continue // Edge already exists, no need to create
+		}
+
+		// Edge doesn't exist - user has eligible assignment but hasn't activated yet
+		// Create new HAS_PERMISSION edge
+		cypherCreate := `
+		MATCH (principal:Resource {id: $principalId})
+		MATCH (tenant:Resource {resourceType: "Microsoft.DirectoryServices/tenant"})
+		CREATE (principal)-[r:HAS_PERMISSION]->(tenant)
+		SET r.roleId = $roleTemplateId,
+			r.permission = $roleName,
+			r.roleName = $roleName,
+			r.templateId = $roleTemplateId,
+			r.principalType = "User",
+			r.source = "Entra ID Directory Role",
+			r.assignmentType = "PIM",
+			r.pimProcessed = true,
+			r.createdAt = datetime()
+		RETURN count(r) as created
+		`
+
+		createResult, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+			result, err := tx.Run(ctx, cypherCreate, map[string]interface{}{
+				"principalId":    principalId,
+				"roleTemplateId": roleTemplateId,
+				"roleName":       roleName,
+			})
+			if err != nil {
+				return 0, err
+			}
+
+			if result.Next(ctx) {
+				record := result.Record()
+				if created, ok := record.Get("created"); ok {
+					return created, nil
+				}
+			}
+			return 0, nil
+		})
+
+		if err != nil {
+			l.Logger.Warn("Failed to create HAS_PERMISSION for eligible PIM", "principalId", principalId, "role", roleName, "error", err)
+			continue
+		}
+
+		if created, ok := l.convertToInt64(createResult); ok && created > 0 {
+			pimEdgesCreated += int(created)
+			l.Logger.Debug("Created HAS_PERMISSION for eligible PIM", "principalId", principalId, "role", roleName)
+		}
+	}
+
+	message.Info("Processed eligible PIM: %d edges marked, %d edges created", pimEdgesMarked, pimEdgesCreated)
+
+	// Mark remaining Entra ID HAS_PERMISSION edges as "Permanent" (not PIM-eligible)
+	cypherMarkPermanent := `
+	MATCH ()-[r:HAS_PERMISSION]->()
+	WHERE r.source = "Entra ID Directory Role" AND r.pimProcessed IS NULL
+	SET r.assignmentType = "Permanent"
+	RETURN count(r) as marked
+	`
+
+	permanentResult, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, cypherMarkPermanent, nil)
+		if err != nil {
+			return 0, err
+		}
+
+		if result.Next(ctx) {
+			record := result.Record()
+			if marked, ok := record.Get("marked"); ok {
+				return marked, nil
+			}
+		}
+		return 0, nil
+	})
+
+	permanentCount := 0
+	if err == nil {
+		if marked, ok := l.convertToInt64(permanentResult); ok {
+			permanentCount = int(marked)
+		}
+	}
+
+	message.Info("Marked %d HAS_PERMISSION edges as Permanent assignments", permanentCount)
+
+	// Update edge counts for newly created edges
+	l.edgeCounts["HAS_PERMISSION"] = l.edgeCounts["HAS_PERMISSION"] + pimEdgesCreated
+
+	message.Info("✅ PIM classification completed: %d PIM (marked) + %d PIM (created) + %d Permanent",
+		pimEdgesMarked, pimEdgesCreated, permanentCount)
+
+	return true
+}
+
+// markAllAsPermanent marks all Entra ID HAS_PERMISSION edges as Permanent when no PIM data exists
+func (l *Neo4jImporterLink) markAllAsPermanent() bool {
+	ctx := context.Background()
+	session := l.driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+
+	cypherMarkPermanent := `
+	MATCH ()-[r:HAS_PERMISSION]->()
+	WHERE r.source = "Entra ID Directory Role" AND r.assignmentType IS NULL
+	SET r.assignmentType = "Permanent"
+	RETURN count(r) as marked
+	`
+
+	result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, cypherMarkPermanent, nil)
+		if err != nil {
+			return 0, err
+		}
+
+		if result.Next(ctx) {
+			record := result.Record()
+			if marked, ok := record.Get("marked"); ok {
+				return marked, nil
+			}
+		}
+		return 0, nil
+	})
+
+	if err != nil {
+		l.Logger.Error("Failed to mark edges as Permanent", "error", err)
+		return false
+	}
+
+	if marked, ok := l.convertToInt64(result); ok && marked > 0 {
+		message.Info("Marked %d HAS_PERMISSION edges as Permanent (no PIM data)", marked)
+		return true
+	}
+
+	return false
 }
 
 

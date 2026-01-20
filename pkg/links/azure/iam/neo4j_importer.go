@@ -344,7 +344,11 @@ func (l *Neo4jImporterLink) createAllResourceNodes() error {
 	azureResourceCount := l.createAzureResourceNodes()
 	totalNodes += azureResourceCount
 
-	message.Info("Resource node creation summary:", "identity_nodes", identityCount, "hierarchy_nodes", hierarchyCount, "azure_resource_nodes", azureResourceCount, "total_nodes", totalNodes)
+	// Create synthetic MI resource nodes for system-assigned managed identities
+	systemMICount := l.createSystemAssignedManagedIdentityResources()
+	totalNodes += systemMICount
+
+	message.Info("Resource node creation summary:", "identity_nodes", identityCount, "hierarchy_nodes", hierarchyCount, "azure_resource_nodes", azureResourceCount, "system_mi_nodes", systemMICount, "total_nodes", totalNodes)
 
 	if totalNodes > 0 {
 		message.Info("🎉 Resource node creation completed successfully!", "total", totalNodes)
@@ -572,6 +576,65 @@ func (l *Neo4jImporterLink) createIdentityResources() int {
 	}
 
 	return totalCreated
+}
+
+// createSystemAssignedManagedIdentityResources creates synthetic MI resource nodes for system-assigned managed identities
+func (l *Neo4jImporterLink) createSystemAssignedManagedIdentityResources() int {
+	message.Info("=== Creating Synthetic System-Assigned MI Resource Nodes ===")
+
+	ctx := context.Background()
+	session := l.driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+
+	// Query Neo4j for Azure resources with system-assigned identities
+	// These resources already have identityType and identityPrincipalId properties set
+	cypher := `
+		MATCH (resource:Resource)
+		WHERE resource.identityType CONTAINS "SystemAssigned"
+		  AND resource.identityPrincipalId IS NOT NULL
+		  AND NOT resource.resourceType CONTAINS "managedidentity"  // Exclude MI resources themselves
+		WITH resource
+		// Create synthetic MI resource node for the system-assigned identity
+		MERGE (mi:Resource:AzureResource {id: "/virtual/managedidentity/system/" + resource.identityPrincipalId})
+		ON CREATE SET
+			mi.resourceType = "Microsoft.ManagedIdentity/systemAssigned",
+			mi.displayName = resource.displayName + " (System-Assigned)",
+			mi.principalId = resource.identityPrincipalId,
+			mi.subscriptionId = resource.subscriptionId,
+			mi.location = resource.location,
+			mi.resourceGroup = resource.resourceGroup,
+			mi.metadata = '{"assignmentType":"System-Assigned","synthetic":true}'
+		RETURN count(mi) as created
+	`
+
+	result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, cypher, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		summary, err := result.Consume(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		return summary.Counters().NodesCreated(), nil
+	})
+
+	if err != nil {
+		l.Logger.Error("Error creating synthetic system-assigned MI nodes", "error", err)
+		return 0
+	}
+
+	if nodesCreated, ok := l.convertToInt64(result); ok {
+		created := int(nodesCreated)
+		if created > 0 {
+			message.Info("Created synthetic system-assigned MI resource nodes", "count", created)
+		}
+		return created
+	}
+
+	return 0
 }
 
 // createHierarchyResources creates hierarchy Resource nodes (Tenant, Management Groups, Subscriptions, Resource Groups)
@@ -844,12 +907,31 @@ func (l *Neo4jImporterLink) createAzureResourceNodes() int {
 							resourceNode["resourceGroup"] = resourceGroup
 						}
 
-						// For managed identities, preserve the principalId for linking to service principals
+
+					// Add identity attachment data (from processIdentityData)
+					if identityType := l.getStringValue(resourceMap, "identityType"); identityType != "" {
+						resourceNode["identityType"] = identityType
+					}
+					if identityPrincipalId := l.getStringValue(resourceMap, "identityPrincipalId"); identityPrincipalId != "" {
+						resourceNode["identityPrincipalId"] = identityPrincipalId
+					}
+				if userAssignedIds, ok := resourceMap["userAssignedIdentities"].([]string); ok && len(userAssignedIds) > 0 {
+					resourceNode["userAssignedIdentities"] = userAssignedIds
+				}
+						// For managed identities, preserve the principalId and add assignmentType metadata
 						if strings.Contains(strings.ToLower(resourceType), "managedidentity") {
 							if properties := l.getMapValue(resourceMap, "properties"); properties != nil {
 								if principalId := l.getStringValue(properties, "principalId"); principalId != "" {
 									resourceNode["principalId"] = principalId
-									l.Logger.Debug("Extracted principalId from managed identity", "resourceName", l.getStringValue(resourceMap, "name"), "principalId", principalId)
+
+									// Add assignmentType metadata for user-assigned MIs
+									metadata := map[string]interface{}{
+										"assignmentType": "User-Assigned",
+										"synthetic":      false,
+									}
+									resourceNode["metadata"] = l.toJSONString(metadata)
+
+									l.Logger.Debug("Extracted principalId from user-assigned managed identity", "resourceName", l.getStringValue(resourceMap, "name"), "principalId", principalId)
 								} else {
 									l.Logger.Warn("No principalId found in managed identity properties", "resourceName", l.getStringValue(resourceMap, "name"), "properties", properties)
 								}
@@ -903,7 +985,10 @@ func (l *Neo4jImporterLink) createResourceNodesBatch(session neo4j.SessionWithCo
 			r.userPrincipalName = resource.userPrincipalName,
 			r.servicePrincipalType = resource.servicePrincipalType,
 			r.signInAudience = resource.signInAudience,
-			r.accountEnabled = resource.accountEnabled
+			r.accountEnabled = resource.accountEnabled,
+			r.identityType = resource.identityType,
+			r.identityPrincipalId = resource.identityPrincipalId,
+			r.userAssignedIdentities = resource.userAssignedIdentities
 		ON MATCH SET
 			r.displayName = resource.displayName,
 			r.metadata = COALESCE(resource.metadata, '{}'),
@@ -1444,7 +1529,7 @@ func (l *Neo4jImporterLink) createManagedIdentityToServicePrincipalContains(sess
 
 	cypher := `
 		MATCH (mi:Resource)
-		WHERE mi.resourceType CONTAINS "managedidentity"
+		WHERE toLower(mi.resourceType) CONTAINS "managedidentity"
 		AND mi.principalId IS NOT NULL
 		MATCH (sp:Resource {id: mi.principalId})
 		WHERE sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
@@ -3151,17 +3236,24 @@ func (l *Neo4jImporterLink) processIdentityData(resourceMap map[string]interface
 			if identityType != "None" && identityType != "" {
 				resourceMap["identityType"] = identityType
 
-				if identityType == "SystemAssigned" {
+				// Handle SystemAssigned (alone or combined with UserAssigned)
+				if strings.Contains(identityType, "SystemAssigned") {
 					resourceMap["identityPrincipalId"] = l.getStringValue(identityMap, "principalId")
-				} else if identityType == "UserAssigned" {
-					// Extract principalId from first user-assigned identity
+				}
+
+				// Extract user-assigned identities (if present)
+				if strings.Contains(identityType, "UserAssigned") {
 					if userIdentities, ok := identityMap["userAssignedIdentities"]; ok {
 						if userIdMap, ok := userIdentities.(map[string]interface{}); ok {
-							for _, identity := range userIdMap {
-								if identityData, ok := identity.(map[string]interface{}); ok {
-									resourceMap["identityPrincipalId"] = l.getStringValue(identityData, "principalId")
-									break
-								}
+							// Extract resource IDs from the keys
+							userAssignedMIResourceIds := make([]string, 0)
+							for resourceId := range userIdMap {
+								normalizedId := l.normalizeResourceId(resourceId)
+								userAssignedMIResourceIds = append(userAssignedMIResourceIds, normalizedId)
+							}
+							if len(userAssignedMIResourceIds) > 0 {
+								// Store as JSON array in metadata
+								resourceMap["userAssignedIdentities"] = userAssignedMIResourceIds
 							}
 						}
 					}
@@ -3774,8 +3866,10 @@ func (l *Neo4jImporterLink) createValidatedEscalationEdges() bool {
 		{"Application_AppOwnerAddSecret", l.getValidatedAppOwnerAddSecretQuery()},
 		{"Application_ToServicePrincipal", l.getValidatedApplicationToServicePrincipalQuery()},
 
-		// MANAGED IDENTITY (1 vector) - Use CONTAINS
+		// MANAGED IDENTITY (3 vectors) - Use CONTAINS
 		{"ManagedIdentity_ToServicePrincipal", l.getValidatedManagedIdentityToServicePrincipalQuery()},
+		{"Resource_ToSystemAssignedMI", l.getValidatedAzureResourceToManagedIdentityQuery()},
+		{"Resource_ToUserAssignedMI", l.getValidatedAzureResourceToUserAssignedMIQuery()},
 	}
 
 	// Execute each query individually for better error handling and reporting
@@ -4271,13 +4365,58 @@ func (l *Neo4jImporterLink) getValidatedApplicationToServicePrincipalQuery() str
 func (l *Neo4jImporterLink) getValidatedManagedIdentityToServicePrincipalQuery() string {
 	return `
 	MATCH (mi:Resource)-[:CONTAINS]->(sp:Resource)
-	WHERE mi.resourceType CONTAINS "managedidentity"
+	WHERE toLower(mi.resourceType) CONTAINS "managedidentity"
 	  AND sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
 	WITH DISTINCT mi, sp
 	CREATE (mi)-[r:CAN_ESCALATE]->(sp)
 	SET r.method = "ManagedIdentityToServicePrincipal",
 	    r.condition = "Managed Identity compromise (via IMDS token theft from attached resource) provides access to Service Principal and all its permissions",
 	    r.category = "ManagedIdentity"
+	RETURN count(r) as created
+	`
+}
+// getValidatedAzureResourceToManagedIdentityQuery - Azure resources with attached MIs can escalate to those identities
+func (l *Neo4jImporterLink) getValidatedAzureResourceToManagedIdentityQuery() string {
+	return `
+	MATCH (resource:Resource)
+	WHERE resource.identityPrincipalId IS NOT NULL
+	  AND resource.identityType IS NOT NULL
+
+	// Find the MI resource (either real user-assigned or synthetic system-assigned)
+	MATCH (mi:Resource)
+	WHERE toLower(mi.resourceType) CONTAINS "managedidentity"
+	  AND mi.principalId = resource.identityPrincipalId
+
+	WITH DISTINCT resource, mi
+	CREATE (resource)-[r:CAN_ESCALATE]->(mi)
+	SET r.method = "ResourceAttachedIdentity",
+	    r.condition = "Resource compromise provides IMDS access to steal attached Managed Identity token",
+	    r.category = "ManagedIdentity",
+	    r.identityType = resource.identityType
+	RETURN count(r) as created
+	`
+}
+
+// getValidatedAzureResourceToUserAssignedMIQuery - Azure resources with user-assigned MIs can escalate to those identities
+func (l *Neo4jImporterLink) getValidatedAzureResourceToUserAssignedMIQuery() string {
+	return `
+	MATCH (resource:Resource)
+	WHERE resource.userAssignedIdentities IS NOT NULL
+	  AND size(resource.userAssignedIdentities) > 0
+
+	// Unwind the array of user-assigned MI resource IDs
+	UNWIND resource.userAssignedIdentities AS miResourceId
+
+	// Find the corresponding MI resource node
+	MATCH (mi:Resource {id: miResourceId})
+	WHERE toLower(mi.resourceType) CONTAINS "managedidentity"
+
+	WITH DISTINCT resource, mi
+	CREATE (resource)-[r:CAN_ESCALATE]->(mi)
+	SET r.method = "ResourceAttachedUserAssignedIdentity",
+	    r.condition = "Resource compromise provides IMDS access to steal attached User-Assigned Managed Identity token",
+	    r.category = "ManagedIdentity",
+	    r.assignmentType = "User-Assigned"
 	RETURN count(r) as created
 	`
 }

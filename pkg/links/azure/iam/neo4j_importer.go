@@ -590,9 +590,9 @@ func (l *Neo4jImporterLink) createSystemAssignedManagedIdentityResources() int {
 	// These resources already have identityType and identityPrincipalId properties set
 	cypher := `
 		MATCH (resource:Resource)
-		WHERE resource.identityType CONTAINS "SystemAssigned"
+		WHERE toLower(resource.identityType) CONTAINS "systemassigned"
 		  AND resource.identityPrincipalId IS NOT NULL
-		  AND NOT resource.resourceType CONTAINS "managedidentity"  // Exclude MI resources themselves
+		  AND NOT toLower(resource.resourceType) CONTAINS "managedidentity"  // Exclude MI resources themselves
 		WITH resource
 		// Create synthetic MI resource node for the system-assigned identity
 		MERGE (mi:Resource:AzureResource {id: "/virtual/managedidentity/system/" + resource.identityPrincipalId})
@@ -1105,7 +1105,7 @@ func (l *Neo4jImporterLink) createTenantToSubscriptionContains(session neo4j.Ses
 	cypher := `
 		MATCH (tenant:Resource {id: $tenantId})
 		MATCH (subscription:Resource)
-		WHERE subscription.resourceType = "Microsoft.Resources/subscriptions"
+		WHERE toLower(subscription.resourceType) = "microsoft.resources/subscriptions"
 		MERGE (tenant)-[:CONTAINS]->(subscription)
 	`
 
@@ -1149,7 +1149,7 @@ func (l *Neo4jImporterLink) createTenantToRootManagementGroupContains(session ne
 	cypher := `
 		MATCH (tenant:Resource {id: $tenantId})
 		MATCH (rootMg:Resource)
-		WHERE rootMg.resourceType = "Microsoft.Management/managementGroups"
+		WHERE toLower(rootMg.resourceType) = "microsoft.management/managementgroups"
 		AND rootMg.id = "/providers/microsoft.management/managementgroups/" + $tenantId
 		MERGE (tenant)-[:CONTAINS]->(rootMg)
 	`
@@ -1220,10 +1220,10 @@ func (l *Neo4jImporterLink) createManagementGroupToManagementGroupContains(sessi
 	cypher := `
 		UNWIND $relationships as rel
 		MATCH (parentMg:Resource)
-		WHERE parentMg.resourceType = "Microsoft.Management/managementGroups"
+		WHERE toLower(parentMg.resourceType) = "microsoft.management/managementgroups"
 		AND parentMg.id = rel.parentMgId
 		MATCH (childMg:Resource)
-		WHERE childMg.resourceType = "Microsoft.Management/managementGroups"
+		WHERE toLower(childMg.resourceType) = "microsoft.management/managementgroups"
 		AND childMg.id = rel.childMgId
 		MERGE (parentMg)-[:CONTAINS]->(childMg)
 	`
@@ -1291,10 +1291,10 @@ func (l *Neo4jImporterLink) createManagementGroupToSubscriptionContains(session 
 				if parentMgId != "" {
 					cypher := `
 						MATCH (mg:Resource)
-						WHERE mg.resourceType = "Microsoft.Management/managementGroups"
+						WHERE toLower(mg.resourceType) = "microsoft.management/managementgroups"
 						AND mg.id = "/providers/microsoft.management/managementgroups/" + $mgId
 						MATCH (subscription:Resource {id: "/subscriptions/" + $subscriptionId})
-						WHERE subscription.resourceType = "Microsoft.Resources/subscriptions"
+						WHERE toLower(subscription.resourceType) = "microsoft.resources/subscriptions"
 						MERGE (mg)-[:CONTAINS]->(subscription)
 					`
 
@@ -1361,10 +1361,10 @@ func (l *Neo4jImporterLink) createTenantToOrphanSubscriptionContains(session neo
 	// Connect root management group to subscriptions that are NOT in any child management group
 	cypher := `
 		MATCH (rootMg:Resource)
-		WHERE rootMg.resourceType = "Microsoft.Management/managementGroups"
+		WHERE toLower(rootMg.resourceType) = "microsoft.management/managementgroups"
 		AND rootMg.id = "/providers/microsoft.management/managementgroups/" + $tenantId
 		MATCH (subscription:Resource)
-		WHERE subscription.resourceType = "Microsoft.Resources/subscriptions"
+		WHERE toLower(subscription.resourceType) = "microsoft.resources/subscriptions"
 		AND LAST(SPLIT(subscription.id, "/")) IN $orphanSubscriptions
 		MERGE (rootMg)-[:CONTAINS]->(subscription)
 	`
@@ -1418,9 +1418,9 @@ func (l *Neo4jImporterLink) createTenantToOrphanSubscriptionContains(session neo
 func (l *Neo4jImporterLink) createSubscriptionToResourceGroupContains(session neo4j.SessionWithContext, ctx context.Context) int {
 	cypher := `
 		MATCH (subscription:Resource)
-		WHERE subscription.resourceType = "Microsoft.Resources/subscriptions"
+		WHERE toLower(subscription.resourceType) = "microsoft.resources/subscriptions"
 		MATCH (rg:Resource)
-		WHERE rg.resourceType = "Microsoft.Resources/resourceGroups"
+		WHERE toLower(rg.resourceType) = "microsoft.resources/resourcegroups"
 		AND rg.id STARTS WITH subscription.id + "/resourcegroups/"
 		MERGE (subscription)-[:CONTAINS]->(rg)
 	`
@@ -1455,12 +1455,12 @@ func (l *Neo4jImporterLink) createSubscriptionToResourceGroupContains(session ne
 func (l *Neo4jImporterLink) createResourceGroupToResourceContains(session neo4j.SessionWithContext, ctx context.Context) int {
 	cypher := `
 		MATCH (rg:Resource)
-		WHERE rg.resourceType = "Microsoft.Resources/resourceGroups"
+		WHERE toLower(rg.resourceType) = "microsoft.resources/resourcegroups"
 		MATCH (resource:Resource)
-		WHERE resource.resourceType STARTS WITH "microsoft."
-		AND resource.resourceType <> "Microsoft.Resources/subscriptions"
-		AND resource.resourceType <> "Microsoft.Resources/resourceGroups"
-		AND resource.resourceType <> "Microsoft.DirectoryServices/tenant"
+		WHERE toLower(resource.resourceType) STARTS WITH "microsoft."
+		AND toLower(resource.resourceType) <> "microsoft.resources/subscriptions"
+		AND toLower(resource.resourceType) <> "microsoft.resources/resourcegroups"
+		AND toLower(resource.resourceType) <> "microsoft.directoryservices/tenant"
 		AND resource.resourceGroup IS NOT NULL
 		AND resource.resourceGroup = rg.displayName
 		MERGE (rg)-[:CONTAINS]->(resource)
@@ -1497,7 +1497,7 @@ func (l *Neo4jImporterLink) createManagedIdentityToServicePrincipalContains(sess
 	// Debug: Check what managed identity resources exist
 	debugCypher := `
 		MATCH (mi:Resource)
-		WHERE mi.resourceType CONTAINS "managedidentity"
+		WHERE toLower(mi.resourceType) CONTAINS "managedidentity"
 		RETURN mi.displayName, mi.principalId, mi.resourceType
 	`
 
@@ -1532,7 +1532,7 @@ func (l *Neo4jImporterLink) createManagedIdentityToServicePrincipalContains(sess
 		WHERE toLower(mi.resourceType) CONTAINS "managedidentity"
 		AND mi.principalId IS NOT NULL
 		MATCH (sp:Resource {id: mi.principalId})
-		WHERE sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
+		WHERE toLower(sp.resourceType) = "microsoft.directoryservices/serviceprincipals"
 		MERGE (mi)-[:CONTAINS]->(sp)
 	`
 
@@ -1629,9 +1629,9 @@ func (l *Neo4jImporterLink) createGroupMemberContains(session neo4j.SessionWithC
 func (l *Neo4jImporterLink) createApplicationToServicePrincipalContains(session neo4j.SessionWithContext, ctx context.Context) int {
 	cypher := `
 		MATCH (app:Resource)
-		WHERE app.resourceType = "Microsoft.DirectoryServices/applications"
+		WHERE toLower(app.resourceType) = "microsoft.directoryservices/applications"
 		MATCH (sp:Resource)
-		WHERE sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
+		WHERE toLower(sp.resourceType) = "microsoft.directoryservices/serviceprincipals"
 		AND app.appId = sp.appId
 		MERGE (app)-[:CONTAINS]->(sp)
 	`
@@ -1787,7 +1787,8 @@ func (l *Neo4jImporterLink) createEntraIDPermissionEdges() bool {
 		WITH perm
 		WHERE perm.principalId IS NOT NULL AND perm.permission IS NOT NULL
 		MATCH (principal:Resource {id: perm.principalId})
-		MATCH (tenant:Resource {resourceType: "Microsoft.DirectoryServices/tenant"})
+		MATCH (tenant:Resource)
+		WHERE toLower(tenant.resourceType) = "microsoft.directoryservices/tenant"
 		MERGE (principal)-[r:HAS_PERMISSION {templateId: perm.roleTemplateId, permission: perm.permission}]->(tenant)
 		ON CREATE SET
 			r.roleId = perm.roleId,
@@ -1926,8 +1927,9 @@ func (l *Neo4jImporterLink) createPIMEnrichedPermissionEdges() bool {
 
 		// Try to mark existing HAS_PERMISSION edge as PIM (if user is currently activated or permanent)
 		cypherUpdate := `
-		MATCH (principal:Resource {id: $principalId})-[r:HAS_PERMISSION]->(tenant:Resource {resourceType: "Microsoft.DirectoryServices/tenant"})
-		WHERE r.templateId = $roleTemplateId
+		MATCH (principal:Resource {id: $principalId})-[r:HAS_PERMISSION]->(tenant:Resource)
+		WHERE toLower(tenant.resourceType) = "microsoft.directoryservices/tenant"
+		  AND r.templateId = $roleTemplateId
 		SET r.assignmentType = "PIM",
 			r.pimProcessed = true
 		RETURN count(r) as updated
@@ -1966,7 +1968,8 @@ func (l *Neo4jImporterLink) createPIMEnrichedPermissionEdges() bool {
 		// Create new HAS_PERMISSION edge
 		cypherCreate := `
 		MATCH (principal:Resource {id: $principalId})
-		MATCH (tenant:Resource {resourceType: "Microsoft.DirectoryServices/tenant"})
+		MATCH (tenant:Resource)
+		WHERE toLower(tenant.resourceType) = "microsoft.directoryservices/tenant"
 		MERGE (principal)-[r:HAS_PERMISSION {templateId: $roleTemplateId, permission: $roleName}]->(tenant)
 		ON CREATE SET
 			r.roleId = $roleTemplateId,
@@ -3609,7 +3612,7 @@ func (l *Neo4jImporterLink) createApplicationOwnershipDirectEdges(applicationOwn
 		UNWIND $edges AS edge
 		MATCH (source {id: edge.sourceId})
 		MATCH (target {id: edge.targetId})
-		WHERE target.resourceType = "Microsoft.DirectoryServices/applications"
+		WHERE toLower(target.resourceType) = "microsoft.directoryservices/applications"
 		MERGE (source)-[r:OWNS]->(target)
 		SET r.source = edge.source,
 		    r.createdAt = edge.createdAt
@@ -3696,7 +3699,7 @@ func (l *Neo4jImporterLink) createGroupOwnershipDirectEdges(groupOwnership []int
 		UNWIND $edges AS edge
 		MATCH (source {id: edge.sourceId})
 		MATCH (target {id: edge.targetId})
-		WHERE target.resourceType = "Microsoft.DirectoryServices/groups"
+		WHERE toLower(target.resourceType) = "microsoft.directoryservices/groups"
 		MERGE (source)-[r:OWNS]->(target)
 		SET r.source = edge.source,
 		    r.createdAt = edge.createdAt
@@ -3783,7 +3786,7 @@ func (l *Neo4jImporterLink) createServicePrincipalOwnershipDirectEdges(servicePr
 		UNWIND $edges AS edge
 		MATCH (source {id: edge.sourceId})
 		MATCH (target {id: edge.targetId})
-		WHERE target.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
+		WHERE toLower(target.resourceType) = "microsoft.directoryservices/serviceprincipals"
 		MERGE (source)-[r:OWNS]->(target)
 		SET r.source = edge.source,
 		    r.createdAt = edge.createdAt
@@ -3938,7 +3941,7 @@ func (l *Neo4jImporterLink) getValidatedPrivilegedRoleAdminQuery() string {
 	WITH user, perm
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user
-	  AND escalate_target.resourceType IN ["Microsoft.DirectoryServices/users", "Microsoft.DirectoryServices/servicePrincipals", "Microsoft.DirectoryServices/groups"]
+	  AND toLower(escalate_target.resourceType) IN ["microsoft.directoryservices/users", "microsoft.directoryservices/serviceprincipals", "microsoft.directoryservices/groups"]
 	WITH DISTINCT user, escalate_target, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "PrivilegedRoleAdmin",
@@ -3959,7 +3962,7 @@ func (l *Neo4jImporterLink) getValidatedPrivilegedAuthAdminQuery() string {
 	WHERE perm.roleName = "Privileged Authentication Administrator" OR perm.templateId = "7be44c8a-adaf-4e2a-84d6-ab2649e08a13"
 	WITH user, perm
 	MATCH (escalate_target:Resource)
-	WHERE escalate_target <> user AND escalate_target.resourceType = "Microsoft.DirectoryServices/users"
+	WHERE escalate_target <> user AND toLower(escalate_target.resourceType) = "microsoft.directoryservices/users"
 	WITH DISTINCT user, escalate_target, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "PrivilegedAuthenticationAdmin",
@@ -3980,7 +3983,7 @@ func (l *Neo4jImporterLink) getValidatedApplicationAdminQuery() string {
 	WHERE perm.roleName = "Application Administrator" OR perm.templateId = "9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3"
 	WITH user, perm
 	MATCH (app:Resource)
-	WHERE app.resourceType IN ["Microsoft.DirectoryServices/applications", "Microsoft.DirectoryServices/servicePrincipals"]
+	WHERE toLower(app.resourceType) IN ["microsoft.directoryservices/applications", "microsoft.directoryservices/serviceprincipals"]
 	WITH DISTINCT user, app, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(app)
 	SET r.method = "ApplicationAdmin",
@@ -4001,7 +4004,7 @@ func (l *Neo4jImporterLink) getValidatedCloudApplicationAdminQuery() string {
 	WHERE perm.roleName = "Cloud Application Administrator" OR perm.templateId = "158c047a-c907-4556-b7ef-446551a6b5f7"
 	WITH user, perm
 	MATCH (app:Resource)
-	WHERE app.resourceType IN ["Microsoft.DirectoryServices/applications", "Microsoft.DirectoryServices/servicePrincipals"]
+	WHERE toLower(app.resourceType) IN ["microsoft.directoryservices/applications", "microsoft.directoryservices/serviceprincipals"]
 	WITH DISTINCT user, app, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(app)
 	SET r.method = "CloudApplicationAdmin",
@@ -4022,7 +4025,7 @@ func (l *Neo4jImporterLink) getValidatedGroupsAdminQuery() string {
 	WHERE perm.roleName = "Groups Administrator" OR perm.templateId = "fdd7a751-b60b-444a-984c-02652fe8fa1c"
 	WITH user, perm
 	MATCH (group:Resource)
-	WHERE group.resourceType = "Microsoft.DirectoryServices/groups"
+	WHERE toLower(group.resourceType) = "microsoft.directoryservices/groups"
 	WITH DISTINCT user, group, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(group)
 	SET r.method = "GroupsAdministrator",
@@ -4043,8 +4046,8 @@ func (l *Neo4jImporterLink) getValidatedUserAdminQuery() string {
 	WHERE perm.roleName = "User Administrator" OR perm.templateId = "fe930be7-5e62-47db-91af-98c3a49a38b1"
 	WITH user, perm
 	MATCH (escalate_target:Resource)
-	WHERE escalate_target <> user AND escalate_target.resourceType = "Microsoft.DirectoryServices/users"
-	  AND NOT EXISTS { (escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource) WHERE admin_perm.roleName CONTAINS "Administrator" }
+	WHERE escalate_target <> user AND toLower(escalate_target.resourceType) = "microsoft.directoryservices/users"
+	  AND NOT EXISTS { (escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource) WHERE toLower(admin_perm.roleName) CONTAINS "administrator" }
 	WITH DISTINCT user, escalate_target, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "UserAdministrator",
@@ -4065,8 +4068,8 @@ func (l *Neo4jImporterLink) getValidatedAuthenticationAdminQuery() string {
 	WHERE perm.roleName = "Authentication Administrator" OR perm.templateId = "c4e39bd9-1100-46d3-8c65-fb160da0071f"
 	WITH user, perm
 	MATCH (escalate_target:Resource)
-	WHERE escalate_target <> user AND escalate_target.resourceType = "Microsoft.DirectoryServices/users"
-	  AND NOT EXISTS { (escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource) WHERE admin_perm.roleName CONTAINS "Administrator" }
+	WHERE escalate_target <> user AND toLower(escalate_target.resourceType) = "microsoft.directoryservices/users"
+	  AND NOT EXISTS { (escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource) WHERE toLower(admin_perm.roleName) CONTAINS "administrator" }
 	WITH DISTINCT user, escalate_target, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "AuthenticationAdmin",
@@ -4093,7 +4096,7 @@ func (l *Neo4jImporterLink) getValidatedGraphRoleManagementQuery() string {
 	WITH sp, perm
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> sp
-	  AND escalate_target.resourceType IN ["Microsoft.DirectoryServices/users", "Microsoft.DirectoryServices/servicePrincipals", "Microsoft.DirectoryServices/groups"]
+	  AND toLower(escalate_target.resourceType) IN ["microsoft.directoryservices/users", "microsoft.directoryservices/serviceprincipals", "microsoft.directoryservices/groups"]
 	WITH DISTINCT sp, escalate_target, perm
 	CREATE (sp)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "GraphRoleManagement",
@@ -4119,7 +4122,7 @@ func (l *Neo4jImporterLink) getValidatedGraphDirectoryReadWriteQuery() string {
 	WITH sp, perm
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> sp
-	  AND escalate_target.resourceType STARTS WITH "Microsoft.DirectoryServices/"
+	  AND toLower(escalate_target.resourceType) STARTS WITH "microsoft.directoryservices/"
 	WITH DISTINCT sp, escalate_target, perm
 	CREATE (sp)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "Directory.ReadWrite.All",
@@ -4143,7 +4146,7 @@ func (l *Neo4jImporterLink) getValidatedGraphApplicationReadWriteQuery() string 
 	  AND perm.consentType = "AllPrincipals"
 	WITH sp, perm
 	MATCH (escalate_target:Resource)
-	WHERE escalate_target.resourceType IN ["Microsoft.DirectoryServices/applications", "Microsoft.DirectoryServices/servicePrincipals"] AND escalate_target <> sp
+	WHERE toLower(escalate_target.resourceType) IN ["microsoft.directoryservices/applications", "microsoft.directoryservices/serviceprincipals"] AND escalate_target <> sp
 	WITH DISTINCT sp, escalate_target, perm
 	CREATE (sp)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "GraphApplicationReadWrite",
@@ -4188,7 +4191,7 @@ func (l *Neo4jImporterLink) getValidatedGraphUserReadWriteQuery() string {
 	  AND perm.consentType = "AllPrincipals"
 	WITH sp, perm
 	MATCH (user:Resource)
-	WHERE user.resourceType = "Microsoft.DirectoryServices/users" AND user <> sp
+	WHERE toLower(user.resourceType) = "microsoft.directoryservices/users" AND user <> sp
 	WITH DISTINCT sp, user, perm
 	CREATE (sp)-[r:CAN_ESCALATE]->(user)
 	SET r.method = "GraphUserReadWrite",
@@ -4212,7 +4215,7 @@ func (l *Neo4jImporterLink) getValidatedGraphGroupReadWriteQuery() string {
 	  AND perm.consentType = "AllPrincipals"
 	WITH sp, perm
 	MATCH (group:Resource)
-	WHERE group.resourceType = "Microsoft.DirectoryServices/groups" AND group <> sp
+	WHERE toLower(group.resourceType) = "microsoft.directoryservices/groups" AND group <> sp
 	WITH DISTINCT sp, group, perm
 	CREATE (sp)-[r:CAN_ESCALATE]->(group)
 	SET r.method = "GraphGroupReadWrite",
@@ -4236,7 +4239,7 @@ func (l *Neo4jImporterLink) getValidatedRBACOwnerQuery() string {
 	WITH DISTINCT principal, scope, perm
 	MATCH (scope)-[:CONTAINS*0..]->(escalate_target:Resource)
 	WHERE escalate_target <> principal
-	  AND NOT escalate_target.resourceType STARTS WITH "Microsoft.DirectoryServices/"
+	  AND NOT toLower(escalate_target.resourceType) STARTS WITH "microsoft.directoryservices/"
 	WITH DISTINCT principal, escalate_target, perm
 	CREATE (principal)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "AzureOwner",
@@ -4258,7 +4261,7 @@ func (l *Neo4jImporterLink) getValidatedRBACUserAccessAdminQuery() string {
 	WITH DISTINCT principal, scope, perm
 	MATCH (scope)-[:CONTAINS*0..]->(escalate_target:Resource)
 	WHERE escalate_target <> principal
-	  AND NOT escalate_target.resourceType STARTS WITH "Microsoft.DirectoryServices/"
+	  AND NOT toLower(escalate_target.resourceType) STARTS WITH "microsoft.directoryservices/"
 	WITH DISTINCT principal, escalate_target, perm
 	CREATE (principal)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "UserAccessAdmin",
@@ -4280,7 +4283,7 @@ func (l *Neo4jImporterLink) getGroupOwnerPotentialPermissionQuery() string {
 	return `
 	// Find owners of groups that have permissions
 	MATCH (owner:Resource)-[:OWNS]->(group:Resource)
-	WHERE group.resourceType = "Microsoft.DirectoryServices/groups"
+	WHERE toLower(group.resourceType) = "microsoft.directoryservices/groups"
 
 	// Get the permissions the group has
 	MATCH (group)-[groupPerm:HAS_PERMISSION]->(scope:Resource)
@@ -4319,7 +4322,7 @@ func (l *Neo4jImporterLink) getGroupOwnerPotentialPermissionQuery() string {
 func (l *Neo4jImporterLink) getValidatedSPOwnerAddSecretQuery() string {
 	return `
 	MATCH (owner:Resource)-[:OWNS]->(sp:Resource)
-	WHERE sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
+	WHERE toLower(sp.resourceType) = "microsoft.directoryservices/serviceprincipals"
 	WITH DISTINCT owner, sp
 	CREATE (owner)-[r:CAN_ESCALATE]->(sp)
 	SET r.method = "ServicePrincipalAddSecret",
@@ -4333,10 +4336,10 @@ func (l *Neo4jImporterLink) getValidatedSPOwnerAddSecretQuery() string {
 func (l *Neo4jImporterLink) getValidatedAppOwnerAddSecretQuery() string {
 	return `
 	MATCH (owner:Resource)-[:OWNS]->(app:Resource)
-	WHERE app.resourceType = "Microsoft.DirectoryServices/applications"
+	WHERE toLower(app.resourceType) = "microsoft.directoryservices/applications"
 	WITH owner, app
 	MATCH (app)-[:CONTAINS]->(sp:Resource)
-	WHERE sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
+	WHERE toLower(sp.resourceType) = "microsoft.directoryservices/serviceprincipals"
 	WITH DISTINCT owner, sp
 	CREATE (owner)-[r:CAN_ESCALATE]->(sp)
 	SET r.method = "ApplicationAddSecret",
@@ -4350,8 +4353,8 @@ func (l *Neo4jImporterLink) getValidatedAppOwnerAddSecretQuery() string {
 func (l *Neo4jImporterLink) getValidatedApplicationToServicePrincipalQuery() string {
 	return `
 	MATCH (app:Resource)-[:CONTAINS]->(sp:Resource)
-	WHERE app.resourceType = "Microsoft.DirectoryServices/applications"
-	  AND sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
+	WHERE toLower(app.resourceType) = "microsoft.directoryservices/applications"
+	  AND toLower(sp.resourceType) = "microsoft.directoryservices/serviceprincipals"
 	WITH DISTINCT app, sp
 	CREATE (app)-[r:CAN_ESCALATE]->(sp)
 	SET r.method = "ApplicationToServicePrincipal",
@@ -4366,7 +4369,7 @@ func (l *Neo4jImporterLink) getValidatedManagedIdentityToServicePrincipalQuery()
 	return `
 	MATCH (mi:Resource)-[:CONTAINS]->(sp:Resource)
 	WHERE toLower(mi.resourceType) CONTAINS "managedidentity"
-	  AND sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
+	  AND toLower(sp.resourceType) = "microsoft.directoryservices/serviceprincipals"
 	WITH DISTINCT mi, sp
 	CREATE (mi)-[r:CAN_ESCALATE]->(sp)
 	SET r.method = "ManagedIdentityToServicePrincipal",

@@ -3854,7 +3854,7 @@ func (l *IAMComprehensiveCollectorLink) collectApplicationCredentialPermissions(
 					"principalId":       memberID,
 					"principalName":     memberName,
 					"principalType":     memberType,
-					"role":              roleName,
+					"roleName":              roleName,
 					"permissionType":    "ApplicationCredentialManagement",
 					"capability":        "CanManageApplicationCredentials",
 				}
@@ -3896,9 +3896,9 @@ func (l *IAMComprehensiveCollectorLink) collectApplicationRBACPermissions(access
 
 		for _, roleName := range directoryRoles {
 			permission := map[string]interface{}{
-				"applicationId":     appID,
+				"principalId":     appID,
 				"applicationName":   appName,
-				"role":              roleName,
+				"roleName":              roleName,
 				"permissionType":    "ApplicationRBAC",
 				"scope":             "Application",
 				"implicitAccess":    true,

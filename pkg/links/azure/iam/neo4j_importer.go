@@ -884,21 +884,24 @@ func (l *Neo4jImporterLink) createResourceNodesBatch(session neo4j.SessionWithCo
 	labelString := strings.Join(labels, ":")
 	cypher := fmt.Sprintf(`
 		UNWIND $resources AS resource
-		CREATE (r:%s {
-			id: resource.id,
-			resourceType: resource.resourceType,
-			displayName: resource.displayName,
-			metadata: COALESCE(resource.metadata, '{}'),
-			location: resource.location,
-			subscriptionId: resource.subscriptionId,
-			resourceGroup: resource.resourceGroup,
-			principalId: resource.principalId,
-			appId: resource.appId,
-			userPrincipalName: resource.userPrincipalName,
-			servicePrincipalType: resource.servicePrincipalType,
-			signInAudience: resource.signInAudience,
-			accountEnabled: resource.accountEnabled
-		})
+		MERGE (r:%s {id: resource.id})
+		ON CREATE SET
+			r.resourceType = resource.resourceType,
+			r.displayName = resource.displayName,
+			r.metadata = COALESCE(resource.metadata, '{}'),
+			r.location = resource.location,
+			r.subscriptionId = resource.subscriptionId,
+			r.resourceGroup = resource.resourceGroup,
+			r.principalId = resource.principalId,
+			r.appId = resource.appId,
+			r.userPrincipalName = resource.userPrincipalName,
+			r.servicePrincipalType = resource.servicePrincipalType,
+			r.signInAudience = resource.signInAudience,
+			r.accountEnabled = resource.accountEnabled
+		ON MATCH SET
+			r.displayName = resource.displayName,
+			r.metadata = COALESCE(resource.metadata, '{}'),
+			r.accountEnabled = resource.accountEnabled
 	`, labelString)
 
 	result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
@@ -1694,14 +1697,16 @@ func (l *Neo4jImporterLink) createEntraIDPermissionEdges() bool {
 		WHERE perm.principalId IS NOT NULL AND perm.permission IS NOT NULL
 		MATCH (principal:Resource {id: perm.principalId})
 		MATCH (tenant:Resource {resourceType: "Microsoft.DirectoryServices/tenant"})
-		CREATE (principal)-[r:HAS_PERMISSION]->(tenant)
-		SET r.roleId = perm.roleId,
-			r.permission = perm.permission,
+		MERGE (principal)-[r:HAS_PERMISSION {templateId: perm.roleTemplateId, permission: perm.permission}]->(tenant)
+		ON CREATE SET
+			r.roleId = perm.roleId,
 			r.roleName = perm.roleName,
-			r.templateId = perm.roleTemplateId,
 			r.principalType = perm.principalType,
 			r.source = perm.source,
 			r.createdAt = datetime()
+		ON MATCH SET
+			r.roleName = perm.roleName,
+			r.source = perm.source
 		`
 
 		ctx := context.Background()
@@ -1871,16 +1876,18 @@ func (l *Neo4jImporterLink) createPIMEnrichedPermissionEdges() bool {
 		cypherCreate := `
 		MATCH (principal:Resource {id: $principalId})
 		MATCH (tenant:Resource {resourceType: "Microsoft.DirectoryServices/tenant"})
-		CREATE (principal)-[r:HAS_PERMISSION]->(tenant)
-		SET r.roleId = $roleTemplateId,
-			r.permission = $roleName,
+		MERGE (principal)-[r:HAS_PERMISSION {templateId: $roleTemplateId, permission: $roleName}]->(tenant)
+		ON CREATE SET
+			r.roleId = $roleTemplateId,
 			r.roleName = $roleName,
-			r.templateId = $roleTemplateId,
 			r.principalType = "User",
 			r.source = "Entra ID Directory Role",
 			r.assignmentType = "PIM",
 			r.pimProcessed = true,
 			r.createdAt = datetime()
+		ON MATCH SET
+			r.assignmentType = "PIM",
+			r.pimProcessed = true
 		RETURN count(r) as created
 		`
 
@@ -2096,15 +2103,17 @@ func (l *Neo4jImporterLink) createRBACPermissionEdges() bool {
 		WITH perm, COALESCE(miPrincipal, spPrincipal) as principal
 		WHERE principal IS NOT NULL
 		MATCH (target:Resource {id: perm.targetResourceId})
-		CREATE (principal)-[r:HAS_PERMISSION]->(target)
-		SET r.roleDefinitionId = perm.roleDefinitionId,
-			r.permission = perm.permission,
+		MERGE (principal)-[r:HAS_PERMISSION {roleDefinitionId: perm.roleDefinitionId, permission: perm.permission}]->(target)
+		ON CREATE SET
 			r.roleName = perm.roleName,
 			r.principalType = perm.principalType,
 			r.source = perm.source,
 			r.grantedAt = perm.grantedAt,
 			r.targetResourceType = perm.targetResourceType,
 			r.createdAt = datetime()
+		ON MATCH SET
+			r.roleName = perm.roleName,
+			r.source = perm.source
 		`
 
 		ctx := context.Background()
@@ -2248,13 +2257,19 @@ func (l *Neo4jImporterLink) createGroupMemberPermissionEdges() bool {
 		WHERE perm.memberId IS NOT NULL AND perm.permission IS NOT NULL AND perm.targetId IS NOT NULL
 		MATCH (member:Resource {id: perm.memberId})
 		MATCH (target:Resource {id: perm.targetId})
-		MERGE (member)-[r:HAS_PERMISSION]->(target)
-		SET r.permission = perm.permission,
+		MERGE (member)-[r:HAS_PERMISSION {permission: perm.permission}]->(target)
+		ON CREATE SET
 			r.source = perm.source,
 			r.groupId = perm.groupId,
 			r.groupName = perm.groupName,
 			r.principalType = perm.principalType,
 			r.createdAt = datetime()
+		ON MATCH SET
+			r.grantedByGroups = CASE
+				WHEN r.grantedByGroups IS NULL THEN [perm.groupId]
+				WHEN perm.groupId IN r.grantedByGroups THEN r.grantedByGroups
+				ELSE r.grantedByGroups + [perm.groupId]
+			END
 		`
 
 		// Add optional properties if they exist

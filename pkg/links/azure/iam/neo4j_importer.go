@@ -4373,7 +4373,7 @@ func (l *Neo4jImporterLink) getGroupOwnerPotentialPermissionQuery() string {
 		r.roleDefinitionId = groupPerm.roleDefinitionId,
 		r.templateId = groupPerm.templateId,
 		r.principalType = "User",
-		r.source = "group_owner_potential",
+		r.source = "Owner of Entra User Group",
 		r.grantedAt = groupPerm.grantedAt,
 		r.targetResourceType = groupPerm.targetResourceType,
 		r.viaGroupId = group.id,

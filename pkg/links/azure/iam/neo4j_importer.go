@@ -3727,12 +3727,11 @@ func (l *Neo4jImporterLink) createApplicationCredentialPermissionEdges(credentia
 		UNWIND $edges AS edge
 		MATCH (source {id: edge.sourceId})
 		MATCH (tenant {resourceType: "Microsoft.DirectoryServices/tenant"})
-		MERGE (source)-[r:HAS_PERMISSION]->(tenant)
-		SET r.permission = edge.permission,
-		    r.roleName = edge.roleName,
-		    r.source = edge.source,
-		    r.principalType = edge.principalType,
-		    r.createdAt = edge.createdAt
+		MERGE (source)-[r:HAS_PERMISSION {roleName: edge.roleName, permission: edge.permission}]->(tenant)
+		ON CREATE SET r.source = edge.source,
+		              r.principalType = edge.principalType,
+		              r.createdAt = edge.createdAt
+		ON MATCH SET r.createdAt = edge.createdAt
 		RETURN count(r) as created`
 
 		result, err := session.Run(ctx, query, map[string]interface{}{"edges": batch})
@@ -3813,12 +3812,11 @@ func (l *Neo4jImporterLink) createApplicationRBACPermissionEdges(rbacPerms []int
 		UNWIND $edges AS edge
 		MATCH (source {id: edge.sourceId})
 		MATCH (tenant {resourceType: "Microsoft.DirectoryServices/tenant"})
-		MERGE (source)-[r:HAS_PERMISSION]->(tenant)
-		SET r.permission = edge.permission,
-		    r.roleName = edge.roleName,
-		    r.source = edge.source,
-		    r.principalType = edge.principalType,
-		    r.createdAt = edge.createdAt
+		MERGE (source)-[r:HAS_PERMISSION {roleName: edge.roleName, permission: edge.permission}]->(tenant)
+		ON CREATE SET r.source = edge.source,
+		              r.principalType = edge.principalType,
+		              r.createdAt = edge.createdAt
+		ON MATCH SET r.createdAt = edge.createdAt
 		RETURN count(r) as created`
 
 		result, err := session.Run(ctx, query, map[string]interface{}{"edges": batch})

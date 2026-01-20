@@ -2104,10 +2104,7 @@ func (l *Neo4jImporterLink) createRBACPermissionEdges() bool {
 		UNWIND $permissions AS perm
 		WITH perm
 		WHERE perm.principalId IS NOT NULL AND perm.permission IS NOT NULL AND perm.targetResourceId IS NOT NULL
-		OPTIONAL MATCH (miPrincipal:Resource {principalId: perm.principalId})
-		OPTIONAL MATCH (spPrincipal:Resource {id: perm.principalId})
-		WITH perm, COALESCE(miPrincipal, spPrincipal) as principal
-		WHERE principal IS NOT NULL
+		MATCH (principal:Resource {id: perm.principalId})
 		MATCH (target:Resource {id: perm.targetResourceId})
 		MERGE (principal)-[r:HAS_PERMISSION {roleDefinitionId: perm.roleDefinitionId, permission: perm.permission}]->(target)
 		ON CREATE SET

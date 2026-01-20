@@ -640,13 +640,511 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 		l.logCollectionEnd("appRoleAssignments", startTime, len(appRoleAssignments))
 	}
 
+	// Collection 13: Group Ownership (CRITICAL for iam-push compatibility)
+	startTime = l.logCollectionStart("groupOwnership")
+	message.Info("Collecting group ownership from Graph SDK...")
+	groupOwnership, err := l.collectGroupOwnershipSDK(ctx)
+	if err != nil {
+		l.Logger.Error("Failed to collect group ownership via SDK", "error", err)
+		azureADData["groupOwnership"] = []interface{}{} // Empty array on error
+		l.logCollectionEnd("groupOwnership", startTime, 0)
+	} else {
+		azureADData["groupOwnership"] = groupOwnership
+		l.logCollectionEnd("groupOwnership", startTime, len(groupOwnership))
+	}
+
+	// Collection 14: Service Principal Ownership (CRITICAL for iam-push compatibility)
+	startTime = l.logCollectionStart("servicePrincipalOwnership")
+	message.Info("Collecting service principal ownership from Graph SDK...")
+	servicePrincipalOwnership, err := l.collectServicePrincipalOwnershipSDK(ctx)
+	if err != nil {
+		l.Logger.Error("Failed to collect service principal ownership via SDK", "error", err)
+		azureADData["servicePrincipalOwnership"] = []interface{}{} // Empty array on error
+		l.logCollectionEnd("servicePrincipalOwnership", startTime, 0)
+	} else {
+		azureADData["servicePrincipalOwnership"] = servicePrincipalOwnership
+		l.logCollectionEnd("servicePrincipalOwnership", startTime, len(servicePrincipalOwnership))
+	}
+
+	// Collection 15: Application Ownership (CRITICAL for iam-push compatibility)
+	startTime = l.logCollectionStart("applicationOwnership")
+	message.Info("Collecting application ownership from Graph SDK...")
+	applicationOwnership, err := l.collectApplicationOwnershipSDK(ctx)
+	if err != nil {
+		l.Logger.Error("Failed to collect application ownership via SDK", "error", err)
+		azureADData["applicationOwnership"] = []interface{}{} // Empty array on error
+		l.logCollectionEnd("applicationOwnership", startTime, 0)
+	} else {
+		azureADData["applicationOwnership"] = applicationOwnership
+		l.logCollectionEnd("applicationOwnership", startTime, len(applicationOwnership))
+	}
+
+	// Credential Enrichment (CRITICAL for iam-push compatibility)
+	l.Logger.Info("Enriching applications with credential metadata")
+	l.enrichApplicationsWithCredentialMetadataSDK(azureADData)
+
 	// Calculate total resource counts for final summary
 	totalItems := len(users) + len(groups) + len(servicePrincipals) + len(applications) + len(devices) +
 			len(directoryRoles) + len(roleDefinitions) + len(conditionalAccessPolicies) +
-			len(directoryRoleAssignments) + len(groupMemberships) + len(oauth2Grants) + len(appRoleAssignments)
+			len(directoryRoleAssignments) + len(groupMemberships) + len(oauth2Grants) + len(appRoleAssignments) +
+			len(groupOwnership) + len(servicePrincipalOwnership) + len(applicationOwnership)
 
 	l.logCollectionEnd("Azure AD Graph SDK Collection", overallStart, totalItems)
 	return azureADData, nil
+}
+
+// collectGroupOwnershipSDK collects group ownership relationships using Graph SDK
+// Produces output format identical to HTTP version for iam-push compatibility
+func (l *SDKComprehensiveCollectorLink) collectGroupOwnershipSDK(ctx context.Context) ([]interface{}, error) {
+	var ownerships []interface{}
+
+	startTime := l.logCollectionStart("groupOwnership")
+	l.Logger.Info("Collecting group ownership via Graph SDK batch API")
+
+	// Get all groups first
+	groupsResponse, err := l.graphClient.Groups().Get(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get groups: %v", err)
+	}
+
+	groups := groupsResponse.GetValue()
+	l.Logger.Info("Getting owners for groups", "count", len(groups))
+
+	// Get access token for batch API calls
+	accessToken, err := l.getAccessToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get access token: %v", err)
+	}
+
+	// Process groups in batches of 10 (matching HTTP version batch size)
+	batchSize := 10
+
+	for i := 0; i < len(groups); i += batchSize {
+		end := i + batchSize
+		if end > len(groups) {
+			end = len(groups)
+		}
+		batchGroups := groups[i:end]
+
+		// Create batch requests for group owners
+		var batchRequests []map[string]interface{}
+		groupDataMap := make(map[string]map[string]interface{})
+
+		for j, group := range batchGroups {
+			if group == nil || group.GetId() == nil {
+				continue
+			}
+
+			groupID := *group.GetId()
+			groupName := ""
+			if group.GetDisplayName() != nil {
+				groupName = *group.GetDisplayName()
+			}
+
+			groupDataMap[fmt.Sprintf("group_%d", j)] = map[string]interface{}{
+				"id":          groupID,
+				"displayName": groupName,
+			}
+
+			// Add owners request (matching HTTP version URL)
+			batchRequests = append(batchRequests, map[string]interface{}{
+				"id":     fmt.Sprintf("group_%d_owners", j),
+				"method": "GET",
+				"url":    fmt.Sprintf("/groups/%s/owners?$select=id,displayName,userType,appId,mail,onPremisesSyncEnabled", groupID),
+			})
+		}
+
+		// Execute batch request using existing callGraphBatchAPI method
+		if len(batchRequests) > 0 {
+			batchResults, err := l.callGraphBatchAPI(ctx, accessToken, batchRequests)
+			if err != nil {
+				l.Logger.Error("Batch request failed for group ownership", "error", err)
+				continue
+			}
+
+			// Process batch results (matching HTTP version processing)
+			if responses, ok := batchResults["responses"].([]interface{}); ok {
+				for _, response := range responses {
+					if respMap, ok := response.(map[string]interface{}); ok {
+						if body, ok := respMap["body"].(map[string]interface{}); ok {
+							if value, ok := body["value"].([]interface{}); ok {
+								for _, owner := range value {
+									if ownerMap, ok := owner.(map[string]interface{}); ok {
+										ownerID, _ := ownerMap["id"].(string)
+
+										// Extract group ID from request ID
+										requestID, _ := respMap["id"].(string)
+										groupIndex := strings.Replace(strings.Replace(requestID, "group_", "", 1), "_owners", "", 1)
+
+										// Find corresponding group
+										if groupData, exists := groupDataMap[fmt.Sprintf("group_%s", groupIndex)]; exists {
+											groupID := groupData["id"].(string)
+											groupName := groupData["displayName"].(string)
+
+											// Output format MUST match HTTP version exactly
+											ownership := map[string]interface{}{
+												"groupId":        groupID,
+												"groupName":      groupName,
+												"ownerId":        ownerID,
+												"ownerName":      ownerMap["displayName"],
+												"ownerType":      ownerMap["@odata.type"],
+												"permissionType": "GroupOwnership",
+												"role":           "Owner",
+											}
+											ownerships = append(ownerships, ownership)
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Add delay between batches (matching HTTP version)
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	l.logCollectionEnd("groupOwnership", startTime, len(ownerships))
+	return ownerships, nil
+}
+
+// collectServicePrincipalOwnershipSDK collects service principal ownership relationships
+// Produces output format identical to HTTP version for iam-push compatibility
+func (l *SDKComprehensiveCollectorLink) collectServicePrincipalOwnershipSDK(ctx context.Context) ([]interface{}, error) {
+	var ownerships []interface{}
+
+	startTime := l.logCollectionStart("servicePrincipalOwnership")
+	l.Logger.Info("Collecting service principal ownership via Graph SDK batch API")
+
+	// Get all service principals first
+	spResponse, err := l.graphClient.ServicePrincipals().Get(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get service principals: %v", err)
+	}
+
+	servicePrincipals := spResponse.GetValue()
+	l.Logger.Info("Getting owners for service principals", "count", len(servicePrincipals))
+
+	// Get access token for batch API calls
+	accessToken, err := l.getAccessToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get access token: %v", err)
+	}
+
+	// Process service principals in batches of 10
+	batchSize := 10
+
+	for i := 0; i < len(servicePrincipals); i += batchSize {
+		end := i + batchSize
+		if end > len(servicePrincipals) {
+			end = len(servicePrincipals)
+		}
+		batchSPs := servicePrincipals[i:end]
+
+		// Create batch requests for SP owners
+		var batchRequests []map[string]interface{}
+		spDataMap := make(map[string]map[string]interface{})
+
+		for j, sp := range batchSPs {
+			if sp == nil || sp.GetId() == nil {
+				continue
+			}
+
+			spID := *sp.GetId()
+			spName := ""
+			if sp.GetDisplayName() != nil {
+				spName = *sp.GetDisplayName()
+			}
+
+			spDataMap[fmt.Sprintf("sp_%d", j)] = map[string]interface{}{
+				"id":          spID,
+				"displayName": spName,
+			}
+
+			// Add owners request
+			batchRequests = append(batchRequests, map[string]interface{}{
+				"id":     fmt.Sprintf("sp_%d_owners", j),
+				"method": "GET",
+				"url":    fmt.Sprintf("/servicePrincipals/%s/owners?$select=id,displayName,userType,appId,mail,onPremisesSyncEnabled", spID),
+			})
+		}
+
+		// Execute batch request
+		if len(batchRequests) > 0 {
+			batchResults, err := l.callGraphBatchAPI(ctx, accessToken, batchRequests)
+			if err != nil {
+				l.Logger.Error("Batch request failed for SP ownership", "error", err)
+				continue
+			}
+
+			// Process batch results
+			if responses, ok := batchResults["responses"].([]interface{}); ok {
+				for _, response := range responses {
+					if respMap, ok := response.(map[string]interface{}); ok {
+						if body, ok := respMap["body"].(map[string]interface{}); ok {
+							if value, ok := body["value"].([]interface{}); ok {
+								for _, owner := range value {
+									if ownerMap, ok := owner.(map[string]interface{}); ok {
+										ownerID, _ := ownerMap["id"].(string)
+
+										// Extract SP ID from request ID
+										requestID, _ := respMap["id"].(string)
+										spIndex := strings.Replace(strings.Replace(requestID, "sp_", "", 1), "_owners", "", 1)
+
+										// Find corresponding service principal
+										if spData, exists := spDataMap[fmt.Sprintf("sp_%s", spIndex)]; exists {
+											spID := spData["id"].(string)
+											spName := spData["displayName"].(string)
+
+											// Output format MUST match HTTP version exactly
+											ownership := map[string]interface{}{
+												"servicePrincipalId":   spID,
+												"servicePrincipalName": spName,
+												"ownerId":              ownerID,
+												"ownerName":            ownerMap["displayName"],
+												"ownerType":            ownerMap["@odata.type"],
+												"permissionType":       "ServicePrincipalOwnership",
+												"role":                 "Owner",
+											}
+											ownerships = append(ownerships, ownership)
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Add delay between batches
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	l.logCollectionEnd("servicePrincipalOwnership", startTime, len(ownerships))
+	return ownerships, nil
+}
+
+// collectApplicationOwnershipSDK collects application ownership relationships
+// Uses $expand=owners approach for better performance
+func (l *SDKComprehensiveCollectorLink) collectApplicationOwnershipSDK(ctx context.Context) ([]interface{}, error) {
+	var applicationOwnerships []interface{}
+
+	startTime := l.logCollectionStart("applicationOwnership")
+	l.Logger.Info("Collecting application ownership via Graph SDK")
+
+	// Get access token for raw HTTP call with $expand
+	accessToken, err := l.getAccessToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get access token: %v", err)
+	}
+
+	// Use paginated collection with $expand=owners
+	applications, err := l.collectPaginatedGraphDataSDK(accessToken, "/applications?$expand=owners")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get applications with owners: %v", err)
+	}
+
+	l.Logger.Info("Processing application ownership", "applications", len(applications))
+
+	for _, app := range applications {
+		appMap, ok := app.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		appID, _ := appMap["id"].(string)
+		appName, _ := appMap["displayName"].(string)
+
+		if owners, ok := appMap["owners"].([]interface{}); ok {
+			for _, owner := range owners {
+				ownerMap, ok := owner.(map[string]interface{})
+				if !ok {
+					continue
+				}
+
+				ownerID, _ := ownerMap["id"].(string)
+				ownerType, _ := ownerMap["@odata.type"].(string)
+				ownerName, _ := ownerMap["displayName"].(string)
+
+				// Output format MUST match HTTP version exactly
+				ownership := map[string]interface{}{
+					"applicationId":   appID,
+					"applicationName": appName,
+					"ownerId":         ownerID,
+					"ownerName":       ownerName,
+					"ownerType":       ownerType,
+					"role":            "Owner",
+					"permissionType":  "ApplicationOwnership",
+				}
+				applicationOwnerships = append(applicationOwnerships, ownership)
+			}
+		}
+	}
+
+	l.logCollectionEnd("applicationOwnership", startTime, len(applicationOwnerships))
+	return applicationOwnerships, nil
+}
+
+// collectPaginatedGraphDataSDK is a helper to collect paginated Graph API data using HTTP client
+func (l *SDKComprehensiveCollectorLink) collectPaginatedGraphDataSDK(accessToken string, endpoint string) ([]interface{}, error) {
+	var allResults []interface{}
+	ctx := l.Context()
+
+	baseURL := "https://graph.microsoft.com/v1.0"
+	url := baseURL + endpoint
+
+	for url != "" {
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %v", err)
+		}
+
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := l.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to execute request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("Graph API call failed with status %d", resp.StatusCode)
+		}
+
+		var result map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return nil, fmt.Errorf("failed to decode response: %v", err)
+		}
+
+		if value, ok := result["value"].([]interface{}); ok {
+			allResults = append(allResults, value...)
+		}
+
+		// Handle pagination
+		if nextLink, ok := result["@odata.nextLink"].(string); ok && nextLink != "" {
+			url = nextLink
+		} else {
+			url = ""
+		}
+	}
+
+	return allResults, nil
+}
+
+// enrichApplicationsWithCredentialMetadataSDK processes application data and embeds credential metadata
+// Produces output format identical to HTTP version
+func (l *SDKComprehensiveCollectorLink) enrichApplicationsWithCredentialMetadataSDK(azureADData map[string]interface{}) {
+	applicationsData, ok := azureADData["applications"]
+	if !ok {
+		l.Logger.Warn("No applications data found for credential enrichment")
+		return
+	}
+
+	applications, ok := applicationsData.([]interface{})
+	if !ok {
+		l.Logger.Warn("Applications data is not in expected format")
+		return
+	}
+
+	enrichedCount := 0
+	for _, appInterface := range applications {
+		app, ok := appInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Analyze key credentials (certificates)
+		keyCredentials := l.analyzeKeyCredentialsSDK(app)
+		if len(keyCredentials) > 0 {
+			app["credentialSummary_keyCredentials"] = keyCredentials
+			enrichedCount++
+		}
+
+		// Analyze password credentials (client secrets)
+		passwordCredentials := l.analyzePasswordCredentialsSDK(app)
+		if len(passwordCredentials) > 0 {
+			app["credentialSummary_passwordCredentials"] = passwordCredentials
+			enrichedCount++
+		}
+
+		// Add overall credential summary (matching HTTP version fields exactly)
+		app["credentialSummary_totalCredentials"] = len(keyCredentials) + len(passwordCredentials)
+		app["credentialSummary_hasCredentials"] = (len(keyCredentials) + len(passwordCredentials)) > 0
+	}
+
+	l.Logger.Info("Enriched applications with credential metadata", "count", enrichedCount)
+}
+
+// analyzeKeyCredentialsSDK processes keyCredentials array and returns summary
+func (l *SDKComprehensiveCollectorLink) analyzeKeyCredentialsSDK(app map[string]interface{}) []map[string]interface{} {
+	keyCredsInterface, ok := app["keyCredentials"]
+	if !ok {
+		return []map[string]interface{}{}
+	}
+
+	keyCreds, ok := keyCredsInterface.([]interface{})
+	if !ok {
+		return []map[string]interface{}{}
+	}
+
+	var credSummary []map[string]interface{}
+	for _, credInterface := range keyCreds {
+		cred, ok := credInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Output format MUST match HTTP version exactly
+		summary := map[string]interface{}{
+			"type":          "certificate",
+			"keyId":         cred["keyId"],
+			"displayName":   cred["displayName"],
+			"usage":         cred["usage"],
+			"startDateTime": cred["startDateTime"],
+			"endDateTime":   cred["endDateTime"],
+		}
+		credSummary = append(credSummary, summary)
+	}
+
+	return credSummary
+}
+
+// analyzePasswordCredentialsSDK processes passwordCredentials array and returns summary
+func (l *SDKComprehensiveCollectorLink) analyzePasswordCredentialsSDK(app map[string]interface{}) []map[string]interface{} {
+	passwordCredsInterface, ok := app["passwordCredentials"]
+	if !ok {
+		return []map[string]interface{}{}
+	}
+
+	passwordCreds, ok := passwordCredsInterface.([]interface{})
+	if !ok {
+		return []map[string]interface{}{}
+	}
+
+	var credSummary []map[string]interface{}
+	for _, credInterface := range passwordCreds {
+		cred, ok := credInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Output format MUST match HTTP version exactly
+		summary := map[string]interface{}{
+			"type":          "clientSecret",
+			"keyId":         cred["keyId"],
+			"displayName":   cred["displayName"],
+			"hint":          cred["hint"],
+			"startDateTime": cred["startDateTime"],
+			"endDateTime":   cred["endDateTime"],
+		}
+		credSummary = append(credSummary, summary)
+	}
+
+	return credSummary
 }
 
 // collectAllPIMDataSDK collects all PIM data using Graph SDK (official PIM APIs)

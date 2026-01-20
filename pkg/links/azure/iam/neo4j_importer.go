@@ -4012,14 +4012,18 @@ func (l *Neo4jImporterLink) getValidatedGlobalAdminQuery() string {
 	return `
 	MATCH (user:Resource)-[perm:HAS_PERMISSION]->(tenant:Resource)
 	WHERE perm.roleName = "Global Administrator" OR perm.templateId = "62e90394-69f5-4237-9190-012177145e10"
-	WITH user, tenant
+	WITH user, tenant, perm
 	MATCH (tenant)-[:CONTAINS*]->(escalate_target:Resource)
 	WHERE escalate_target <> user
-	WITH DISTINCT user, escalate_target
+	WITH DISTINCT user, escalate_target, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "GlobalAdministrator",
 	    r.condition = "Global Administrator role provides complete tenant control and can escalate to all resources in tenant hierarchy",
-	    r.category = "DirectoryRole"
+	    r.category = "DirectoryRole",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4029,15 +4033,19 @@ func (l *Neo4jImporterLink) getValidatedPrivilegedRoleAdminQuery() string {
 	return `
 	MATCH (user:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
 	WHERE perm.roleName = "Privileged Role Administrator" OR perm.templateId = "e8611ab8-c189-46e8-94e1-60213ab1f814"
-	WITH user
+	WITH user, perm
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user
 	  AND escalate_target.resourceType IN ["Microsoft.DirectoryServices/users", "Microsoft.DirectoryServices/servicePrincipals", "Microsoft.DirectoryServices/groups"]
-	WITH DISTINCT user, escalate_target
+	WITH DISTINCT user, escalate_target, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "PrivilegedRoleAdmin",
 	    r.condition = "Privileged Role Administrator can assign Global Administrator or any other directory role to any principal",
-	    r.category = "DirectoryRole"
+	    r.category = "DirectoryRole",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4047,14 +4055,18 @@ func (l *Neo4jImporterLink) getValidatedPrivilegedAuthAdminQuery() string {
 	return `
 	MATCH (user:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
 	WHERE perm.roleName = "Privileged Authentication Administrator" OR perm.templateId = "7be44c8a-adaf-4e2a-84d6-ab2649e08a13"
-	WITH user
+	WITH user, perm
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user AND escalate_target.resourceType = "Microsoft.DirectoryServices/users"
-	WITH DISTINCT user, escalate_target
+	WITH DISTINCT user, escalate_target, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "PrivilegedAuthenticationAdmin",
 	    r.condition = "Can reset passwords and authentication methods for ANY user including Global Administrators",
-	    r.category = "DirectoryRole"
+	    r.category = "DirectoryRole",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4064,14 +4076,18 @@ func (l *Neo4jImporterLink) getValidatedApplicationAdminQuery() string {
 	return `
 	MATCH (user:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
 	WHERE perm.roleName = "Application Administrator" OR perm.templateId = "9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3"
-	WITH user
+	WITH user, perm
 	MATCH (app:Resource)
 	WHERE app.resourceType IN ["Microsoft.DirectoryServices/applications", "Microsoft.DirectoryServices/servicePrincipals"]
-	WITH DISTINCT user, app
+	WITH DISTINCT user, app, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(app)
 	SET r.method = "ApplicationAdmin",
 	    r.condition = "Application Administrator can add credentials to applications/service principals to assume their identity and inherit permissions",
-	    r.category = "DirectoryRole"
+	    r.category = "DirectoryRole",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4081,14 +4097,18 @@ func (l *Neo4jImporterLink) getValidatedCloudApplicationAdminQuery() string {
 	return `
 	MATCH (user:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
 	WHERE perm.roleName = "Cloud Application Administrator" OR perm.templateId = "158c047a-c907-4556-b7ef-446551a6b5f7"
-	WITH user
+	WITH user, perm
 	MATCH (app:Resource)
 	WHERE app.resourceType IN ["Microsoft.DirectoryServices/applications", "Microsoft.DirectoryServices/servicePrincipals"]
-	WITH DISTINCT user, app
+	WITH DISTINCT user, app, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(app)
 	SET r.method = "CloudApplicationAdmin",
 	    r.condition = "Cloud Application Administrator can add credentials to applications and service principals",
-	    r.category = "DirectoryRole"
+	    r.category = "DirectoryRole",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4098,14 +4118,18 @@ func (l *Neo4jImporterLink) getValidatedGroupsAdminQuery() string {
 	return `
 	MATCH (user:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
 	WHERE perm.roleName = "Groups Administrator" OR perm.templateId = "fdd7a751-b60b-444a-984c-02652fe8fa1c"
-	WITH user
+	WITH user, perm
 	MATCH (group:Resource)
 	WHERE group.resourceType = "Microsoft.DirectoryServices/groups"
-	WITH DISTINCT user, group
+	WITH DISTINCT user, group, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(group)
 	SET r.method = "GroupsAdministrator",
 	    r.condition = "Groups Administrator can create, delete, and manage all aspects of groups including privileged group memberships",
-	    r.category = "DirectoryRole"
+	    r.category = "DirectoryRole",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4115,15 +4139,19 @@ func (l *Neo4jImporterLink) getValidatedUserAdminQuery() string {
 	return `
 	MATCH (user:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
 	WHERE perm.roleName = "User Administrator" OR perm.templateId = "fe930be7-5e62-47db-91af-98c3a49a38b1"
-	WITH user
+	WITH user, perm
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user AND escalate_target.resourceType = "Microsoft.DirectoryServices/users"
 	  AND NOT EXISTS { (escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource) WHERE admin_perm.roleName CONTAINS "Administrator" }
-	WITH DISTINCT user, escalate_target
+	WITH DISTINCT user, escalate_target, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "UserAdministrator",
 	    r.condition = "Can reset passwords and modify properties of non-administrator users",
-	    r.category = "DirectoryRole"
+	    r.category = "DirectoryRole",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4133,15 +4161,19 @@ func (l *Neo4jImporterLink) getValidatedAuthenticationAdminQuery() string {
 	return `
 	MATCH (user:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
 	WHERE perm.roleName = "Authentication Administrator" OR perm.templateId = "c4e39bd9-1100-46d3-8c65-fb160da0071f"
-	WITH user
+	WITH user, perm
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user AND escalate_target.resourceType = "Microsoft.DirectoryServices/users"
 	  AND NOT EXISTS { (escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource) WHERE admin_perm.roleName CONTAINS "Administrator" }
-	WITH DISTINCT user, escalate_target
+	WITH DISTINCT user, escalate_target, perm
 	CREATE (user)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "AuthenticationAdmin",
 	    r.condition = "Can reset authentication methods including passwords and MFA for non-administrator users",
-	    r.category = "DirectoryRole"
+	    r.category = "DirectoryRole",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4274,15 +4306,19 @@ func (l *Neo4jImporterLink) getValidatedRBACOwnerQuery() string {
 	return `
 	MATCH (principal:Resource)-[perm:HAS_PERMISSION]->(scope:Resource)
 	WHERE perm.roleName = "Owner" OR perm.roleDefinitionId CONTAINS "8e3af657-a8ff-443c-a75c-2fe8c4bcb635"
-	WITH DISTINCT principal, scope
+	WITH DISTINCT principal, scope, perm
 	MATCH (scope)-[:CONTAINS*0..]->(escalate_target:Resource)
 	WHERE escalate_target <> principal
 	  AND NOT escalate_target.resourceType STARTS WITH "Microsoft.DirectoryServices/"
-	WITH DISTINCT principal, escalate_target
+	WITH DISTINCT principal, escalate_target, perm
 	CREATE (principal)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "AzureOwner",
 	    r.condition = "Owner role at any scope provides full control over Azure resources within that scope and can assign roles",
-	    r.category = "RBAC"
+	    r.category = "RBAC",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4292,15 +4328,19 @@ func (l *Neo4jImporterLink) getValidatedRBACUserAccessAdminQuery() string {
 	return `
 	MATCH (principal:Resource)-[perm:HAS_PERMISSION]->(scope:Resource)
 	WHERE perm.roleName = "User Access Administrator" OR perm.roleDefinitionId CONTAINS "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"
-	WITH DISTINCT principal, scope
+	WITH DISTINCT principal, scope, perm
 	MATCH (scope)-[:CONTAINS*0..]->(escalate_target:Resource)
 	WHERE escalate_target <> principal
 	  AND NOT escalate_target.resourceType STARTS WITH "Microsoft.DirectoryServices/"
-	WITH DISTINCT principal, escalate_target
+	WITH DISTINCT principal, escalate_target, perm
 	CREATE (principal)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "UserAccessAdmin",
 	    r.condition = "User Access Administrator can assign any Azure role within scope to compromise identities in that scope",
-	    r.category = "RBAC"
+	    r.category = "RBAC",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }

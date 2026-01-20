@@ -4346,27 +4346,6 @@ func (l *Neo4jImporterLink) getGroupOwnerPotentialPermissionQuery() string {
 	`
 }
 
-// DEPRECATED: getValidatedGroupOwnerAddMemberQuery - Old buggy query that created CAN_ESCALATE to users
-// This function is kept for reference but is no longer used (replaced by getGroupOwnerPotentialPermissionQuery)
-// Issue: Created edges to users (wrong semantic) instead of to resources the group can access
-func (l *Neo4jImporterLink) getValidatedGroupOwnerAddMemberQuery() string {
-	return `
-	MATCH (owner:Resource)-[:OWNS]->(group:Resource)
-	WHERE group.resourceType = "Microsoft.DirectoryServices/groups"
-	  AND (EXISTS { (group)-[role_perm:HAS_PERMISSION]->(:Resource) WHERE role_perm.roleName IS NOT NULL }
-	       OR EXISTS { (group)-[rbac_perm:HAS_PERMISSION]->(:Resource) WHERE rbac_perm.permission = "Owner" })
-	WITH owner, group
-	MATCH (target:Resource)
-	WHERE target <> owner AND target.resourceType IN ["Microsoft.DirectoryServices/users", "Microsoft.DirectoryServices/servicePrincipals"]
-	WITH DISTINCT owner, target
-	CREATE (owner)-[r:CAN_ESCALATE]->(target)
-	SET r.method = "GroupOwnerAddMember",
-	    r.condition = "Group owner can add any user to privileged group granting them all group's role assignments",
-	    r.category = "GroupOwnership"
-	RETURN count(r) as created
-	`
-}
-
 // VALIDATED APPLICATION/SP FUNCTIONS (3 functions)
 
 // getValidatedSPOwnerAddSecretQuery - Service Principal owner can add secrets if not locked

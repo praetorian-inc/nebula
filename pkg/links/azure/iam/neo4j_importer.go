@@ -117,19 +117,25 @@ func (l *Neo4jImporterLink) Process(input interface{}) error {
 		l.Logger.Error("Failed to create Graph permission edges", "error", err)
 	}
 
-	// Step 13: Create application ownership edges
+	// Step 13: Create application ownership edges (must run BEFORE group owner potential)
 	message.Info("🔐 Phase 2e: Creating application ownership edges")
 	if err := l.createApplicationOwnershipEdges(); err != nil {
 		l.Logger.Error("Failed to create application ownership edges", "error", err)
 	}
 
-	// Step 14: Create validated CAN_ESCALATE edges (privilege escalation paths)
+	// Step 14: Create group owner potential HAS_PERMISSION edges (requires OWNS edges from Step 13)
+	message.Info("🔐 Phase 2f: Creating group owner potential HAS_PERMISSION edges")
+	if !l.createGroupOwnerPotentialPermissionEdges() {
+		l.Logger.Warn("No group owner potential HAS_PERMISSION edges were created")
+	}
+
+	// Step 15: Create validated CAN_ESCALATE edges (privilege escalation paths)
 	message.Info("⚡ Phase 4: Creating validated CAN_ESCALATE edges (privilege escalation paths)")
 	if !l.createValidatedEscalationEdges() {
 		l.Logger.Warn("No CAN_ESCALATE edges were created")
 	}
 
-	// Step 15: Generate summary
+	// Step 16: Generate summary
 	summary := l.generateImportSummary()
 	message.Info("🎉 Security graph creation completed successfully!")
 	message.Info("📈 Ready for Azure security analysis and attack path discovery")
@@ -2329,6 +2335,58 @@ func (l *Neo4jImporterLink) createGroupMemberPermissionEdges() bool {
 	return totalEdgesCreated > 0
 }
 
+// createGroupOwnerPotentialPermissionEdges creates HAS_PERMISSION edges for group owners
+// showing permissions they can obtain by adding themselves to groups they own
+func (l *Neo4jImporterLink) createGroupOwnerPotentialPermissionEdges() bool {
+	message.Info("Creating group owner potential HAS_PERMISSION edges...")
+
+	cypher := l.getGroupOwnerPotentialPermissionQuery()
+	l.Logger.Debug("Group owner query", "cypher", cypher)
+
+	ctx := context.Background()
+	session := l.driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+
+	result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, cypher, nil)
+		if err != nil {
+			l.Logger.Error("Query execution error", "error", err)
+			return 0, err
+		}
+
+		if result.Next(ctx) {
+			record := result.Record()
+			l.Logger.Debug("Got result record", "keys", record.Keys, "values", record.Values)
+			if created, ok := record.Get("created"); ok {
+				l.Logger.Debug("Created field found", "value", created, "type", fmt.Sprintf("%T", created))
+				return created, nil
+			} else {
+				l.Logger.Debug("Created field not found in record")
+			}
+		} else {
+			l.Logger.Debug("No result records returned")
+		}
+		return 0, nil
+	})
+
+	if err != nil {
+		l.Logger.Error("Error creating group owner potential HAS_PERMISSION edges", "error", err)
+		return false
+	}
+
+	l.Logger.Debug("Result from transaction", "result", result, "type", fmt.Sprintf("%T", result))
+	if edgesCreated, ok := l.convertToInt64(result); ok && edgesCreated > 0 {
+		// Add to existing HAS_PERMISSION count
+		currentCount := l.edgeCounts["HAS_PERMISSION"]
+		l.edgeCounts["HAS_PERMISSION"] = currentCount + int(edgesCreated)
+		message.Info("Created %d group owner potential HAS_PERMISSION edges", edgesCreated)
+		return true
+	}
+
+	message.Info("No group owner potential HAS_PERMISSION edges created")
+	return false
+}
+
 // buildRoleDefinitionsCache builds a cache of role definitions mapped by templateId/roleDefinitionId for permission expansion
 func (l *Neo4jImporterLink) buildRoleDefinitionsCache() error {
 	azureAD := l.getMapValue(l.consolidatedData, "azure_ad")
@@ -3868,7 +3926,7 @@ func (l *Neo4jImporterLink) getStringField(data map[string]interface{}, key stri
 
 // createValidatedEscalationEdges creates only validated, production-ready CAN_ESCALATE edges
 func (l *Neo4jImporterLink) createValidatedEscalationEdges() bool {
-	message.Info("Creating validated CAN_ESCALATE edges - 20 production-ready attack vectors...")
+	message.Info("Creating validated CAN_ESCALATE edges - 19 production-ready attack vectors...")
 
 	ctx := context.Background()
 	session := l.driver.NewSession(ctx, neo4j.SessionConfig{})
@@ -3903,8 +3961,8 @@ func (l *Neo4jImporterLink) createValidatedEscalationEdges() bool {
 		{"RBAC_Owner", l.getValidatedRBACOwnerQuery()},
 		{"RBAC_UserAccessAdmin", l.getValidatedRBACUserAccessAdminQuery()},
 
-		// GROUP-BASED (1 vector) - Use OWNS, CONTAINS
-		{"Group_OwnerAddMember", l.getValidatedGroupOwnerAddMemberQuery()},
+		// GROUP-BASED: Removed - now handled via HAS_PERMISSION edges in Phase 2c
+		// Group owners get HAS_PERMISSION edges to resources, then existing escalation queries process them
 
 		// APPLICATION/SP (3 vectors) - Use OWNS, CONTAINS
 		{"Application_SPOwnerAddSecret", l.getValidatedSPOwnerAddSecretQuery()},
@@ -4249,7 +4307,48 @@ func (l *Neo4jImporterLink) getValidatedRBACUserAccessAdminQuery() string {
 
 // VALIDATED GROUP-BASED FUNCTIONS (2 functions)
 
-// getValidatedGroupOwnerAddMemberQuery - Group owner can add members to privileged groups
+// getGroupOwnerPotentialPermissionQuery creates HAS_PERMISSION edges showing what permissions
+// group owners can obtain by adding themselves to groups they own
+func (l *Neo4jImporterLink) getGroupOwnerPotentialPermissionQuery() string {
+	return `
+	// Find owners of groups that have permissions
+	MATCH (owner:Resource)-[:OWNS]->(group:Resource)
+	WHERE group.resourceType = "Microsoft.DirectoryServices/groups"
+
+	// Get the permissions the group has
+	MATCH (group)-[groupPerm:HAS_PERMISSION]->(scope:Resource)
+	WHERE (groupPerm.roleName IS NOT NULL OR groupPerm.permission IS NOT NULL)
+	  AND NOT EXISTS {
+		MATCH (owner)-[existing:HAS_PERMISSION]->(scope)
+		WHERE (groupPerm.roleName IS NOT NULL AND existing.roleName = groupPerm.roleName)
+		   OR (groupPerm.permission IS NOT NULL AND existing.permission = groupPerm.permission)
+	  }
+
+	WITH DISTINCT owner, group, groupPerm, scope
+
+	// Create HAS_PERMISSION edge (not CAN_ESCALATE - let escalation logic handle that)
+	CREATE (owner)-[r:HAS_PERMISSION]->(scope)
+	SET r.permission = coalesce(groupPerm.roleName, groupPerm.permission),
+		r.roleName = groupPerm.roleName,
+		r.roleDefinitionId = groupPerm.roleDefinitionId,
+		r.templateId = groupPerm.templateId,
+		r.principalType = "User",
+		r.source = "group_owner_potential",
+		r.grantedAt = groupPerm.grantedAt,
+		r.targetResourceType = groupPerm.targetResourceType,
+		r.viaGroupId = group.id,
+		r.viaGroupName = group.displayName,
+		r.requiresAction = "Add self to group",
+		r.assignmentType = "Potential",
+		r.createdAt = datetime()
+
+	RETURN count(r) as created
+	`
+}
+
+// DEPRECATED: getValidatedGroupOwnerAddMemberQuery - Old buggy query that created CAN_ESCALATE to users
+// This function is kept for reference but is no longer used (replaced by getGroupOwnerPotentialPermissionQuery)
+// Issue: Created edges to users (wrong semantic) instead of to resources the group can access
 func (l *Neo4jImporterLink) getValidatedGroupOwnerAddMemberQuery() string {
 	return `
 	MATCH (owner:Resource)-[:OWNS]->(group:Resource)

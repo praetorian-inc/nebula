@@ -111,8 +111,8 @@ func (l *Neo4jImporterLink) Process(input interface{}) error {
 		l.Logger.Warn("No group member HAS_PERMISSION edges were created")
 	}
 
-	// Step 12: Create HAS_GRAPH_PERMISSION edges (Graph API permissions)
-	message.Info("🔐 Phase 2d: Creating HAS_GRAPH_PERMISSION edges (Graph API permissions)")
+	// Step 12: Create HAS_PERMISSION edges for Graph API permissions
+	message.Info("🔐 Phase 2d: Creating HAS_PERMISSION edges (Microsoft Graph API permissions)")
 	if err := l.createGraphPermissionEdges(); err != nil {
 		l.Logger.Error("Failed to create Graph permission edges", "error", err)
 	}
@@ -3192,7 +3192,7 @@ func (l *Neo4jImporterLink) extractConstraintName(constraint string) string {
 	return "unknown"
 }
 
-// createGraphPermissionEdges creates HAS_GRAPH_PERMISSION relationships for Microsoft Graph API permissions
+// createGraphPermissionEdges creates HAS_PERMISSION relationships for Microsoft Graph API permissions
 func (l *Neo4jImporterLink) createGraphPermissionEdges() error {
 	l.Logger.Info("Creating Microsoft Graph API permission relationships...")
 
@@ -3252,8 +3252,8 @@ func (l *Neo4jImporterLink) createGraphPermissionEdges() error {
 	}
 
 	l.Logger.Info(fmt.Sprintf("✅ Graph permission edge creation completed successfully!"))
-	l.Logger.Info(fmt.Sprintf("📊 Summary: %d total HAS_GRAPH_PERMISSION edges created", totalCreated))
-	message.Info("Created %d total HAS_GRAPH_PERMISSION edges", totalCreated)
+	l.Logger.Info(fmt.Sprintf("📊 Summary: %d total HAS_PERMISSION edges created (source: Microsoft Graph)", totalCreated))
+	message.Info("Created %d total HAS_PERMISSION edges (source: Microsoft Graph)", totalCreated)
 
 	return nil
 }
@@ -3280,7 +3280,7 @@ func (l *Neo4jImporterLink) processBatchGraphPermissions(permissions []CompleteG
 		 END as principal
 	WHERE principal IS NOT NULL
 
-	MERGE (principal)-[r:HAS_GRAPH_PERMISSION {
+	MERGE (principal)-[r:HAS_PERMISSION {
 		permission: perm.permission,
 		permissionType: perm.permissionType,
 		consentType: perm.consentType,
@@ -3451,28 +3451,6 @@ func (l *Neo4jImporterLink) createApplicationOwnershipEdges() error {
 		}
 		totalEdges += count
 		l.edgeCounts["OWNS"] += count // Add to existing OWNS count
-	}
-
-	// Process application credential management permissions - role-based permissions
-	credentialPerms := l.getArrayValue(azureAD, "applicationCredentialPermissions")
-	if len(credentialPerms) > 0 {
-		count, err := l.createApplicationCredentialPermissionEdges(credentialPerms)
-		if err != nil {
-			return fmt.Errorf("failed to create credential permission edges: %w", err)
-		}
-		totalEdges += count
-		l.edgeCounts["HAS_APP_CREDENTIAL_PERMISSION"] = count
-	}
-
-	// Process application RBAC permissions - role-based application access
-	rbacPerms := l.getArrayValue(azureAD, "applicationRBACPermissions")
-	if len(rbacPerms) > 0 {
-		count, err := l.createApplicationRBACPermissionEdges(rbacPerms)
-		if err != nil {
-			return fmt.Errorf("failed to create RBAC permission edges: %w", err)
-		}
-		totalEdges += count
-		l.edgeCounts["HAS_APP_RBAC_PERMISSION"] = count
 	}
 
 	if totalEdges > 0 {
@@ -3744,176 +3722,6 @@ func (l *Neo4jImporterLink) createServicePrincipalOwnershipDirectEdges(servicePr
 	return totalProcessed, nil
 }
 
-func (l *Neo4jImporterLink) createApplicationCredentialPermissionEdges(credentialPerms []interface{}) (int, error) {
-	if len(credentialPerms) == 0 {
-		return 0, nil
-	}
-
-	l.Logger.Info("Creating application credential permission edges", "count", len(credentialPerms))
-
-	var edges []map[string]interface{}
-	currentTime := time.Now().Unix()
-
-	for _, item := range credentialPerms {
-		permMap, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		principalID := l.getStringValue(permMap, "principalId")
-		roleName := l.getStringValue(permMap, "roleName")
-		if principalID == "" || roleName == "" {
-			continue
-		}
-
-		edge := map[string]interface{}{
-			"sourceId":         principalID,
-			"permission":       "ApplicationCredentialManagement",
-			"roleName":        roleName,
-			"source":          "DirectoryRole",
-			"principalType":   "User",
-			"createdAt":       currentTime,
-		}
-		edges = append(edges, edge)
-	}
-
-	if len(edges) == 0 {
-		l.Logger.Info("No valid credential permission edges to create")
-		return 0, nil
-	}
-
-	ctx := context.Background()
-	session := l.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: ""})
-	defer session.Close(ctx)
-
-	batchSize := 500
-	totalProcessed := 0
-
-	for i := 0; i < len(edges); i += batchSize {
-		end := i + batchSize
-		if end > len(edges) {
-			end = len(edges)
-		}
-		batch := edges[i:end]
-
-		query := `
-		UNWIND $edges AS edge
-		MATCH (source {id: edge.sourceId})
-		MATCH (tenant {resourceType: "Microsoft.DirectoryServices/tenant"})
-		MERGE (source)-[r:HAS_PERMISSION {roleName: edge.roleName, permission: edge.permission}]->(tenant)
-		ON CREATE SET r.source = edge.source,
-		              r.principalType = edge.principalType,
-		              r.createdAt = edge.createdAt
-		ON MATCH SET r.createdAt = edge.createdAt
-		RETURN count(r) as created`
-
-		result, err := session.Run(ctx, query, map[string]interface{}{"edges": batch})
-		if err != nil {
-			return totalProcessed, fmt.Errorf("failed to create credential permission edges batch: %w", err)
-		}
-
-		if result.Next(ctx) {
-			if count, ok := result.Record().Get("created"); ok {
-				if c, ok := count.(int64); ok {
-					totalProcessed += int(c)
-				}
-			}
-		}
-
-		if err := result.Err(); err != nil {
-			return totalProcessed, fmt.Errorf("error processing credential permission edges batch: %w", err)
-		}
-	}
-
-	l.Logger.Info("Created credential management permission edges", "count", totalProcessed)
-	return totalProcessed, nil
-}
-
-func (l *Neo4jImporterLink) createApplicationRBACPermissionEdges(rbacPerms []interface{}) (int, error) {
-	if len(rbacPerms) == 0 {
-		return 0, nil
-	}
-
-	l.Logger.Info("Creating application RBAC permission edges", "count", len(rbacPerms))
-
-	var edges []map[string]interface{}
-	currentTime := time.Now().Unix()
-
-	for _, item := range rbacPerms {
-		permMap, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		principalID := l.getStringValue(permMap, "principalId")
-		roleName := l.getStringValue(permMap, "roleName")
-		if principalID == "" || roleName == "" {
-			continue
-		}
-
-		edge := map[string]interface{}{
-			"sourceId":         principalID,
-			"permission":       "ApplicationManagement",
-			"roleName":        roleName,
-			"source":          "DirectoryRole",
-			"principalType":   "User",
-			"createdAt":       currentTime,
-		}
-		edges = append(edges, edge)
-	}
-
-	if len(edges) == 0 {
-		l.Logger.Info("No valid RBAC permission edges to create")
-		return 0, nil
-	}
-
-	ctx := context.Background()
-	session := l.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: ""})
-	defer session.Close(ctx)
-
-	batchSize := 500
-	totalProcessed := 0
-
-	for i := 0; i < len(edges); i += batchSize {
-		end := i + batchSize
-		if end > len(edges) {
-			end = len(edges)
-		}
-		batch := edges[i:end]
-
-		query := `
-		UNWIND $edges AS edge
-		MATCH (source {id: edge.sourceId})
-		MATCH (tenant {resourceType: "Microsoft.DirectoryServices/tenant"})
-		MERGE (source)-[r:HAS_PERMISSION {roleName: edge.roleName, permission: edge.permission}]->(tenant)
-		ON CREATE SET r.source = edge.source,
-		              r.principalType = edge.principalType,
-		              r.createdAt = edge.createdAt
-		ON MATCH SET r.createdAt = edge.createdAt
-		RETURN count(r) as created`
-
-		result, err := session.Run(ctx, query, map[string]interface{}{"edges": batch})
-		if err != nil {
-			return totalProcessed, fmt.Errorf("failed to create RBAC permission edges batch: %w", err)
-		}
-
-		if result.Next(ctx) {
-			if count, ok := result.Record().Get("created"); ok {
-				if c, ok := count.(int64); ok {
-					totalProcessed += int(c)
-				}
-			}
-		}
-
-		if err := result.Err(); err != nil {
-			return totalProcessed, fmt.Errorf("error processing RBAC permission edges batch: %w", err)
-		}
-	}
-
-	l.Logger.Info("Created application RBAC permission edges", "count", totalProcessed)
-	return totalProcessed, nil
-}
-
 // getStringField safely extracts string fields from map data
 func (l *Neo4jImporterLink) getStringField(data map[string]interface{}, key string) string {
 	if value, exists := data[key]; exists {
@@ -3949,7 +3757,7 @@ func (l *Neo4jImporterLink) createValidatedEscalationEdges() bool {
 		{"DirectoryRole_UserAdmin", l.getValidatedUserAdminQuery()},
 		{"DirectoryRole_AuthenticationAdmin", l.getValidatedAuthenticationAdminQuery()},
 
-		// GRAPH PERMISSIONS (6 vectors) - Use HAS_GRAPH_PERMISSION
+		// GRAPH PERMISSIONS (6 vectors) - Query HAS_PERMISSION with source="Microsoft Graph"
 		{"GraphPermission_RoleManagement", l.getValidatedGraphRoleManagementQuery()},
 		{"GraphPermission_DirectoryReadWrite", l.getValidatedGraphDirectoryReadWriteQuery()},
 		{"GraphPermission_ApplicationReadWrite", l.getValidatedGraphApplicationReadWriteQuery()},
@@ -3968,6 +3776,9 @@ func (l *Neo4jImporterLink) createValidatedEscalationEdges() bool {
 		{"Application_SPOwnerAddSecret", l.getValidatedSPOwnerAddSecretQuery()},
 		{"Application_AppOwnerAddSecret", l.getValidatedAppOwnerAddSecretQuery()},
 		{"Application_ToServicePrincipal", l.getValidatedApplicationToServicePrincipalQuery()},
+
+		// MANAGED IDENTITY (1 vector) - Use CONTAINS
+		{"ManagedIdentity_ToServicePrincipal", l.getValidatedManagedIdentityToServicePrincipalQuery()},
 	}
 
 	// Execute each query individually for better error handling and reporting
@@ -4183,19 +3994,24 @@ func (l *Neo4jImporterLink) getValidatedAuthenticationAdminQuery() string {
 // getValidatedGraphRoleManagementQuery - RoleManagement.ReadWrite.Directory permission
 func (l *Neo4jImporterLink) getValidatedGraphRoleManagementQuery() string {
 	return `
-	MATCH (sp:Resource)-[perm:HAS_GRAPH_PERMISSION]->(target:Resource)
-	WHERE perm.permission = "RoleManagement.ReadWrite.Directory"
+	MATCH (sp:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
+	WHERE perm.source = "Microsoft Graph"
+	  AND perm.permission = "RoleManagement.ReadWrite.Directory"
 	  AND perm.permissionType = "Application"
 	  AND perm.consentType = "AllPrincipals"
-	WITH sp
+	WITH sp, perm
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> sp
 	  AND escalate_target.resourceType IN ["Microsoft.DirectoryServices/users", "Microsoft.DirectoryServices/servicePrincipals", "Microsoft.DirectoryServices/groups"]
-	WITH DISTINCT sp, escalate_target
+	WITH DISTINCT sp, escalate_target, perm
 	CREATE (sp)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "GraphRoleManagement",
 	    r.condition = "Service Principal with RoleManagement.ReadWrite.Directory can directly assign Global Administrator or any directory role to any principal",
-	    r.category = "GraphPermission"
+	    r.category = "GraphPermission",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4203,27 +4019,25 @@ func (l *Neo4jImporterLink) getValidatedGraphRoleManagementQuery() string {
 // getValidatedGraphDirectoryReadWriteQuery - Directory.ReadWrite.All permission
 func (l *Neo4jImporterLink) getValidatedGraphDirectoryReadWriteQuery() string {
 	return `
-	// Match both HAS_GRAPH_PERMISSION and HAS_PERMISSION for Directory.ReadWrite.All
-	MATCH (sp:Resource)
-	WHERE EXISTS {
-		(sp)-[perm:HAS_GRAPH_PERMISSION]->(target:Resource)
-		WHERE perm.permission = "Directory.ReadWrite.All"
-		  AND perm.permissionType = "Application"
-		  AND perm.consentType = "AllPrincipals"
-	} OR EXISTS {
-		(sp)-[perm:HAS_PERMISSION]->(target:Resource)
-		WHERE perm.permission = "Directory.ReadWrite.All"
-		  AND perm.source = "Graph API OAuth2 Grant"
-	}
-	WITH sp
+	// Match HAS_PERMISSION for Directory.ReadWrite.All (now unified with Graph permissions)
+	MATCH (sp:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
+	WHERE perm.permission = "Directory.ReadWrite.All"
+	  AND (perm.source = "Microsoft Graph" OR perm.source = "Graph API OAuth2 Grant")
+	  AND (perm.permissionType = "Application" OR perm.permissionType IS NULL)
+	  AND (perm.consentType = "AllPrincipals" OR perm.consentType IS NULL)
+	WITH sp, perm
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> sp
 	  AND escalate_target.resourceType STARTS WITH "Microsoft.DirectoryServices/"
-	WITH DISTINCT sp, escalate_target
+	WITH DISTINCT sp, escalate_target, perm
 	CREATE (sp)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "Directory.ReadWrite.All",
 	    r.condition = "Service Principal with Directory.ReadWrite.All can modify any directory object including role assignments",
-	    r.category = "GraphPermission"
+	    r.category = "GraphPermission",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4231,17 +4045,23 @@ func (l *Neo4jImporterLink) getValidatedGraphDirectoryReadWriteQuery() string {
 // getValidatedGraphApplicationReadWriteQuery - Application.ReadWrite.All permission
 func (l *Neo4jImporterLink) getValidatedGraphApplicationReadWriteQuery() string {
 	return `
-	MATCH (sp:Resource)-[perm:HAS_GRAPH_PERMISSION]->(target:Resource)
-	WHERE perm.permission = "Application.ReadWrite.All"
+	MATCH (sp:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
+	WHERE perm.source = "Microsoft Graph"
+	  AND perm.permission = "Application.ReadWrite.All"
 	  AND perm.permissionType = "Application"
 	  AND perm.consentType = "AllPrincipals"
-	WITH sp
+	WITH sp, perm
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target.resourceType IN ["Microsoft.DirectoryServices/applications", "Microsoft.DirectoryServices/servicePrincipals"] AND escalate_target <> sp
+	WITH DISTINCT sp, escalate_target, perm
 	CREATE (sp)-[r:CAN_ESCALATE]->(escalate_target)
 	SET r.method = "GraphApplicationReadWrite",
 	    r.condition = "Service Principal with Application.ReadWrite.All can add credentials to any application or service principal then authenticate as them",
-	    r.category = "GraphPermission"
+	    r.category = "GraphPermission",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4249,14 +4069,20 @@ func (l *Neo4jImporterLink) getValidatedGraphApplicationReadWriteQuery() string 
 // getValidatedGraphAppRoleAssignmentQuery - AppRoleAssignment.ReadWrite.All permission
 func (l *Neo4jImporterLink) getValidatedGraphAppRoleAssignmentQuery() string {
 	return `
-	MATCH (sp:Resource)-[perm:HAS_GRAPH_PERMISSION]->(target:Resource)
-	WHERE perm.permission = "AppRoleAssignment.ReadWrite.All"
+	MATCH (sp:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
+	WHERE perm.source = "Microsoft Graph"
+	  AND perm.permission = "AppRoleAssignment.ReadWrite.All"
 	  AND perm.permissionType = "Application"
 	  AND perm.consentType = "AllPrincipals"
+	WITH sp, perm
 	CREATE (sp)-[r:CAN_ESCALATE]->(sp)
 	SET r.method = "GraphAppRoleAssignment",
 	    r.condition = "Service Principal with AppRoleAssignment.ReadWrite.All can grant itself any permission including RoleManagement.ReadWrite.Directory",
-	    r.category = "GraphPermission"
+	    r.category = "GraphPermission",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4264,18 +4090,23 @@ func (l *Neo4jImporterLink) getValidatedGraphAppRoleAssignmentQuery() string {
 // getValidatedGraphUserReadWriteQuery - User.ReadWrite.All permission
 func (l *Neo4jImporterLink) getValidatedGraphUserReadWriteQuery() string {
 	return `
-	MATCH (sp:Resource)-[perm:HAS_GRAPH_PERMISSION]->(target:Resource)
-	WHERE perm.permission = "User.ReadWrite.All"
+	MATCH (sp:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
+	WHERE perm.source = "Microsoft Graph"
+	  AND perm.permission = "User.ReadWrite.All"
 	  AND perm.permissionType = "Application"
 	  AND perm.consentType = "AllPrincipals"
-	WITH sp
+	WITH sp, perm
 	MATCH (user:Resource)
 	WHERE user.resourceType = "Microsoft.DirectoryServices/users" AND user <> sp
-	WITH DISTINCT sp, user
+	WITH DISTINCT sp, user, perm
 	CREATE (sp)-[r:CAN_ESCALATE]->(user)
 	SET r.method = "GraphUserReadWrite",
 	    r.condition = "Service Principal with User.ReadWrite.All can reset passwords, modify profiles, and disable accounts for any user",
-	    r.category = "GraphPermission"
+	    r.category = "GraphPermission",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4283,18 +4114,23 @@ func (l *Neo4jImporterLink) getValidatedGraphUserReadWriteQuery() string {
 // getValidatedGraphGroupReadWriteQuery - Group.ReadWrite.All permission
 func (l *Neo4jImporterLink) getValidatedGraphGroupReadWriteQuery() string {
 	return `
-	MATCH (sp:Resource)-[perm:HAS_GRAPH_PERMISSION]->(target:Resource)
-	WHERE perm.permission = "Group.ReadWrite.All"
+	MATCH (sp:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
+	WHERE perm.source = "Microsoft Graph"
+	  AND perm.permission = "Group.ReadWrite.All"
 	  AND perm.permissionType = "Application"
 	  AND perm.consentType = "AllPrincipals"
-	WITH sp
+	WITH sp, perm
 	MATCH (group:Resource)
 	WHERE group.resourceType = "Microsoft.DirectoryServices/groups" AND group <> sp
-	WITH DISTINCT sp, group
+	WITH DISTINCT sp, group, perm
 	CREATE (sp)-[r:CAN_ESCALATE]->(group)
 	SET r.method = "GraphGroupReadWrite",
 	    r.condition = "Service Principal with Group.ReadWrite.All can modify group memberships to add users to privileged groups",
-	    r.category = "GraphPermission"
+	    r.category = "GraphPermission",
+	    r.sourcePermission = perm.source,
+	    r.viaGroup = perm.viaGroupName,
+	    r.grantedByGroups = perm.grantedByGroups,
+	    r.targetRole = coalesce(perm.roleName, perm.permission)
 	RETURN count(r) as created
 	`
 }
@@ -4430,6 +4266,21 @@ func (l *Neo4jImporterLink) getValidatedApplicationToServicePrincipalQuery() str
 	SET r.method = "ApplicationToServicePrincipal",
 	    r.condition = "Application compromise (credential addition) provides access to corresponding Service Principal and all its permissions",
 	    r.category = "ApplicationIdentity"
+	RETURN count(r) as created
+	`
+}
+
+// getValidatedManagedIdentityToServicePrincipalQuery - Managed Identities can escalate to their Service Principals
+func (l *Neo4jImporterLink) getValidatedManagedIdentityToServicePrincipalQuery() string {
+	return `
+	MATCH (mi:Resource)-[:CONTAINS]->(sp:Resource)
+	WHERE mi.resourceType CONTAINS "managedidentity"
+	  AND sp.resourceType = "Microsoft.DirectoryServices/servicePrincipals"
+	WITH DISTINCT mi, sp
+	CREATE (mi)-[r:CAN_ESCALATE]->(sp)
+	SET r.method = "ManagedIdentityToServicePrincipal",
+	    r.condition = "Managed Identity compromise (via IMDS token theft from attached resource) provides access to Service Principal and all its permissions",
+	    r.category = "ManagedIdentity"
 	RETURN count(r) as created
 	`
 }

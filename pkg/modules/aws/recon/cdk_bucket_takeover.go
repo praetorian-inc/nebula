@@ -49,6 +49,8 @@ var AwsCdkBucketTakeover = chain.NewModule(
 		WithShortcode("f"),
 ).WithParams(
 	cfg.NewParam[string]("module-name", "name of the module for dynamic file naming"),
+	cfg.NewParam[bool]("risk-only", "when true, only output Risk objects"),
 ).WithConfigs(
 	cfg.WithArg("module-name", "cdk-bucket-takeover"),
+	cfg.WithArg("risk-only", true), // Only output Risk findings, not internal CDKRoleInfo data
 ).WithAutoRun()

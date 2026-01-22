@@ -15,6 +15,7 @@ import (
 	"github.com/praetorian-inc/nebula/internal/helpers"
 	"github.com/praetorian-inc/nebula/internal/message"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
+	"github.com/praetorian-inc/tabularium/pkg/model/model"
 )
 
 // NamedOutputData represents the structure that should be sent to the RuntimeJSONOutputter
@@ -38,9 +39,10 @@ const defaultOutfile = "out.json"
 // rather than at initialization time
 type RuntimeJSONOutputter struct {
 	*BaseFileOutputter
-	indent  int
-	output  []any
-	outfile string
+	indent   int
+	output   []any
+	outfile  string
+	riskOnly bool // When true, only output Risk objects (filter out internal chain data)
 }
 
 // NewRuntimeJSONOutputter creates a new RuntimeJSONOutputter
@@ -95,7 +97,14 @@ func (j *RuntimeJSONOutputter) Initialize() error {
 	}
 	j.indent = indent
 
-	slog.Debug("initialized runtime JSON outputter", "default_file", j.outfile, "indent", j.indent)
+	// Get risk-only filter setting
+	riskOnly, err := cfg.As[bool](j.Arg("risk-only"))
+	if err != nil {
+		riskOnly = false
+	}
+	j.riskOnly = riskOnly
+
+	slog.Debug("initialized runtime JSON outputter", "default_file", j.outfile, "indent", j.indent, "risk_only", j.riskOnly)
 	return nil
 }
 
@@ -107,9 +116,25 @@ func (j *RuntimeJSONOutputter) Output(val any) error {
 		if outputData.OutputFilename != "" && j.outfile == defaultOutfile {
 			j.SetOutputFile(outputData.OutputFilename)
 		}
-		// Add the actual data to our output list
+		// Add the actual data to our output list (apply risk-only filter if needed)
+		if j.riskOnly {
+			if _, isRisk := outputData.Data.(model.Risk); !isRisk {
+				if _, isRiskPtr := outputData.Data.(*model.Risk); !isRiskPtr {
+					return nil // Skip non-Risk data when risk-only mode is enabled
+				}
+			}
+		}
 		j.output = append(j.output, outputData.Data)
 		return nil
+	}
+
+	// When risk-only mode is enabled, only accept Risk objects
+	if j.riskOnly {
+		if _, isRisk := val.(model.Risk); !isRisk {
+			if _, isRiskPtr := val.(*model.Risk); !isRiskPtr {
+				return nil // Skip non-Risk data when risk-only mode is enabled
+			}
+		}
 	}
 
 	// Handle the original case where just data is provided
@@ -380,7 +405,6 @@ func (j *RuntimeJSONOutputter) extractTenantFromMetadata() string {
 	return tenantID
 }
 
-
 // Params defines the parameters accepted by this outputter
 func (j *RuntimeJSONOutputter) Params() []cfg.Param {
 	// Note: Platform parameters (profile, subscription, project) are passed from modules
@@ -389,6 +413,7 @@ func (j *RuntimeJSONOutputter) Params() []cfg.Param {
 		cfg.NewParam[string]("outfile", "the default file to write the JSON to (can be changed at runtime)").WithDefault(defaultOutfile),
 		cfg.NewParam[int]("indent", "the number of spaces to use for the JSON indentation").WithDefault(0),
 		cfg.NewParam[string]("module-name", "the name of the module for dynamic file naming"),
+		cfg.NewParam[bool]("risk-only", "when true, only output Risk objects (filter out internal chain data)").WithDefault(true),
 		options.OutputDir(),
 	}
 }

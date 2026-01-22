@@ -176,15 +176,14 @@ func (l *AwsCdkPolicyAnalyzer) checkPolicyForAccountRestriction(policyDoc, accou
 			continue
 		}
 
-		// Check for aws:ResourceAccount condition
+		// Check for aws:ResourceAccount condition - this is the ONLY reliable check
+		// Note: We intentionally do NOT check if account ID is in the bucket ARN because:
+		// 1. S3 bucket names are globally unique across ALL AWS accounts
+		// 2. An IAM permission to arn:aws:s3:::bucket-name works regardless of bucket owner
+		// 3. The account ID in CDK bucket names is just a naming convention, not access control
+		// 4. Only aws:ResourceAccount condition actually restricts to same-account buckets
 		if l.hasResourceAccountCondition(statement, accountID) {
 			l.Logger.Debug("found aws:ResourceAccount condition in policy")
-			return true
-		}
-
-		// Check for explicit account restriction in Resource ARNs
-		if l.hasAccountRestrictedResources(statement, accountID) {
-			l.Logger.Debug("found account-restricted resources in policy")
 			return true
 		}
 	}
@@ -253,40 +252,6 @@ func (l *AwsCdkPolicyAnalyzer) hasResourceAccountCondition(statement map[string]
 						return true
 					}
 				}
-			}
-		}
-	}
-
-	return false
-}
-
-func (l *AwsCdkPolicyAnalyzer) hasAccountRestrictedResources(statement map[string]any, accountID string) bool {
-	resources, ok := statement["Resource"]
-	if !ok {
-		return false
-	}
-
-	// Convert resource to string slice for easier checking
-	var resourceList []string
-	switch r := resources.(type) {
-	case string:
-		resourceList = []string{r}
-	case []any:
-		for _, resource := range r {
-			if resourceStr, ok := resource.(string); ok {
-				resourceList = append(resourceList, resourceStr)
-			}
-		}
-	default:
-		return false
-	}
-
-	// Check if all S3 resources are restricted to our account
-	for _, resource := range resourceList {
-		if strings.HasPrefix(resource, "arn:aws:s3:::") {
-			// If resource contains our account ID or is very specific, it's restricted
-			if strings.Contains(resource, accountID) {
-				return true
 			}
 		}
 	}

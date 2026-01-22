@@ -17,6 +17,7 @@ nebula gcp recon projects-list [flags]
   -o, --org strings           GCP organization ID (required)
       --outfile string        the default file to write the JSON to (can be changed at runtime) (default "out.json")
       --output string         output directory (default "nebula-output")
+      --risk-only             when true, only output Risk objects (filter out internal chain data) (default true)
 ```
 
 ### SEE ALSO

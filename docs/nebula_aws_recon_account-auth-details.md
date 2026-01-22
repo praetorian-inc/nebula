@@ -23,6 +23,7 @@ nebula aws recon account-auth-details [flags]
   -o, --output string                  output directory (default "nebula-output")
   -p, --profile string                 AWS profile to use
       --profile-dir string             Set to override the default AWS profile directory
+      --risk-only                      when true, only output Risk objects (filter out internal chain data) (default true)
 ```
 
 ### SEE ALSO

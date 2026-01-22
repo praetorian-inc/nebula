@@ -18,6 +18,7 @@ nebula azure recon find-secrets-resource [flags]
       --outfile string              the default file to write the JSON to (can be changed at runtime) (default "out.json")
   -o, --output string               output directory (default "nebula-output")
   -r, --resource-types strings      Azure resource types to scan for secrets (default [all])
+      --risk-only                   when true, only output Risk objects (filter out internal chain data) (default true)
   -s, --subscription strings        The Azure subscription to use. Can be a subscription ID or 'all'. (required)
   -w, --workers int                 Number of concurrent workers for processing (default 5)
 ```

@@ -31,6 +31,7 @@ nebula aws recon find-secrets-resource [flags]
   -r, --regions strings                AWS regions to scan (default [all])
   -a, --resource-arn strings           AWS Cloud Control resource ARN (required)
   -t, --resource-type strings          AWS Cloud Control resource type (default [all])
+      --risk-only                      when true, only output Risk objects (filter out internal chain data) (default true)
 ```
 
 ### SEE ALSO

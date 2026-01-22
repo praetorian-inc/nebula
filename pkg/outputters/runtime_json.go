@@ -100,7 +100,7 @@ func (j *RuntimeJSONOutputter) Initialize() error {
 	// Get risk-only filter setting
 	riskOnly, err := cfg.As[bool](j.Arg("risk-only"))
 	if err != nil {
-		riskOnly = false
+		riskOnly = true
 	}
 	j.riskOnly = riskOnly
 

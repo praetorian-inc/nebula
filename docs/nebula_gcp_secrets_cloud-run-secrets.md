@@ -18,7 +18,6 @@ nebula gcp secrets cloud-run-secrets [flags]
       --outfile string       the default file to write the JSON to (can be changed at runtime) (default "out.json")
   -o, --output string        output directory (default "nebula-output")
   -p, --project strings      GCP project ID (required)
-      --risk-only            when true, only output Risk objects (filter out internal chain data) (default true)
 ```
 
 ### SEE ALSO

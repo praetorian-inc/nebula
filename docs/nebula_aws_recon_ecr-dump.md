@@ -28,7 +28,6 @@ nebula aws recon ecr-dump [flags]
       --profile-dir string             Set to override the default AWS profile directory
   -r, --regions strings                AWS regions to scan (default [all])
   -t, --resource-type strings          AWS Cloud Control resource type (default [AWS::ECR::Repository,AWS::ECR::PublicRepository])
-      --risk-only                      when true, only output Risk objects (filter out internal chain data) (default true)
 ```
 
 ### SEE ALSO

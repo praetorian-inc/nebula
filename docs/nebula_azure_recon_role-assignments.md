@@ -15,7 +15,6 @@ nebula azure recon role-assignments [flags]
       --module-name string     name of the module for dynamic file naming
       --outfile string         the default file to write the JSON to (can be changed at runtime) (default "out.json")
   -o, --output string          output directory (default "nebula-output")
-      --risk-only              when true, only output Risk objects (filter out internal chain data) (default true)
   -s, --subscription strings   The Azure subscription to use. Can be a subscription ID or 'all'. (required)
   -w, --workers int            Number of concurrent workers for processing (default 5)
 ```

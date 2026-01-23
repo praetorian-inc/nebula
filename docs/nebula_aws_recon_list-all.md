@@ -26,7 +26,6 @@ nebula aws recon list-all [flags]
       --profile-dir string             Set to override the default AWS profile directory
   -r, --regions strings                AWS regions to scan (default [all])
   -t, --resource-type strings          AWS Cloud Control resource type (default [all])
-      --risk-only                      when true, only output Risk objects (filter out internal chain data) (default true)
   -s, --scan-type string               Scan type - 'full' for all resources or 'summary' for key services (default "full")
 ```
 

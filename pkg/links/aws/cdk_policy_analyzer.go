@@ -289,6 +289,8 @@ func (l *AwsCdkPolicyAnalyzer) generatePolicyRisk(cdkRole CDKRoleInfo) *model.Ri
 		References:     "https://www.aquasec.com/blog/aws-cdk-risk-exploiting-a-missing-s3-bucket-allowed-account-takeover/",
 	}
 	risk.Definition(riskDef)
+	risk.Comment = fmt.Sprintf("Role: %s, Bucket: %s, Qualifier: %s, Region: %s",
+		cdkRole.RoleName, cdkRole.BucketName, cdkRole.Qualifier, cdkRole.Region)
 
 	// Store instance-specific proof with description, impact, remediation, and references
 	proofContent := fmt.Sprintf(`#### Vulnerability Description

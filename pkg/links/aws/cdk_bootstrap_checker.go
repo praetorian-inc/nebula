@@ -168,13 +168,9 @@ func (l *AwsCdkBootstrapChecker) generateBootstrapVersionRisk(cdkRole CDKRoleInf
 	}
 
 	if bootstrapInfo.HasVersion {
-		risk.Comment = fmt.Sprintf("Bootstrap Version: %d, Qualifier: %s, Region: %s | Description: %s | Impact: %s | Recommendation: %s | References: %s",
-			bootstrapInfo.Version, cdkRole.Qualifier, cdkRole.Region,
-			riskDef.Description, riskDef.Impact, riskDef.Recommendation, riskDef.References)
+		risk.Comment = fmt.Sprintf("Bootstrap Version: %d, Qualifier: %s, Region: %s", bootstrapInfo.Version, cdkRole.Qualifier, cdkRole.Region)
 	} else {
-		risk.Comment = fmt.Sprintf("Bootstrap Version: Missing, Qualifier: %s, Region: %s | Description: %s | Impact: %s | Recommendation: %s | References: %s",
-			cdkRole.Qualifier, cdkRole.Region,
-			riskDef.Description, riskDef.Impact, riskDef.Recommendation, riskDef.References)
+		risk.Comment = fmt.Sprintf("Bootstrap Version: Missing, Qualifier: %s, Region: %s", cdkRole.Qualifier, cdkRole.Region)
 	}
 
 	risk.Definition(riskDef)

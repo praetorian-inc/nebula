@@ -221,6 +221,10 @@ https://www.aquasec.com/blog/aws-cdk-risk-exploiting-a-missing-s3-bucket-allowed
 		}
 		risk.Definition(riskDef)
 
+		// Store additional context in risk attributes
+		risk.Comment = fmt.Sprintf("Role: %s, Expected Bucket: %s, Qualifier: %s, Region: %s",
+			cdkRole.RoleName, cdkRole.BucketName, cdkRole.Qualifier, cdkRole.Region)
+
 		// Store instance-specific proof with description, impact, remediation, and references
 		proofContent := fmt.Sprintf(`#### Vulnerability Description
 AWS CDK staging S3 bucket '%s' appears to be owned by a different account, but CDK role '%s' still exists in region %s. This indicates a potential bucket takeover.

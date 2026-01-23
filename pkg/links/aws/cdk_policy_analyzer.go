@@ -283,15 +283,15 @@ func (l *AwsCdkPolicyAnalyzer) generatePolicyRisk(cdkRole CDKRoleInfo) *model.Ri
 
 	// Create risk definition for static vulnerability info
 	riskDef := model.RiskDefinition{
-		Description:    "AWS CDK FilePublishingRole lacks proper account restrictions in S3 permissions. This role can potentially access S3 buckets in other accounts, making it vulnerable to bucket takeover attacks.",
+		Description:    fmt.Sprintf("AWS CDK FilePublishingRole '%s' lacks proper account restrictions in S3 permissions. This role can potentially access S3 buckets in other accounts, making it vulnerable to bucket takeover attacks.", cdkRole.RoleName),
 		Impact:         "The role may inadvertently access attacker-controlled S3 buckets with the same predictable name, allowing CloudFormation template injection.",
-		Recommendation: "Upgrade to CDK v2.149.0+ and re-run 'cdk bootstrap', or manually add 'aws:ResourceAccount' condition to the role's S3 permissions.",
+		Recommendation: fmt.Sprintf("Upgrade to CDK v2.149.0+ and re-run 'cdk bootstrap' in region %s, or manually add 'aws:ResourceAccount' condition to the role's S3 permissions.", cdkRole.Region),
 		References:     "https://www.aquasec.com/blog/aws-cdk-risk-exploiting-a-missing-s3-bucket-allowed-account-takeover/",
 	}
-	risk.Definition(riskDef)
 	risk.Comment = fmt.Sprintf("Role: %s, Bucket: %s, Qualifier: %s, Region: %s",
 		cdkRole.RoleName, cdkRole.BucketName, cdkRole.Qualifier, cdkRole.Region)
 
+	risk.Definition(riskDef)
 	// Store instance-specific proof with description, impact, remediation, and references
 	proofContent := fmt.Sprintf(`#### Vulnerability Description
 AWS CDK FilePublishingRole '%s' lacks proper account restrictions in S3 permissions. This role can potentially access S3 buckets in other accounts, making it vulnerable to bucket takeover attacks.

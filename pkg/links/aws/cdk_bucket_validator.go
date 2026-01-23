@@ -151,7 +151,7 @@ func (l *AwsCdkBucketValidator) generateCDKBucketRisk(cdkRole CDKRoleInfo, bucke
 		)
 		risk.Source = "nebula-cdk-scanner"
 
-		// Create risk definition for static vulnerability info
+		// Create risk definition for with detailed info
 		riskDef := model.RiskDefinition{
 			Description:    fmt.Sprintf("AWS CDK staging S3 bucket '%s' is missing but CDK bootstrap role '%s' exists in region %s. This allows potential account takeover through bucket name claiming and CloudFormation template injection.", cdkRole.BucketName, cdkRole.RoleName, cdkRole.Region),
 			Impact:         "Attackers can claim the predictable CDK staging bucket name and inject malicious CloudFormation templates, potentially creating admin roles for account takeover.",

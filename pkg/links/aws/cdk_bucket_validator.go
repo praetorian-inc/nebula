@@ -220,7 +220,6 @@ https://www.aquasec.com/blog/aws-cdk-risk-exploiting-a-missing-s3-bucket-allowed
 		)
 		risk.Source = "nebula-cdk-scanner"
 
-		// Create risk definition for static vulnerability info
 		riskDef := model.RiskDefinition{
 			Description:    fmt.Sprintf("AWS CDK staging S3 bucket '%s' appears to be owned by a different account, but CDK role '%s' still exists. This indicates a potential bucket takeover.", cdkRole.BucketName, cdkRole.RoleName),
 			Impact:         "CDK deployments may fail or push sensitive CloudFormation templates to an attacker-controlled bucket.",
@@ -231,7 +230,6 @@ https://www.aquasec.com/blog/aws-cdk-risk-exploiting-a-missing-s3-bucket-allowed
 		risk.Comment = fmt.Sprintf("Role: %s, Suspicious Bucket: %s, Qualifier: %s, Region: %s",
 			cdkRole.RoleName, cdkRole.BucketName, cdkRole.Qualifier, cdkRole.Region)
 
-		// Generate risk definition file
 		risk.Definition(riskDef)
 
 		// Store instance-specific proof with description, impact, remediation, and references

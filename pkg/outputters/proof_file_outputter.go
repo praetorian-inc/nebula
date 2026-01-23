@@ -12,6 +12,18 @@ import (
 	"github.com/praetorian-inc/tabularium/pkg/model/model"
 )
 
+// ProofFileOnly is a wrapper type that only ProofFileOutputter recognizes.
+// Other outputters (like RuntimeJSONOutputter) will ignore this type,
+// preventing proof files from appearing in JSON output.
+type ProofFileOnly struct {
+	File model.File
+}
+
+// NewProofFileOnly creates a wrapped proof file that only ProofFileOutputter will handle
+func NewProofFileOnly(file model.File) ProofFileOnly {
+	return ProofFileOnly{File: file}
+}
+
 // ProofFileOutputter handles model.File objects (proofs and definitions) by writing them to disk
 type ProofFileOutputter struct {
 	*BaseFileOutputter
@@ -40,12 +52,17 @@ func (o *ProofFileOutputter) Initialize() error {
 
 // Output handles model.File objects and writes them to disk
 func (o *ProofFileOutputter) Output(v any) error {
-	// Handle model.File objects
+	// Handle ProofFileOnly wrapper (preferred - excludes from JSON output)
+	if wrapper, ok := v.(ProofFileOnly); ok {
+		return o.writeFile(wrapper.File)
+	}
+
+	// Handle raw model.File objects (legacy support)
 	if file, ok := v.(model.File); ok {
 		return o.writeFile(file)
 	}
 
-	// Silently ignore non-File objects
+	// Silently ignore other types
 	return nil
 }
 

@@ -10,7 +10,6 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/base"
-	"github.com/praetorian-inc/nebula/pkg/outputters"
 	"github.com/praetorian-inc/tabularium/pkg/model/model"
 )
 
@@ -226,10 +225,9 @@ https://docs.aws.amazon.com/cdk/v2/guide/bootstrapping.html
 			cdkRole.Qualifier, cdkRole.Region, cdkRole.AccountID)
 	}
 	// Create proof file with unique name including qualifier and region
-	// Use ProofFileOnly wrapper so it's excluded from JSON output
-	file := model.NewFile(fmt.Sprintf("proofs/%s/%s-%s-%s", cdkRole.AccountID, riskName, cdkRole.Qualifier, cdkRole.Region))
-	file.Bytes = []byte(proofContent)
-	l.Send(outputters.NewProofFileOnly(file))
+	proofFile := model.NewFile(fmt.Sprintf("proofs/%s/%s-%s-%s", cdkRole.AccountID, riskName, cdkRole.Qualifier, cdkRole.Region))
+	proofFile.Bytes = []byte(proofContent)
+	l.Send(proofFile)
 
 	return &risk
 }

@@ -219,11 +219,13 @@ https://www.aquasec.com/blog/aws-cdk-risk-exploiting-a-missing-s3-bucket-allowed
 			Recommendation: fmt.Sprintf("Re-run 'cdk bootstrap --qualifier %s' in region %s or upgrade to CDK v2.149.0+ and re-bootstrap to apply security patches.", cdkRole.Qualifier, cdkRole.Region),
 			References:     "https://www.aquasec.com/blog/aws-cdk-risk-exploiting-a-missing-s3-bucket-allowed-account-takeover/",
 		}
-		risk.Definition(riskDef)
 
 		// Store additional context in risk attributes
 		risk.Comment = fmt.Sprintf("Role: %s, Expected Bucket: %s, Qualifier: %s, Region: %s",
 			cdkRole.RoleName, cdkRole.BucketName, cdkRole.Qualifier, cdkRole.Region)
+
+		// Generate risk definition file
+		risk.Definition(riskDef)
 
 		// Store instance-specific proof with description, impact, remediation, and references
 		proofContent := fmt.Sprintf(`#### Vulnerability Description

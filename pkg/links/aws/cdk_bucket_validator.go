@@ -153,11 +153,16 @@ func (l *AwsCdkBucketValidator) generateCDKBucketRisk(cdkRole CDKRoleInfo, bucke
 
 		// Create risk definition for static vulnerability info
 		riskDef := model.RiskDefinition{
-			Description:    "AWS CDK staging S3 bucket is missing but CDK bootstrap role exists. This allows potential account takeover through bucket name claiming and CloudFormation template injection.",
+			Description:    fmt.Sprintf("AWS CDK staging S3 bucket '%s' is missing but CDK bootstrap role '%s' exists in region %s. This allows potential account takeover through bucket name claiming and CloudFormation template injection.", cdkRole.BucketName, cdkRole.RoleName, cdkRole.Region),
 			Impact:         "Attackers can claim the predictable CDK staging bucket name and inject malicious CloudFormation templates, potentially creating admin roles for account takeover.",
-			Recommendation: "Re-run 'cdk bootstrap' with the appropriate qualifier or upgrade to CDK v2.149.0+ and re-bootstrap to apply security patches.",
+			Recommendation: fmt.Sprintf("Re-run 'cdk bootstrap --qualifier %s' in region %s or upgrade to CDK v2.149.0+ and re-bootstrap to apply security patches.", cdkRole.Qualifier, cdkRole.Region),
 			References:     "https://www.aquasec.com/blog/aws-cdk-risk-exploiting-a-missing-s3-bucket-allowed-account-takeover/",
 		}
+		// Store additional context in risk attributes
+		risk.Comment = fmt.Sprintf("Role: %s, Expected Bucket: %s, Qualifier: %s, Region: %s",
+			cdkRole.RoleName, cdkRole.BucketName, cdkRole.Qualifier, cdkRole.Region)
+
+		// Generate risk definition file
 		risk.Definition(riskDef)
 
 		// Store instance-specific proof with description, impact, remediation, and references

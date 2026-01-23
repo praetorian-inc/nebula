@@ -153,9 +153,9 @@ func (l *AwsCdkBucketValidator) generateCDKBucketRisk(cdkRole CDKRoleInfo, bucke
 
 		// Create risk definition with detailed info
 		riskDef := model.RiskDefinition{
-			Description:    fmt.Sprintf("AWS CDK staging S3 bucket '%s' appears to be owned by a different account, but CDK role '%s' still exists. This indicates a potential bucket takeover.", cdkRole.BucketName, cdkRole.RoleName),
-			Impact:         "CDK deployments may fail or push sensitive CloudFormation templates to an attacker-controlled bucket.",
-			Recommendation: fmt.Sprintf("Verify bucket ownership and re-run 'cdk bootstrap --qualifier <new-qualifier>' with a unique qualifier in region %s.", cdkRole.Region),
+			Description:    fmt.Sprintf("AWS CDK staging S3 bucket '%s' is missing but CDK bootstrap role '%s' exists in region %s. This allows potential account takeover through bucket name claiming and CloudFormation template injection.", cdkRole.BucketName, cdkRole.RoleName, cdkRole.Region),
+			Impact:         "Attackers can claim the predictable CDK staging bucket name and inject malicious CloudFormation templates, potentially creating admin roles for account takeover.",
+			Recommendation: fmt.Sprintf("Re-run 'cdk bootstrap --qualifier %s' in region %s or upgrade to CDK v2.149.0+ and re-bootstrap to apply security patches.", cdkRole.Qualifier, cdkRole.Region),
 			References:     "https://www.aquasec.com/blog/aws-cdk-risk-exploiting-a-missing-s3-bucket-allowed-account-takeover/",
 		}
 

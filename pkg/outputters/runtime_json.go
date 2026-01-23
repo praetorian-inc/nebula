@@ -110,9 +110,9 @@ func (j *RuntimeJSONOutputter) Initialize() error {
 
 // Output stores a value in memory for later writing
 func (j *RuntimeJSONOutputter) Output(val any) error {
-	// Handle model.File objects - write them to disk as proof/definition files
-	if file, ok := val.(model.File); ok {
-		return j.writeProofFile(file)
+	// Skip model.File objects - they are handled by ProofFileOutputter
+	if _, ok := val.(model.File); ok {
+		return nil
 	}
 
 	// Check if we received an OutputData structure
@@ -155,31 +155,6 @@ func (j *RuntimeJSONOutputter) SetOutputFile(filename string) {
 		slog.Error("failed to create directory for new output file", "filename", filename, "error", err)
 	}
 	slog.Debug("changed JSON output file", "filename", filename)
-}
-
-// writeProofFile writes a model.File (proof/definition) to disk
-func (j *RuntimeJSONOutputter) writeProofFile(file model.File) error {
-	// Get base output directory
-	outputDir, err := cfg.As[string](j.Arg("output"))
-	if err != nil {
-		outputDir = "nebula-output"
-	}
-
-	// Construct full path - file.Name contains path like "proofs/{dns}/{name}"
-	fullPath := filepath.Join(outputDir, file.Name)
-
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		return fmt.Errorf("failed to create proof directory: %w", err)
-	}
-
-	// Write the file content
-	if err := os.WriteFile(fullPath, file.Bytes, 0644); err != nil {
-		return fmt.Errorf("failed to write proof file: %w", err)
-	}
-
-	slog.Debug("wrote proof file", "path", fullPath, "size", len(file.Bytes))
-	return nil
 }
 
 // Complete writes all stored outputs to the specified file

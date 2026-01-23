@@ -189,7 +189,9 @@ https://www.aquasec.com/blog/aws-cdk-risk-exploiting-a-missing-s3-bucket-allowed
 			cdkRole.BucketName, cdkRole.RoleName, cdkRole.Region,
 			cdkRole.Qualifier, cdkRole.Region,
 			cdkRole.RoleName, cdkRole.BucketName, cdkRole.Qualifier, cdkRole.Region, cdkRole.AccountID)
-		proofFile := risk.Proof([]byte(proofContent))
+		// Create proof file with unique name including qualifier and region
+		proofFile := model.NewFile(fmt.Sprintf("proofs/%s/%s-%s-%s", cdkRole.AccountID, risk.Name, cdkRole.Qualifier, cdkRole.Region))
+		proofFile.Bytes = []byte(proofContent)
 		if err := l.Send(proofFile); err != nil {
 			l.Logger.Debug("failed to send proof file", "error", err, "bucket", cdkRole.BucketName)
 		}
@@ -255,7 +257,9 @@ https://www.aquasec.com/blog/aws-cdk-risk-exploiting-a-missing-s3-bucket-allowed
 			cdkRole.BucketName, cdkRole.RoleName, cdkRole.Region,
 			cdkRole.Region,
 			cdkRole.RoleName, cdkRole.BucketName, cdkRole.Qualifier, cdkRole.Region, cdkRole.AccountID)
-		proofFile := risk.Proof([]byte(proofContent))
+		// Create proof file with unique name including qualifier and region
+		proofFile := model.NewFile(fmt.Sprintf("proofs/%s/%s-%s-%s", cdkRole.AccountID, risk.Name, cdkRole.Qualifier, cdkRole.Region))
+		proofFile.Bytes = []byte(proofContent)
 		if err := l.Send(proofFile); err != nil {
 			l.Logger.Debug("failed to send proof file", "error", err, "bucket", cdkRole.BucketName)
 		}

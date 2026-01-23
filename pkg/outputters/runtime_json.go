@@ -97,10 +97,10 @@ func (j *RuntimeJSONOutputter) Initialize() error {
 	}
 	j.indent = indent
 
-	// Get risk-only filter setting
+	// Get risk-only filter setting (defaults to false - modules must explicitly enable it)
 	riskOnly, err := cfg.As[bool](j.Arg("risk-only"))
 	if err != nil {
-		riskOnly = true
+		riskOnly = false
 	}
 	j.riskOnly = riskOnly
 
@@ -110,6 +110,11 @@ func (j *RuntimeJSONOutputter) Initialize() error {
 
 // Output stores a value in memory for later writing
 func (j *RuntimeJSONOutputter) Output(val any) error {
+	// Handle model.File objects - write them to disk as proof/definition files
+	if file, ok := val.(model.File); ok {
+		return j.writeProofFile(file)
+	}
+
 	// Check if we received an OutputData structure
 	if outputData, ok := val.(NamedOutputData); ok {
 		// If filename is provided, update the output file
@@ -150,6 +155,31 @@ func (j *RuntimeJSONOutputter) SetOutputFile(filename string) {
 		slog.Error("failed to create directory for new output file", "filename", filename, "error", err)
 	}
 	slog.Debug("changed JSON output file", "filename", filename)
+}
+
+// writeProofFile writes a model.File (proof/definition) to disk
+func (j *RuntimeJSONOutputter) writeProofFile(file model.File) error {
+	// Get base output directory
+	outputDir, err := cfg.As[string](j.Arg("output"))
+	if err != nil {
+		outputDir = "nebula-output"
+	}
+
+	// Construct full path - file.Name contains path like "proofs/{dns}/{name}"
+	fullPath := filepath.Join(outputDir, file.Name)
+
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return fmt.Errorf("failed to create proof directory: %w", err)
+	}
+
+	// Write the file content
+	if err := os.WriteFile(fullPath, file.Bytes, 0644); err != nil {
+		return fmt.Errorf("failed to write proof file: %w", err)
+	}
+
+	slog.Debug("wrote proof file", "path", fullPath, "size", len(file.Bytes))
+	return nil
 }
 
 // Complete writes all stored outputs to the specified file
@@ -409,11 +439,12 @@ func (j *RuntimeJSONOutputter) extractTenantFromMetadata() string {
 func (j *RuntimeJSONOutputter) Params() []cfg.Param {
 	// Note: Platform parameters (profile, subscription, project) are passed from modules
 	// and accessed via j.Arg() but not declared here to avoid conflicts
+	// Note: risk-only is NOT declared here - it must be explicitly set by modules that need it
+	// (e.g., cdk-bucket-takeover) to avoid affecting all modules globally
 	return []cfg.Param{
 		cfg.NewParam[string]("outfile", "the default file to write the JSON to (can be changed at runtime)").WithDefault(defaultOutfile),
 		cfg.NewParam[int]("indent", "the number of spaces to use for the JSON indentation").WithDefault(0),
 		cfg.NewParam[string]("module-name", "the name of the module for dynamic file naming"),
-		cfg.NewParam[bool]("risk-only", "when true, only output Risk objects (filter out internal chain data)").WithDefault(true),
 		options.OutputDir(),
 	}
 }

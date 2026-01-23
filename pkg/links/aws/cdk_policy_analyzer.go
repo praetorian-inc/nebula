@@ -281,18 +281,40 @@ func (l *AwsCdkPolicyAnalyzer) generatePolicyRisk(cdkRole CDKRoleInfo) *model.Ri
 	)
 	risk.Source = "nebula-cdk-scanner"
 
+	// Create risk definition for static vulnerability info
 	riskDef := model.RiskDefinition{
-		Description:    fmt.Sprintf("AWS CDK FilePublishingRole '%s' lacks proper account restrictions in S3 permissions. This role can potentially access S3 buckets in other accounts, making it vulnerable to bucket takeover attacks.", cdkRole.RoleName),
+		Description:    "AWS CDK FilePublishingRole lacks proper account restrictions in S3 permissions. This role can potentially access S3 buckets in other accounts, making it vulnerable to bucket takeover attacks.",
 		Impact:         "The role may inadvertently access attacker-controlled S3 buckets with the same predictable name, allowing CloudFormation template injection.",
-		Recommendation: fmt.Sprintf("Upgrade to CDK v2.149.0+ and re-run 'cdk bootstrap' in region %s, or manually add 'aws:ResourceAccount' condition to the role's S3 permissions.", cdkRole.Region),
+		Recommendation: "Upgrade to CDK v2.149.0+ and re-run 'cdk bootstrap', or manually add 'aws:ResourceAccount' condition to the role's S3 permissions.",
 		References:     "https://www.aquasec.com/blog/aws-cdk-risk-exploiting-a-missing-s3-bucket-allowed-account-takeover/",
 	}
-
-	risk.Comment = fmt.Sprintf("Role: %s, Bucket: %s, Qualifier: %s, Region: %s | Description: %s | Impact: %s | Recommendation: %s | References: %s",
-		cdkRole.RoleName, cdkRole.BucketName, cdkRole.Qualifier, cdkRole.Region,
-		riskDef.Description, riskDef.Impact, riskDef.Recommendation, riskDef.References)
-
 	risk.Definition(riskDef)
+
+	// Store instance-specific proof with description, impact, remediation, and references
+	proofContent := fmt.Sprintf(`#### Vulnerability Description
+AWS CDK FilePublishingRole '%s' lacks proper account restrictions in S3 permissions. This role can potentially access S3 buckets in other accounts, making it vulnerable to bucket takeover attacks.
+
+#### Impact
+The role may inadvertently access attacker-controlled S3 buckets with the same predictable name, allowing CloudFormation template injection.
+
+#### Remediation
+Upgrade to CDK v2.149.0+ and re-run 'cdk bootstrap' in region %s, or manually add 'aws:ResourceAccount' condition to the role's S3 permissions.
+
+#### References
+https://www.aquasec.com/blog/aws-cdk-risk-exploiting-a-missing-s3-bucket-allowed-account-takeover/
+
+#### Evidence
+- Role Name: %s
+- Bucket: %s
+- Qualifier: %s
+- Region: %s
+- Account ID: %s
+`,
+		cdkRole.RoleName,
+		cdkRole.Region,
+		cdkRole.RoleName, cdkRole.BucketName, cdkRole.Qualifier, cdkRole.Region, cdkRole.AccountID)
+	proofFile := risk.Proof([]byte(proofContent))
+	l.Send(proofFile)
 
 	return &risk
 }

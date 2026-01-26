@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/aws/aws-sdk-go/aws/arn"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/praetorian-inc/nebula/pkg/types"
 )
 
@@ -123,7 +123,6 @@ func addServicesToResourceCache() {
 		"eks.amazonaws.com",
 		"glue.amazonaws.com",
 		"sagemaker.amazonaws.com",
-		"ecs.amazonaws.com",
 		"apigateway.amazonaws.com",
 	}
 

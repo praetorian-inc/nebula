@@ -24,7 +24,6 @@ var AWSPublicResourcesSingle = chain.NewModule(
 	general.NewSingleResourcePreprocessor(),
 	aws.NewAwsPublicResources,
 	aws.NewAWSPublicResourcesProcessor,
-	aws.NewERDToAWSResourceTransformer,
 ).WithOutputters(
 	outputters.NewRuntimeJSONOutputter,
 	outputters.NewERDConsoleOutputter,

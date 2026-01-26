@@ -31,7 +31,6 @@ var AWSPublicResources = chain.NewModule(
 	cloudcontrol.NewAWSCloudControl,
 	aws.NewAwsPublicResources,
 	aws.NewAWSPublicResourcesProcessor,
-	aws.NewERDToAWSResourceTransformer,
 ).WithOutputters(
 	outputters.NewRuntimeJSONOutputter,
 	outputters.NewERDConsoleOutputter,

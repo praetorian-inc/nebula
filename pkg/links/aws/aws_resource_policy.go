@@ -283,6 +283,8 @@ func (a *AwsResourcePolicyChecker) flagS3PublicACL(
 	props["ACLGrants"] = aclResult.ACLGrants
 	props["GranteeType"] = aclResult.GranteeType
 	props["EvaluationReasons"] = []string{fmt.Sprintf("Bucket ACL grants %v to %s", aclResult.ACLGrants, aclResult.GranteeType)}
+	props["NeedsManualTriage"] = false
+	props["Actions"] = aclResult.ACLGrants // ACL permissions map to actions
 
 	enriched := types.EnrichedResourceDescription{
 		Identifier: resource.Identifier,

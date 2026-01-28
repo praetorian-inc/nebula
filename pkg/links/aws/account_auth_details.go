@@ -110,6 +110,8 @@ func (a *JanusAWSAuthorizationDetails) GetAccountAuthorizationDetails() error {
 		return err
 	}
 
+	slog.Debug("Creating IAM client and paginator", "accountId", accountId)
+
 	iamClient := iam.NewFromConfig(config)
 	var completeOutput *iam.GetAccountAuthorizationDetailsOutput
 	maxItems := int32(1000)
@@ -124,8 +126,11 @@ func (a *JanusAWSAuthorizationDetails) GetAccountAuthorizationDetails() error {
 		MaxItems: &maxItems,
 	})
 
+	pageNum := 0
 	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(context.TODO())
+		pageNum++
+		slog.Debug("Fetching GAAD page", "pageNum", pageNum)
+		page, err := paginator.NextPage(context.Background())
 		if err != nil {
 			slog.Error("Error retrieving authorization details page", "error", err)
 			return err

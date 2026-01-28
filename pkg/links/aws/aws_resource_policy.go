@@ -185,14 +185,47 @@ func (a *AwsResourcePolicyChecker) processS3Bucket(
 	bucketName string,
 	serviceConfig ServicePolicyConfig,
 ) error {
+	ctx := context.TODO()
+
+	// Step 0: Get bucket location and create region-specific client
+	// This avoids PermanentRedirect errors when bucket is in a different region
+	client := s3.NewFromConfig(awsCfg)
+	locationResp, err := client.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
+		Bucket: aws.String(bucketName),
+	})
+	if err != nil {
+		slog.Debug("Failed to get bucket location", "bucket", bucketName, "error", err)
+		return nil
+	}
+
+	// Handle empty LocationConstraint (means us-east-1)
+	bucketRegion := "us-east-1"
+	if locationResp.LocationConstraint != "" {
+		bucketRegion = string(locationResp.LocationConstraint)
+	}
+
+	// Check if the bucket's region is in the allowed regions list
+	if !slices.Contains(a.Regions, bucketRegion) {
+		slog.Debug("Bucket region not in allowed regions list", "bucket", bucketName, "bucketRegion", bucketRegion, "allowedRegions", a.Regions)
+		return nil
+	}
+
+	// Create region-specific client if bucket is in a different region
+	if bucketRegion != awsCfg.Region {
+		regionCfg := awsCfg.Copy()
+		regionCfg.Region = bucketRegion
+		client = s3.NewFromConfig(regionCfg)
+		slog.Debug("Created region-specific S3 client", "bucket", bucketName, "region", bucketRegion)
+	}
+
 	// Step 1: Check Block Public Access settings - if enabled, bucket is protected
-	if skipReason := a.checkS3BlockPublicAccess(context.TODO(), awsCfg, bucketName); skipReason != "" {
+	if skipReason := a.checkS3BlockPublicAccess(ctx, client, bucketName); skipReason != "" {
 		slog.Debug("Skipping bucket", "bucket", bucketName, "reason", skipReason)
 		return nil
 	}
 
-	// Step 2: Get and analyze bucket policy
-	policy, err := ServiceMap[resource.TypeName].GetPolicy(context.TODO(), awsCfg, bucketName, a.Regions)
+	// Step 2: Get and analyze bucket policy (using region-specific client)
+	policy, err := getS3BucketPolicy(ctx, client, bucketName)
 	if err != nil {
 		slog.Debug("Failed to get policy", "resource", bucketName, "error", err)
 		return nil
@@ -237,7 +270,7 @@ func (a *AwsResourcePolicyChecker) processS3Bucket(
 	// Step 4: Check ACLs if policy doesn't grant public access
 	// ACLs are additive (can't deny), so skip if already public via policy
 	if !policyIsPublic {
-		aclResult := a.checkS3PublicACLs(context.TODO(), awsCfg, bucketName)
+		aclResult := a.checkS3PublicACLs(ctx, client, bucketName)
 		if len(aclResult.ACLGrants) > 0 {
 			slog.Debug("Bucket has public ACL grants", "bucket", bucketName, "grants", aclResult.ACLGrants, "granteeType", aclResult.GranteeType)
 			a.flagS3PublicACL(resource, props, aclResult)
@@ -1034,6 +1067,33 @@ var ServicePolicyFuncMap = map[string]PolicyGetter{
 	},
 }
 
+// getS3BucketPolicy retrieves the bucket policy using a pre-configured S3 client
+// This is used when we already have a region-specific client from GetBucketLocation
+func getS3BucketPolicy(ctx context.Context, client *s3.Client, bucketName string) (*types.Policy, error) {
+	resp, err := client.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
+		Bucket: aws.String(bucketName),
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "NoSuchBucketPolicy") {
+			slog.Debug("Bucket has no policy", "bucket", bucketName)
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	if resp == nil || resp.Policy == nil {
+		return nil, nil
+	}
+
+	policy, err := strToPolicy(*resp.Policy)
+	if err != nil {
+		slog.Debug("Failed to parse bucket policy", "bucket", bucketName, "error", err)
+		return nil, err
+	}
+
+	return policy, nil
+}
+
 // S3ACLResult contains the results of checking S3 ACLs
 type S3ACLResult struct {
 	ACLGrants   []string // ACL permissions granted (e.g., ["READ", "WRITE"])
@@ -1044,11 +1104,9 @@ type S3ACLResult struct {
 // Returns non-empty skip reason if BPA blocks access, empty string otherwise
 func (a *AwsResourcePolicyChecker) checkS3BlockPublicAccess(
 	ctx context.Context,
-	cfg aws.Config,
+	client *s3.Client,
 	bucketName string,
 ) string {
-	client := s3.NewFromConfig(cfg)
-
 	// Check Block Public Access settings - if enabled, skip bucket
 	blockPublicAccessResp, err := client.GetPublicAccessBlock(ctx, &s3.GetPublicAccessBlockInput{
 		Bucket: aws.String(bucketName),
@@ -1078,11 +1136,10 @@ func (a *AwsResourcePolicyChecker) checkS3BlockPublicAccess(
 // Returns ACL grants and grantee type if public access found
 func (a *AwsResourcePolicyChecker) checkS3PublicACLs(
 	ctx context.Context,
-	cfg aws.Config,
+	client *s3.Client,
 	bucketName string,
 ) S3ACLResult {
 	result := S3ACLResult{}
-	client := s3.NewFromConfig(cfg)
 
 	// Check Bucket Ownership Controls - if BucketOwnerEnforced, ACLs are disabled
 	ownershipResp, err := client.GetBucketOwnershipControls(ctx, &s3.GetBucketOwnershipControlsInput{

@@ -9,6 +9,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/efs"
@@ -218,27 +219,57 @@ func (a *AwsResourcePolicyChecker) processS3Bucket(
 		slog.Debug("Created region-specific S3 client", "bucket", bucketName, "region", bucketRegion)
 	}
 
-	// Step 1: Check Block Public Access settings
-	bpa := a.checkS3BlockPublicAccess(ctx, client, bucketName)
-	if bpa != nil {
-		slog.Debug("Retrieved BPA settings", "bucket", bucketName, "reason", bpa.Reason)
-		// Skip entire bucket only if BOTH flags are true (fully protected)
-		if bpa.IgnorePublicAcls && bpa.RestrictPublicBuckets {
-			slog.Debug("Skipping bucket - fully protected by BPA", "bucket", bucketName, "reason", bpa.Reason)
-			return nil
+	// Step 1: Fetch BPA, policy, and ACL data in parallel for better performance
+	var (
+		bpa       *S3BPAStatus
+		policy    *types.Policy
+		policyErr error
+		aclResult S3ACLResult
+		wg        sync.WaitGroup
+	)
+
+	wg.Add(3)
+
+	// Fetch BPA settings
+	go func() {
+		defer wg.Done()
+		bpa = a.checkS3BlockPublicAccess(ctx, client, bucketName)
+		if bpa != nil {
+			slog.Debug("Retrieved BPA settings", "bucket", bucketName, "reason", bpa.Reason)
 		}
+	}()
+
+	// Fetch bucket policy
+	go func() {
+		defer wg.Done()
+		policy, policyErr = getS3BucketPolicy(ctx, client, bucketName)
+		if policyErr != nil {
+			slog.Debug("Failed to get policy", "resource", bucketName, "error", policyErr)
+		}
+	}()
+
+	// Fetch ACL data
+	go func() {
+		defer wg.Done()
+		aclResult = a.checkS3PublicACLs(ctx, client, bucketName)
+	}()
+
+	// Wait for all parallel fetches to complete
+	wg.Wait()
+
+	// Step 2: Apply BPA logic to determine what to process
+	// Skip entire bucket only if BOTH flags are true (fully protected)
+	if bpa != nil && bpa.IgnorePublicAcls && bpa.RestrictPublicBuckets {
+		slog.Debug("Skipping bucket - fully protected by BPA", "bucket", bucketName, "reason", bpa.Reason)
+		return nil
 	}
 
 	var policyResults []*iam.EvaluationResult
 	policyIsPublic := false
 
-	// Step 2: Get and analyze bucket policy (skip if RestrictPublicBuckets blocks policy-based access)
+	// Step 3: Analyze bucket policy (skip if RestrictPublicBuckets blocks policy-based access)
 	if bpa == nil || !bpa.RestrictPublicBuckets {
-		policy, err := getS3BucketPolicy(ctx, client, bucketName)
-		if err != nil {
-			slog.Debug("Failed to get policy", "resource", bucketName, "error", err)
-			// Continue to check ACLs even if policy retrieval fails
-		} else if policy != nil {
+		if policyErr == nil && policy != nil {
 			// Log policy for debugging
 			if policyJson, err := json.MarshalIndent(policy, "", "  "); err == nil {
 				slog.Debug(fmt.Sprintf("policy for %s", resource.Arn.String()), "policy", string(policyJson))
@@ -251,7 +282,7 @@ func (a *AwsResourcePolicyChecker) processS3Bucket(
 				return err
 			}
 
-			// Step 3: Also check object-level permissions (e.g., s3:GetObject on bucket/*)
+			// Also check object-level permissions (e.g., s3:GetObject on bucket/*)
 			// Policies often grant access to objects, not the bucket itself
 			if !isPublic(policyResults) {
 				objectRes, err := a.analyzeS3ObjectPolicy(resource.Arn.String(), policy, resource.AccountId)
@@ -267,17 +298,16 @@ func (a *AwsResourcePolicyChecker) processS3Bucket(
 			if policyIsPublic {
 				a.flagPublicResource(resource, props, policy, policyResults, serviceConfig, "Policy")
 			}
-		} else {
+		} else if policy == nil && policyErr == nil {
 			slog.Debug("S3 bucket has no policy, checking ACLs", "bucket", bucketName)
 		}
 	} else {
 		slog.Debug("Skipping policy check - RestrictPublicBuckets is enabled", "bucket", bucketName)
 	}
 
-	// Step 4: Check ACLs if policy doesn't grant public access (skip if IgnorePublicAcls blocks ACL-based access)
+	// Step 4: Process ACL results (skip if IgnorePublicAcls blocks ACL-based access)
 	// ACLs are additive (can't deny), so skip if already public via policy
 	if !policyIsPublic && (bpa == nil || !bpa.IgnorePublicAcls) {
-		aclResult := a.checkS3PublicACLs(ctx, client, bucketName)
 		if len(aclResult.ACLGrants) > 0 {
 			slog.Debug("Bucket has public ACL grants", "bucket", bucketName, "grants", aclResult.ACLGrants, "granteeType", aclResult.GranteeType)
 			a.flagS3PublicACL(resource, props, aclResult)

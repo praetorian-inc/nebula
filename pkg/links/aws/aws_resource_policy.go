@@ -1108,6 +1108,8 @@ func (a *AwsResourcePolicyChecker) checkS3PublicACLs(
 		return result
 	}
 
+	granteeTypes := make(map[string]bool)
+
 	if aclResp.Grants != nil {
 		for _, grant := range aclResp.Grants {
 			if grant.Grantee == nil || grant.Grantee.URI == nil {
@@ -1117,13 +1119,20 @@ func (a *AwsResourcePolicyChecker) checkS3PublicACLs(
 			// Check for public grantees
 			switch *grant.Grantee.URI {
 			case "http://acs.amazonaws.com/groups/global/AllUsers":
-				result.GranteeType = "AllUsers"
+				granteeTypes["AllUsers"] = true
 				result.ACLGrants = append(result.ACLGrants, string(grant.Permission))
 			case "http://acs.amazonaws.com/groups/global/AuthenticatedUsers":
-				result.GranteeType = "AuthenticatedUsers"
+				granteeTypes["AuthenticatedUsers"] = true
 				result.ACLGrants = append(result.ACLGrants, string(grant.Permission))
 			}
 		}
+	}
+
+	// Prioritize AllUsers (more permissive) over AuthenticatedUsers
+	if granteeTypes["AllUsers"] {
+		result.GranteeType = "AllUsers"
+	} else if granteeTypes["AuthenticatedUsers"] {
+		result.GranteeType = "AuthenticatedUsers"
 	}
 
 	return result

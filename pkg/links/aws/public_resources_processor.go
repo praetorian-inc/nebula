@@ -59,7 +59,11 @@ func (p *AWSPublicResourcesProcessor) Process(pair *ResourceChainPair) error {
 
 	// Process in goroutine for concurrency
 	go func() {
+		// Ensure cleanup happens even on panic
 		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Panic in resource processor", "resource", pair.Resource.Identifier, "panic", r)
+			}
 			<-p.semaphore // Release semaphore slot
 			p.wg.Done()
 		}()
@@ -78,6 +82,10 @@ func (p *AWSPublicResourcesProcessor) processResource(pair *ResourceChainPair) {
 
 	// Build the specific chain for this resource type
 	resourceChain := pair.ChainConstructor()
+	if resourceChain == nil {
+		slog.Error("Failed to create resource chain", "resource", pair.Resource.Identifier)
+		return
+	}
 
 	// Only pass essential AWS parameters, not module-level parameters
 	essentialArgs := p.extractEssentialArgs(pair.Args)
@@ -88,6 +96,8 @@ func (p *AWSPublicResourcesProcessor) processResource(pair *ResourceChainPair) {
 	// Process the resource
 	if err := resourceChain.Send(pair.Resource); err != nil {
 		slog.Error("Failed to send resource to chain", "error", err)
+		resourceChain.Close()
+		resourceChain.Wait()
 		return
 	}
 	resourceChain.Close()

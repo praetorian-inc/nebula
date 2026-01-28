@@ -232,7 +232,12 @@ func (a *AwsResourcePolicyChecker) processS3Bucket(
 
 	// Fetch BPA settings
 	go func() {
-		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Panic fetching BPA settings", "bucket", bucketName, "panic", r)
+			}
+			wg.Done()
+		}()
 		bpa = a.checkS3BlockPublicAccess(ctx, client, bucketName)
 		if bpa != nil {
 			slog.Debug("Retrieved BPA settings", "bucket", bucketName, "reason", bpa.Reason)
@@ -241,7 +246,12 @@ func (a *AwsResourcePolicyChecker) processS3Bucket(
 
 	// Fetch bucket policy
 	go func() {
-		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Panic fetching bucket policy", "bucket", bucketName, "panic", r)
+			}
+			wg.Done()
+		}()
 		policy, policyErr = getS3BucketPolicy(ctx, client, bucketName)
 		if policyErr != nil {
 			slog.Debug("Failed to get policy", "resource", bucketName, "error", policyErr)
@@ -250,7 +260,12 @@ func (a *AwsResourcePolicyChecker) processS3Bucket(
 
 	// Fetch ACL data
 	go func() {
-		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Panic fetching ACL data", "bucket", bucketName, "panic", r)
+			}
+			wg.Done()
+		}()
 		aclResult = a.checkS3PublicACLs(ctx, client, bucketName)
 	}()
 

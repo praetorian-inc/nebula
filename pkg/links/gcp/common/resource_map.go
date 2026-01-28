@@ -34,6 +34,10 @@ var listResourceMap = map[tab.CloudResourceType][]string{
 	tab.GCRContainerImage:         {"containerimage"},
 	tab.GCRArtifactoryDockerImage: {"dockerimage", "artifactoryimage"},
 
+	// Firebase
+	tab.GCPResourceFirebaseHostingSite: {"firebase", "hostingsite", "firebasehosting"},
+	tab.GCPResourceFirebaseWebApp:      {"firebaseapp", "webapp"},
+
 	// Hierarchy (Info only - use hierarchy modules for listing)
 	tab.GCPResourceProject:      {"project"},
 	tab.GCPResourceFolder:       {"folder"},

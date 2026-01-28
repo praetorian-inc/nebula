@@ -3,6 +3,7 @@ package aws
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
@@ -10,9 +11,17 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/types"
 )
 
+const (
+	// DefaultWorkerCount is the default number of concurrent workers for processing resources
+	DefaultWorkerCount = 20
+)
+
 // AWSPublicResourcesProcessor processes ResourceChainPair objects concurrently for public resources
 type AWSPublicResourcesProcessor struct {
 	*base.AwsReconLink
+	semaphore chan struct{}  // Limits concurrent processing
+	wg        sync.WaitGroup // Tracks in-flight work
+	sendMu    sync.Mutex     // Protects Send() calls
 }
 
 func NewAWSPublicResourcesProcessor(configs ...cfg.Config) chain.Link {
@@ -21,7 +30,48 @@ func NewAWSPublicResourcesProcessor(configs ...cfg.Config) chain.Link {
 	return p
 }
 
+func (p *AWSPublicResourcesProcessor) Params() []cfg.Param {
+	params := p.AwsReconLink.Params()
+	params = append(params, cfg.NewParam[int]("workers", "Number of concurrent workers for processing resources").WithDefault(DefaultWorkerCount))
+	return params
+}
+
+func (p *AWSPublicResourcesProcessor) Initialize() error {
+	if err := p.AwsReconLink.Initialize(); err != nil {
+		return err
+	}
+
+	// Initialize semaphore with worker count
+	workerCount, _ := cfg.As[int](p.Arg("workers"))
+	if workerCount <= 0 {
+		workerCount = DefaultWorkerCount
+	}
+	p.semaphore = make(chan struct{}, workerCount)
+	slog.Debug("Initialized public resources processor", "workers", workerCount)
+
+	return nil
+}
+
 func (p *AWSPublicResourcesProcessor) Process(pair *ResourceChainPair) error {
+	// Acquire semaphore slot (blocks if all workers are busy)
+	p.semaphore <- struct{}{}
+	p.wg.Add(1)
+
+	// Process in goroutine for concurrency
+	go func() {
+		defer func() {
+			<-p.semaphore // Release semaphore slot
+			p.wg.Done()
+		}()
+
+		p.processResource(pair)
+	}()
+
+	return nil
+}
+
+// processResource handles the actual processing of a single resource
+func (p *AWSPublicResourcesProcessor) processResource(pair *ResourceChainPair) {
 	slog.Debug("Processing public resource chain",
 		"resource_type", pair.Resource.TypeName,
 		"resource_id", pair.Resource.Identifier)
@@ -38,17 +88,20 @@ func (p *AWSPublicResourcesProcessor) Process(pair *ResourceChainPair) error {
 	// Process the resource
 	if err := resourceChain.Send(pair.Resource); err != nil {
 		slog.Error("Failed to send resource to chain", "error", err)
-		return err
+		return
 	}
 	resourceChain.Close()
 
 	// Stream outputs while the chain is running - consume before Wait()
 	for output, ok := chain.RecvAs[*types.EnrichedResourceDescription](resourceChain); ok; output, ok = chain.RecvAs[*types.EnrichedResourceDescription](resourceChain) {
 		slog.Debug("Forwarding output", "resource_type", pair.Resource.TypeName, "output_type", fmt.Sprintf("%T", output))
+
+		// Protect Send() with mutex since multiple goroutines may call it
+		p.sendMu.Lock()
 		if err := p.Send(output); err != nil {
 			slog.Error("Failed to send output", "error", err)
-			return err
 		}
+		p.sendMu.Unlock()
 	}
 
 	// Wait for chain completion after consuming all outputs
@@ -56,10 +109,17 @@ func (p *AWSPublicResourcesProcessor) Process(pair *ResourceChainPair) error {
 
 	if err := resourceChain.Error(); err != nil {
 		slog.Error("Error processing public resource chain", "resource", pair.Resource, "error", err)
-		return err
+		return
 	}
 
 	slog.Debug("Completed processing public resource chain", "resource_type", pair.Resource.TypeName)
+}
+
+// Complete waits for all in-flight workers to finish
+func (p *AWSPublicResourcesProcessor) Complete() error {
+	slog.Debug("Waiting for all public resource workers to complete")
+	p.wg.Wait()
+	slog.Debug("All public resource workers completed")
 	return nil
 }
 

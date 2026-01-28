@@ -53,6 +53,11 @@ func (p *AWSPublicResourcesProcessor) Initialize() error {
 }
 
 func (p *AWSPublicResourcesProcessor) Process(pair *ResourceChainPair) error {
+	// Ensure Initialize() was called before Process()
+	if p.semaphore == nil {
+		return fmt.Errorf("processor not initialized: call Initialize before Process")
+	}
+
 	// Acquire semaphore slot (blocks if all workers are busy)
 	p.semaphore <- struct{}{}
 	p.wg.Add(1)

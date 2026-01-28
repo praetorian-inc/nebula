@@ -345,7 +345,7 @@ func (a *AwsResourcePolicyChecker) flagPublicResource(
 ) {
 	props[serviceConfig.PolicyField] = policy
 	props["PublicAccessSource"] = source
-	props["EvaluationReasons"] = getUnqiueDetails(results)
+	props["EvaluationReasons"] = getUniqueDetails(results)
 	props["NeedsManualTriage"] = hasInconclusiveConditions(results)
 	props["Actions"] = getAllowedActions(results)
 
@@ -769,7 +769,7 @@ func getAllowedActions(results []*iam.EvaluationResult) []string {
 	return actions
 }
 
-func getUnqiueDetails(results []*iam.EvaluationResult) []string {
+func getUniqueDetails(results []*iam.EvaluationResult) []string {
 	details := []string{}
 	for _, res := range results {
 		if !slices.Contains(details, res.EvaluationDetails) {

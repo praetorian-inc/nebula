@@ -9,14 +9,25 @@ nebula aws recon summary [flags]
 ### Options
 
 ```
-      --days int             Number of days to look back for cost data (default 30)
-  -f, --filename string      Base filename for output (default "aws-summary")
-  -h, --help                 help for summary
-      --indent int           the number of spaces to use for the JSON indentation
-      --module-name string   name of the module for dynamic file naming
-      --outfile string       the default file to write the JSON to (can be changed at runtime) (default "out.json")
-  -o, --output string        output directory (default "nebula-output")
-  -s, --scan-type string     Scan type - 'full' for all resources or 'summary' for key services (default "full")
+      --cache-dir string               Directory to store API response cache files (default "/tmp/nebula-cache")
+      --cache-error-resp               Cache error response
+      --cache-error-resp-type string   A comma-separated list of strings specifying cache error response types, e.g., TypeNotFoundException, AccessDeniedException. Use all to represent any error.
+      --cache-ext string               Name of AWS API response cache files extension (default ".aws-cache")
+      --cache-ttl int                  TTL for cached responses in seconds (default 3600)
+      --days int                       Number of days to look back for cost data (default 30)
+      --disable-cache                  Disable API response caching
+  -f, --filename string                Base filename for output (default "aws-summary")
+  -h, --help                           help for summary
+      --indent int                     the number of spaces to use for the JSON indentation
+      --module-name string             name of the module for dynamic file naming
+      --opsec_level string             Operational security level for AWS operations (default "none")
+      --outfile string                 the default file to write the JSON to (can be changed at runtime) (default "out.json")
+  -o, --output string                  output directory (default "nebula-output")
+  -p, --profile string                 AWS profile to use
+      --profile-dir string             Set to override the default AWS profile directory
+  -r, --regions strings                AWS regions to scan (default [all])
+  -t, --resource-type strings          AWS Cloud Control resource type (default [all])
+  -s, --scan-type string               Scan type - 'full' for all resources or 'summary' for key services (default "full")
 ```
 
 ### SEE ALSO

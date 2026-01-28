@@ -1,0 +1,83 @@
+id: apim_cross_tenant_signup_bypass
+name: Azure APIM Cross-Tenant Signup Bypass (GHSA-vcwf-73jp-r7mv)
+description: Detects Azure API Management instances with Basic Authentication configured on the Developer Portal, which are vulnerable to cross-tenant signup bypass. When signup is disabled in the UI, the underlying API endpoint remains active and attackers can register accounts by directly calling the signup API with a modified Host header.
+severity: Medium
+category: ["Public Access", "arg-scan", "Authentication Bypass"]
+reportability: Manual Triage
+triageNotes: |
+  Vulnerability Overview:
+  This check identifies APIM instances vulnerable to GHSA-vcwf-73jp-r7mv - a cross-tenant signup bypass
+  that allows attackers to register accounts even when administrators have disabled signup in the portal UI.
+  Microsoft considers this behavior "by design" and has not patched it.
+
+  Root Cause:
+  - Disabling signup only hides the form in the portal UI
+  - The underlying signup API endpoint (/signup) remains active and accepts registration requests
+  - The signup API does not validate that requests originate from the same tenant's portal
+  - Attackers can craft requests from any source to register on any vulnerable instance
+
+  Attack Vector:
+  1. Attacker accesses their own APIM Developer Portal (or any with signup enabled)
+  2. Attacker fills in the signup form and intercepts the request
+  3. Attacker changes the Host header to the target instance
+  4. Account is created on the target despite signup being "disabled"
+
+  Vulnerable Configuration:
+  - Developer Portal is Enabled (properties.developerPortalStatus == 'Enabled')
+  - Basic Authentication identity provider exists (identityProviders/basic resource)
+  - Non-Consumption SKU tier (Consumption has limited portal features)
+
+  NOT Vulnerable If:
+  - Basic Authentication identity provider is completely REMOVED (not just signup disabled)
+  - Only Azure AD / OAuth authentication is configured
+  - Developer Portal is disabled
+
+  Impact:
+  - Cross-tenant account creation on any APIM instance with Basic Auth
+  - Bypass of administrative signup restrictions
+  - Access to API documentation that may contain sensitive information
+  - Potential to request API subscription keys
+  - External attackers can register on "internal" portals
+
+  Triage Steps:
+  1. Review the enrichment output - it tests the signup API endpoint directly
+  2. If signup API responds with captcha/validation errors, the instance IS VULNERABLE
+  3. Check if signup is intentionally enabled (attack source) vs disabled in UI (bypass target)
+  4. Audit existing Developer Portal user accounts for unauthorized signups
+
+  Remediation:
+  Simply disabling signup in the Azure Portal UI is NOT sufficient!
+
+  1. REMOVE the Basic Authentication identity provider completely:
+     - Navigate to APIM instance -> Developer Portal -> Identities
+     - DELETE the "Username and password" identity provider entirely
+  2. Migrate to Azure AD authentication exclusively
+  3. Audit all existing Developer Portal accounts
+  4. Review user creation logs for API-based (non-UI) registrations
+references:
+  - https://github.com/bountyyfi/Azure-APIM-Cross-Tenant-Signup-Bypass/security/advisories/GHSA-vcwf-73jp-r7mv
+query: |
+  resources
+  | where type == "microsoft.apimanagement/service"
+  | where properties.developerPortalStatus == "Enabled"
+  | where sku.name != "Consumption"
+  | join kind=inner (
+      resources
+      | where type == "microsoft.apimanagement/service/identityproviders"
+      | where name endswith "/basic"
+      | extend apimId = tolower(tostring(split(id, "/identityProviders/")[0]))
+  ) on $left.id == $right.apimId
+  | project
+      id,
+      name,
+      type,
+      location,
+      resourceGroup,
+      subscriptionId,
+      developerPortalStatus = tostring(properties.developerPortalStatus),
+      skuName = tostring(sku.name),
+      skuCapacity = toint(sku.capacity),
+      gatewayUrl = tostring(properties.gatewayUrl),
+      developerPortalUrl = tostring(properties.developerPortalUrl),
+      publicNetworkAccess = tostring(properties.publicNetworkAccess),
+      basicAuthConfigured = true

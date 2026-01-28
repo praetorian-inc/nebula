@@ -51,6 +51,9 @@ func NewEnrichmentRegistry() *EnrichmentRegistry {
 
 			// Security Services
 			&KeyVaultEnricher{},
+
+			// API Management
+			&APIManagementEnricher{},
 		},
 	}
 }

@@ -643,8 +643,9 @@ func (a *AwsResourcePolicyChecker) evaluatePolicyWithContext(reqCtx *iam.Request
 }
 
 // analyzePolicy analyzes a policy to determine if it grants public access
+// Only returns results where access is allowed to reduce memory usage
 func (a *AwsResourcePolicyChecker) analyzePolicy(resource string, policy *types.Policy, accountId string, resourceType string) ([]*iam.EvaluationResult, error) {
-	allResults := []*iam.EvaluationResult{}
+	allowedResults := []*iam.EvaluationResult{}
 
 	contexts := GetEvaluationContexts(resourceType)
 
@@ -661,10 +662,17 @@ func (a *AwsResourcePolicyChecker) analyzePolicy(resource string, policy *types.
 		if err != nil {
 			return nil, err
 		}
-		allResults = append(allResults, results...)
+
+		// Only store allowed results to reduce memory usage
+		// Denied results don't contribute to public access detection
+		for _, res := range results {
+			if res.Allowed {
+				allowedResults = append(allowedResults, res)
+			}
+		}
 	}
 
-	return allResults, nil
+	return allowedResults, nil
 }
 
 // s3ObjectLevelActions contains S3 actions that operate on objects (not buckets)
@@ -702,6 +710,7 @@ var s3ObjectLevelActions = map[string]bool{
 
 // analyzeS3ObjectPolicy analyzes S3 bucket policy for object-level public access
 // This handles the case where policy grants s3:GetObject on bucket/* but not the bucket itself
+// Only returns allowed results for object-level actions to reduce memory usage
 func (a *AwsResourcePolicyChecker) analyzeS3ObjectPolicy(bucketArn string, policy *types.Policy, accountId string) ([]*iam.EvaluationResult, error) {
 	// Use the object-level resource ARN (bucket/*) instead of bucket ARN
 	objectResource := bucketArn + "/*"
@@ -713,7 +722,7 @@ func (a *AwsResourcePolicyChecker) analyzeS3ObjectPolicy(bucketArn string, polic
 		return nil, nil
 	}
 
-	allResults := []*iam.EvaluationResult{}
+	allowedResults := []*iam.EvaluationResult{}
 	contexts := GetEvaluationContexts("AWS::S3::Bucket")
 
 	for _, reqCtx := range contexts {
@@ -728,37 +737,29 @@ func (a *AwsResourcePolicyChecker) analyzeS3ObjectPolicy(bucketArn string, polic
 			return nil, err
 		}
 
-		// Only include results for object-level actions
+		// Only include allowed results for object-level actions to reduce memory usage
 		for _, res := range results {
-			if s3ObjectLevelActions[string(res.Action)] {
-				allResults = append(allResults, res)
+			if res.Allowed && s3ObjectLevelActions[string(res.Action)] {
+				allowedResults = append(allowedResults, res)
 			}
 		}
 	}
 
-	return allResults, nil
+	return allowedResults, nil
 }
 
-func getAllowedResults(results []*iam.EvaluationResult) []*iam.EvaluationResult {
-	allowed := []*iam.EvaluationResult{}
-	for _, res := range results {
-		if res.Allowed {
-			allowed = append(allowed, res)
-		}
-	}
-	return allowed
-}
-
+// isPublic checks if any results indicate public access
+// Note: results are pre-filtered to only contain allowed results from analyzePolicy
 func isPublic(results []*iam.EvaluationResult) bool {
-	allowed := getAllowedResults(results)
-	return len(allowed) > 0
+	return len(results) > 0
 }
 
+// getAllowedActions extracts unique action names from evaluation results
+// Note: results are pre-filtered to only contain allowed results from analyzePolicy
 func getAllowedActions(results []*iam.EvaluationResult) []string {
-	allowed := getAllowedResults(results)
 	actionSet := make(map[string]struct{})
 	actions := []string{}
-	for _, res := range allowed {
+	for _, res := range results {
 		actionStr := string(res.Action)
 		if _, exists := actionSet[actionStr]; !exists {
 			actionSet[actionStr] = struct{}{}

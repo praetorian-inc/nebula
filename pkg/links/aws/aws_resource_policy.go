@@ -9,6 +9,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/efs"
@@ -123,6 +124,23 @@ func (a *AwsResourcePolicyChecker) Process(resource *types.EnrichedResourceDescr
 		return nil // Continue with other resources
 	}
 
+	// Delegate to S3-specific handler (has additional checks: BPA, object-level policies, ACLs)
+	if resource.TypeName == "AWS::S3::Bucket" {
+		return a.processS3Bucket(resource, awsCfg, props, identifierStr, serviceConfig)
+	}
+
+	// Standard flow for non-S3 resources
+	return a.processStandardResource(resource, awsCfg, props, identifierStr, serviceConfig)
+}
+
+// processStandardResource handles policy analysis for non-S3 resources
+func (a *AwsResourcePolicyChecker) processStandardResource(
+	resource *types.EnrichedResourceDescription,
+	awsCfg aws.Config,
+	props map[string]any,
+	identifierStr string,
+	serviceConfig ServicePolicyConfig,
+) error {
 	// Get the policy
 	policy, err := ServiceMap[resource.TypeName].GetPolicy(context.TODO(), awsCfg, identifierStr, a.Regions)
 	if err != nil {
@@ -154,13 +172,183 @@ func (a *AwsResourcePolicyChecker) Process(resource *types.EnrichedResourceDescr
 		return nil
 	}
 
-	// Add the policy to the properties
-	props[serviceConfig.PolicyField] = policy
-	props["EvaluationReasons"] = getUnqiueDetails(res)
-	props["NeedsManualTriage"] = hasInconclusiveConditions(res)
-	props["Actions"] = getAllowedActions(res)
+	// Flag public resource
+	a.flagPublicResource(resource, props, policy, res, serviceConfig, "Policy")
+	return nil
+}
 
-	// Create enriched resource with the policy
+// processS3Bucket handles S3-specific public access detection
+// S3 requires additional checks: Block Public Access settings, object-level policies, and ACLs
+func (a *AwsResourcePolicyChecker) processS3Bucket(
+	resource *types.EnrichedResourceDescription,
+	awsCfg aws.Config,
+	props map[string]any,
+	bucketName string,
+	serviceConfig ServicePolicyConfig,
+) error {
+	ctx := context.TODO()
+
+	// Step 0: Get bucket location and create region-specific client
+	// This avoids PermanentRedirect errors when bucket is in a different region
+	client := s3.NewFromConfig(awsCfg)
+	locationResp, err := client.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
+		Bucket: aws.String(bucketName),
+	})
+	if err != nil {
+		slog.Debug("Failed to get bucket location", "bucket", bucketName, "error", err)
+		return nil
+	}
+
+	// Handle empty LocationConstraint (means us-east-1)
+	bucketRegion := "us-east-1"
+	if locationResp.LocationConstraint != "" {
+		bucketRegion = string(locationResp.LocationConstraint)
+	}
+
+	// Check if the bucket's region is in the allowed regions list
+	if !slices.Contains(a.Regions, bucketRegion) {
+		slog.Debug("Bucket region not in allowed regions list", "bucket", bucketName, "bucketRegion", bucketRegion, "allowedRegions", a.Regions)
+		return nil
+	}
+
+	// Create region-specific client if bucket is in a different region
+	if bucketRegion != awsCfg.Region {
+		regionCfg := awsCfg.Copy()
+		regionCfg.Region = bucketRegion
+		client = s3.NewFromConfig(regionCfg)
+		slog.Debug("Created region-specific S3 client", "bucket", bucketName, "region", bucketRegion)
+	}
+
+	// Step 1: Fetch BPA, policy, and ACL data in parallel for better performance
+	var (
+		bpa       *S3BPAStatus
+		policy    *types.Policy
+		policyErr error
+		aclResult S3ACLResult
+		wg        sync.WaitGroup
+	)
+
+	wg.Add(3)
+
+	// Fetch BPA settings
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Panic fetching BPA settings", "bucket", bucketName, "panic", r)
+			}
+			wg.Done()
+		}()
+		bpa = a.checkS3BlockPublicAccess(ctx, client, bucketName)
+		if bpa != nil {
+			slog.Debug("Retrieved BPA settings", "bucket", bucketName, "reason", bpa.Reason)
+		}
+	}()
+
+	// Fetch bucket policy
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Panic fetching bucket policy", "bucket", bucketName, "panic", r)
+			}
+			wg.Done()
+		}()
+		policy, policyErr = getS3BucketPolicy(ctx, client, bucketName)
+		if policyErr != nil {
+			slog.Debug("Failed to get policy", "resource", bucketName, "error", policyErr)
+		}
+	}()
+
+	// Fetch ACL data
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Panic fetching ACL data", "bucket", bucketName, "panic", r)
+			}
+			wg.Done()
+		}()
+		aclResult = a.checkS3PublicACLs(ctx, client, bucketName)
+	}()
+
+	// Wait for all parallel fetches to complete
+	wg.Wait()
+
+	// Step 2: Apply BPA logic to determine what to process
+	// Skip entire bucket only if BOTH flags are true (fully protected)
+	if bpa != nil && bpa.IgnorePublicAcls && bpa.RestrictPublicBuckets {
+		slog.Debug("Skipping bucket - fully protected by BPA", "bucket", bucketName, "reason", bpa.Reason)
+		return nil
+	}
+
+	var policyResults []*iam.EvaluationResult
+	policyIsPublic := false
+
+	// Step 3: Analyze bucket policy (skip if RestrictPublicBuckets blocks policy-based access)
+	if bpa == nil || !bpa.RestrictPublicBuckets {
+		if policyErr == nil && policy != nil {
+			// Log policy for debugging
+			if policyJson, err := json.MarshalIndent(policy, "", "  "); err == nil {
+				slog.Debug(fmt.Sprintf("policy for %s", resource.Arn.String()), "policy", string(policyJson))
+			}
+
+			// Analyze bucket-level policy
+			policyResults, err = a.analyzePolicy(resource.Arn.String(), policy, resource.AccountId, resource.TypeName)
+			if err != nil {
+				slog.Error("Failed to analyze policy", "resource", bucketName, "error", err)
+				return err
+			}
+
+			// Also check object-level permissions (e.g., s3:GetObject on bucket/*)
+			// Policies often grant access to objects, not the bucket itself
+			if !isPublic(policyResults) {
+				objectRes, err := a.analyzeS3ObjectPolicy(resource.Arn.String(), policy, resource.AccountId)
+				if err != nil {
+					slog.Debug("Failed to analyze S3 object policy", "resource", bucketName, "error", err)
+				} else if isPublic(objectRes) {
+					slog.Debug("S3 bucket has public object-level access", "bucket", bucketName)
+					policyResults = append(policyResults, objectRes...)
+				}
+			}
+
+			policyIsPublic = isPublic(policyResults)
+			if policyIsPublic {
+				a.flagPublicResource(resource, props, policy, policyResults, serviceConfig, "Policy")
+			}
+		} else if policy == nil && policyErr == nil {
+			slog.Debug("S3 bucket has no policy, checking ACLs", "bucket", bucketName)
+		}
+	} else {
+		slog.Debug("Skipping policy check - RestrictPublicBuckets is enabled", "bucket", bucketName)
+	}
+
+	// Step 4: Process ACL results (skip if IgnorePublicAcls blocks ACL-based access)
+	// ACLs are additive (can't deny), so skip if already public via policy
+	if !policyIsPublic && (bpa == nil || !bpa.IgnorePublicAcls) {
+		if len(aclResult.ACLGrants) > 0 {
+			slog.Debug("Bucket has public ACL grants", "bucket", bucketName, "grants", aclResult.ACLGrants, "granteeType", aclResult.GranteeType)
+			a.flagS3PublicACL(resource, props, aclResult)
+		}
+	} else if bpa != nil && bpa.IgnorePublicAcls {
+		slog.Debug("Skipping ACL check - IgnorePublicAcls is enabled", "bucket", bucketName)
+	}
+
+	return nil
+}
+
+// flagPublicResource sends an enriched resource for a public policy finding
+func (a *AwsResourcePolicyChecker) flagPublicResource(
+	resource *types.EnrichedResourceDescription,
+	props map[string]any,
+	policy *types.Policy,
+	results []*iam.EvaluationResult,
+	serviceConfig ServicePolicyConfig,
+	source string,
+) {
+	props[serviceConfig.PolicyField] = policy
+	props["PublicAccessSource"] = source
+	props["EvaluationReasons"] = getUniqueDetails(results)
+	props["NeedsManualTriage"] = hasInconclusiveConditions(results)
+	props["Actions"] = getAllowedActions(results)
+
 	enriched := types.EnrichedResourceDescription{
 		Identifier: resource.Identifier,
 		TypeName:   resource.TypeName,
@@ -169,10 +357,31 @@ func (a *AwsResourcePolicyChecker) Process(resource *types.EnrichedResourceDescr
 		AccountId:  resource.AccountId,
 		Arn:        resource.Arn,
 	}
-
-	// Send the enriched resource
 	a.Send(enriched)
-	return nil
+}
+
+// flagS3PublicACL sends an enriched resource for an S3 ACL-based public access finding
+func (a *AwsResourcePolicyChecker) flagS3PublicACL(
+	resource *types.EnrichedResourceDescription,
+	props map[string]any,
+	aclResult S3ACLResult,
+) {
+	props["PublicAccessSource"] = "ACL"
+	props["ACLGrants"] = aclResult.ACLGrants
+	props["GranteeType"] = aclResult.GranteeType
+	props["EvaluationReasons"] = []string{fmt.Sprintf("Bucket ACL grants %v to %s", aclResult.ACLGrants, aclResult.GranteeType)}
+	props["NeedsManualTriage"] = false
+	props["Actions"] = aclResult.ACLGrants // ACL permissions map to actions
+
+	enriched := types.EnrichedResourceDescription{
+		Identifier: resource.Identifier,
+		TypeName:   resource.TypeName,
+		Region:     resource.Region,
+		Properties: props,
+		AccountId:  resource.AccountId,
+		Arn:        resource.Arn,
+	}
+	a.Send(enriched)
 }
 
 // ConditionPermutation represents a condition key and its possible values
@@ -434,8 +643,9 @@ func (a *AwsResourcePolicyChecker) evaluatePolicyWithContext(reqCtx *iam.Request
 }
 
 // analyzePolicy analyzes a policy to determine if it grants public access
+// Only returns results where access is allowed to reduce memory usage
 func (a *AwsResourcePolicyChecker) analyzePolicy(resource string, policy *types.Policy, accountId string, resourceType string) ([]*iam.EvaluationResult, error) {
-	allResults := []*iam.EvaluationResult{}
+	allowedResults := []*iam.EvaluationResult{}
 
 	contexts := GetEvaluationContexts(resourceType)
 
@@ -452,32 +662,104 @@ func (a *AwsResourcePolicyChecker) analyzePolicy(resource string, policy *types.
 		if err != nil {
 			return nil, err
 		}
-		allResults = append(allResults, results...)
-	}
 
-	return allResults, nil
-}
-
-func getAllowedResults(results []*iam.EvaluationResult) []*iam.EvaluationResult {
-	allowed := []*iam.EvaluationResult{}
-	for _, res := range results {
-		if res.Allowed {
-			allowed = append(allowed, res)
+		// Only store allowed results to reduce memory usage
+		// Denied results don't contribute to public access detection
+		for _, res := range results {
+			if res.Allowed {
+				allowedResults = append(allowedResults, res)
+			}
 		}
 	}
-	return allowed
+
+	return allowedResults, nil
 }
 
+// s3ObjectLevelActions contains S3 actions that operate on objects (not buckets)
+// These actions typically require bucket/* resource ARNs in policies
+var s3ObjectLevelActions = map[string]bool{
+	"s3:GetObject":                  true,
+	"s3:GetObjectAcl":               true,
+	"s3:GetObjectAttributes":        true,
+	"s3:GetObjectLegalHold":         true,
+	"s3:GetObjectRetention":         true,
+	"s3:GetObjectTagging":           true,
+	"s3:GetObjectTorrent":           true,
+	"s3:GetObjectVersion":           true,
+	"s3:GetObjectVersionAcl":        true,
+	"s3:GetObjectVersionTagging":    true,
+	"s3:GetObjectVersionTorrent":    true,
+	"s3:PutObject":                  true,
+	"s3:PutObjectAcl":               true,
+	"s3:PutObjectLegalHold":         true,
+	"s3:PutObjectRetention":         true,
+	"s3:PutObjectTagging":           true,
+	"s3:PutObjectVersionAcl":        true,
+	"s3:PutObjectVersionTagging":    true,
+	"s3:DeleteObject":               true,
+	"s3:DeleteObjectTagging":        true,
+	"s3:DeleteObjectVersion":        true,
+	"s3:DeleteObjectVersionTagging": true,
+	"s3:AbortMultipartUpload":       true,
+	"s3:ListMultipartUploadParts":   true,
+	"s3:RestoreObject":              true,
+	"s3:ReplicateObject":            true,
+	"s3:ReplicateDelete":            true,
+	"s3:ReplicateTags":              true,
+}
+
+// analyzeS3ObjectPolicy analyzes S3 bucket policy for object-level public access
+// This handles the case where policy grants s3:GetObject on bucket/* but not the bucket itself
+// Only returns allowed results for object-level actions to reduce memory usage
+func (a *AwsResourcePolicyChecker) analyzeS3ObjectPolicy(bucketArn string, policy *types.Policy, accountId string) ([]*iam.EvaluationResult, error) {
+	// Use the object-level resource ARN (bucket/*) instead of bucket ARN
+	objectResource := bucketArn + "/*"
+
+	slog.Debug("Analyzing S3 object-level policy", "bucketArn", bucketArn, "objectResource", objectResource)
+
+	// Filter actions to only check object-level actions
+	if policy.Statement == nil {
+		return nil, nil
+	}
+
+	allowedResults := []*iam.EvaluationResult{}
+	contexts := GetEvaluationContexts("AWS::S3::Bucket")
+
+	for _, reqCtx := range contexts {
+		if a.orgPolicies != nil && accountId != "" {
+			reqCtx.ResourceAccount = accountId
+		}
+		reqCtx.PopulateDefaultRequestConditionKeys(objectResource)
+
+		// Evaluate policy with object-level resource
+		results, err := a.evaluatePolicyWithContext(reqCtx, policy, objectResource)
+		if err != nil {
+			return nil, err
+		}
+
+		// Only include allowed results for object-level actions to reduce memory usage
+		for _, res := range results {
+			if res.Allowed && s3ObjectLevelActions[string(res.Action)] {
+				allowedResults = append(allowedResults, res)
+			}
+		}
+	}
+
+	return allowedResults, nil
+}
+
+// isPublic checks if any results indicate public access
+// Note: results are pre-filtered to only contain allowed results from analyzePolicy
 func isPublic(results []*iam.EvaluationResult) bool {
-	allowed := getAllowedResults(results)
-	return len(allowed) > 0
+	return len(results) > 0
 }
 
+// getAllowedActions extracts unique action names from evaluation results
+// Note: results are pre-filtered to only contain allowed results from analyzePolicy
 func getAllowedActions(results []*iam.EvaluationResult) []string {
-	allowed := getAllowedResults(results)
 	actionSet := make(map[string]struct{})
 	actions := []string{}
-	for _, res := range allowed {
+	for _, res := range results {
 		actionStr := string(res.Action)
 		if _, exists := actionSet[actionStr]; !exists {
 			actionSet[actionStr] = struct{}{}
@@ -487,7 +769,7 @@ func getAllowedActions(results []*iam.EvaluationResult) []string {
 	return actions
 }
 
-func getUnqiueDetails(results []*iam.EvaluationResult) []string {
+func getUniqueDetails(results []*iam.EvaluationResult) []string {
 	details := []string{}
 	for _, res := range results {
 		if !slices.Contains(details, res.EvaluationDetails) {
@@ -628,106 +910,30 @@ var ServicePolicyFuncMap = map[string]PolicyGetter{
 			slog.Debug("Created region-specific S3 client", "bucket", bucketName, "region", bucketRegion)
 		}
 
-		// 1. Check Block Public Access settings - if it blocks access, the request is denied regardless of policies or ACLs
-		blockPublicAccessResp, err := client.GetPublicAccessBlock(ctx, &s3.GetPublicAccessBlockInput{
-			Bucket: aws.String(bucketName),
-		})
-		if err != nil {
-			// Log the error but continue - some buckets might not have public access block settings
-			slog.Debug("Failed to get public access block settings", "bucket", bucketName, "error", err)
-		} else if blockPublicAccessResp.PublicAccessBlockConfiguration != nil {
-			config := blockPublicAccessResp.PublicAccessBlockConfiguration
-			// Only check the two flags that actually block current access:
-			// - IgnorePublicAcls: blocks all ACL-based public access
-			// - RestrictPublicBuckets: blocks all policy-based public access
-			// Note: BlockPublicAcls and BlockPublicPolicy only prevent future changes, not current access
-			if (config.IgnorePublicAcls != nil && *config.IgnorePublicAcls) ||
-				(config.RestrictPublicBuckets != nil && *config.RestrictPublicBuckets) {
-				slog.Debug("Bucket has public access blocked", "bucket", bucketName,
-					"ignorePublicAcls", config.IgnorePublicAcls != nil && *config.IgnorePublicAcls,
-					"restrictPublicBuckets", config.RestrictPublicBuckets != nil && *config.RestrictPublicBuckets)
-
-				// Create a policy that represents the blocked access
-				// Use the correct types for Principal, Action, Resource, and Condition
-				starPrincipal := types.DynaString{"*"}
-				actionDynaString := types.DynaString{"s3:*"}
-				resourceDynaString := types.DynaString{fmt.Sprintf("arn:aws:s3:::%s", bucketName), fmt.Sprintf("arn:aws:s3:::%s/*", bucketName)}
-
-				// Essentiall we just return a virtual policy that denies everything
-				blockStatement := types.PolicyStatement{
-					Sid:       "VirtualPolicyFromBlockPublicAccess",
-					Effect:    "Deny",
-					Principal: &types.Principal{AWS: &starPrincipal},
-					Action:    &actionDynaString,
-					Resource:  &resourceDynaString,
-				}
-
-				blockStatementList := types.PolicyStatementList{blockStatement}
-				return &types.Policy{
-					Version:   "2012-10-17",
-					Statement: &blockStatementList,
-				}, nil
-			}
-		}
-
-		// 2. We pass through the bucket policy since this is what we want from this function
-		var bucketPolicy *types.Policy
+		// Get bucket policy (pure policy getter - no virtual policies)
 		resp, err := client.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
 			Bucket: aws.String(bucketName),
 		})
 		if err != nil {
 			if strings.Contains(err.Error(), "NoSuchBucketPolicy") {
-				slog.Debug("Bucket does not exists", "bucket", bucketName, "error", err)
-				return nil, err
+				slog.Debug("Bucket has no policy", "bucket", bucketName)
+				return nil, nil
 			}
 			slog.Debug("Failed to get bucket policy", "bucket", bucketName, "error", err)
-			// Continue since we need to evaluate bucket ACL
-		}
-		if resp != nil && resp.Policy != nil {
-			bucketPolicy, err = strToPolicy(*resp.Policy)
-			if err != nil {
-				slog.Debug("Error in converting string to policy, continuing to evaluate ACLs", "policy", *resp.Policy, "error", err)
-			}
+			return nil, err
 		}
 
-		// 3. ACLs are evaluated last and can provide additional access controls
-		// In this case, we merge the policies.
-		// No better way to do this at the moment unless we evaluate the policy in the combined function with other resources
-		aclResp, err := client.GetBucketAcl(ctx, &s3.GetBucketAclInput{
-			Bucket: aws.String(bucketName),
-		})
+		if resp == nil || resp.Policy == nil {
+			return nil, nil
+		}
+
+		policy, err := strToPolicy(*resp.Policy)
 		if err != nil {
-			// Log ACL check failure but don't fail the entire operation
-			slog.Debug("Failed to get bucket ACL", "bucket", bucketName, "error", err)
-		} else if aclResp.Grants != nil {
-			// Convert ACL grants to policy statements and merge with bucket policy
-			aclStatements := convertACLGrantsToStatements(aclResp.Grants, bucketName)
-			if len(aclStatements) > 0 {
-				if bucketPolicy == nil {
-					// Create a new policy if none exists
-					aclStatementList := types.PolicyStatementList(aclStatements)
-					bucketPolicy = &types.Policy{
-						Version:   "2012-10-17",
-						Statement: &aclStatementList,
-					}
-				} else {
-					// Merge ACL statements with existing policy
-					if bucketPolicy.Statement == nil {
-						aclStatementList := types.PolicyStatementList(aclStatements)
-						bucketPolicy.Statement = &aclStatementList
-					} else {
-						// Dereference, append, and reassign
-						existingStatements := *bucketPolicy.Statement
-						mergedStatements := append(existingStatements, aclStatements...)
-						bucketPolicy.Statement = &mergedStatements
-					}
-				}
-				slog.Debug("Merged ACL grants into bucket policy", "bucket", bucketName, "aclStatements", len(aclStatements))
-			}
+			slog.Debug("Failed to parse bucket policy", "bucket", bucketName, "error", err)
+			return nil, err
 		}
 
-		// Return the bucket policy
-		return bucketPolicy, nil
+		return policy, nil
 	},
 	"AWS::EFS::FileSystem": func(ctx context.Context, cfg aws.Config, fileSystemId string, allowedRegions []string) (*types.Policy, error) {
 		client := efs.NewFromConfig(cfg)
@@ -916,80 +1122,139 @@ var ServicePolicyFuncMap = map[string]PolicyGetter{
 	},
 }
 
-// convertACLGrantsToStatements converts S3 ACL grants to IAM policy statements
-func convertACLGrantsToStatements(grants []s3types.Grant, bucketName string) []types.PolicyStatement {
-	var statements []types.PolicyStatement
-
-	for _, grant := range grants {
-		if grant.Grantee == nil || grant.Grantee.URI == nil {
-			continue
+// getS3BucketPolicy retrieves the bucket policy using a pre-configured S3 client
+// This is used when we already have a region-specific client from GetBucketLocation
+func getS3BucketPolicy(ctx context.Context, client *s3.Client, bucketName string) (*types.Policy, error) {
+	resp, err := client.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
+		Bucket: aws.String(bucketName),
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "NoSuchBucketPolicy") {
+			slog.Debug("Bucket has no policy", "bucket", bucketName)
+			return nil, nil
 		}
-
-		// Map ACL permissions to IAM actions
-		var actions []string
-		switch grant.Permission {
-		case "READ":
-			actions = []string{
-				"s3:GetObject",
-				"s3:GetObjectVersion",
-				"s3:ListBucket",
-			}
-		case "WRITE":
-			actions = []string{
-				"s3:PutObject",
-				"s3:DeleteObject",
-			}
-		case "READ_ACP":
-			actions = []string{"s3:GetBucketAcl"}
-		case "WRITE_ACP":
-			actions = []string{"s3:PutBucketAcl"}
-		case "FULL_CONTROL":
-			actions = []string{"s3:*"}
-		default:
-			continue
-		}
-
-		// Map grantee URI to principal
-		var principal *types.Principal
-		var granteeType string
-		switch *grant.Grantee.URI {
-		case "http://acs.amazonaws.com/groups/global/AllUsers":
-			// Create a Principal with AWS field set to "*"
-			star := types.DynaString{"*"}
-			principal = &types.Principal{
-				AWS: &star,
-			}
-			granteeType = "AllUsers"
-		case "http://acs.amazonaws.com/groups/global/AuthenticatedUsers":
-			// Create a Principal with AWS field set to "arn:aws:iam::*:root"
-			authUsers := types.DynaString{"arn:aws:iam::*:root"}
-			principal = &types.Principal{
-				AWS: &authUsers,
-			}
-			granteeType = "AuthenticatedUsers"
-		default:
-			// Skip other grantee types for now
-			continue
-		}
-
-		// Create statement with descriptive SID
-		actionDynaString := types.DynaString(actions)
-		resourceDynaString := types.DynaString{
-			fmt.Sprintf("arn:aws:s3:::%s", bucketName),
-			fmt.Sprintf("arn:aws:s3:::%s/*", bucketName),
-		}
-		statement := types.PolicyStatement{
-			Sid:       fmt.Sprintf("VirtualPolicyFromACL-%s-%s", granteeType, grant.Permission),
-			Effect:    "Allow",
-			Principal: principal,
-			Action:    &actionDynaString,
-			Resource:  &resourceDynaString,
-		}
-
-		statements = append(statements, statement)
+		return nil, err
 	}
 
-	return statements
+	if resp == nil || resp.Policy == nil {
+		return nil, nil
+	}
+
+	policy, err := strToPolicy(*resp.Policy)
+	if err != nil {
+		slog.Debug("Failed to parse bucket policy", "bucket", bucketName, "error", err)
+		return nil, err
+	}
+
+	return policy, nil
+}
+
+// S3BPAStatus contains the Block Public Access settings for an S3 bucket
+type S3BPAStatus struct {
+	IgnorePublicAcls      bool   // When true, ACL-based public access is blocked
+	RestrictPublicBuckets bool   // When true, policy-based public access is blocked
+	Reason                string // Human-readable description for logging
+}
+
+// S3ACLResult contains the results of checking S3 ACLs
+type S3ACLResult struct {
+	ACLGrants   []string // ACL permissions granted (e.g., ["READ", "WRITE"])
+	GranteeType string   // Type of grantee (e.g., "AllUsers", "AuthenticatedUsers")
+}
+
+// checkS3BlockPublicAccess checks S3 Block Public Access settings
+// Returns nil if BPA settings couldn't be retrieved, otherwise returns the BPA status
+func (a *AwsResourcePolicyChecker) checkS3BlockPublicAccess(
+	ctx context.Context,
+	client *s3.Client,
+	bucketName string,
+) *S3BPAStatus {
+	// Check Block Public Access settings
+	blockPublicAccessResp, err := client.GetPublicAccessBlock(ctx, &s3.GetPublicAccessBlockInput{
+		Bucket: aws.String(bucketName),
+	})
+	if err != nil {
+		slog.Debug("Failed to get public access block settings", "bucket", bucketName, "error", err)
+		return nil // No BPA settings, continue evaluation
+	}
+
+	if blockPublicAccessResp.PublicAccessBlockConfiguration != nil {
+		config := blockPublicAccessResp.PublicAccessBlockConfiguration
+		ignoreAcls := config.IgnorePublicAcls != nil && *config.IgnorePublicAcls
+		restrictBuckets := config.RestrictPublicBuckets != nil && *config.RestrictPublicBuckets
+
+		return &S3BPAStatus{
+			IgnorePublicAcls:      ignoreAcls,
+			RestrictPublicBuckets: restrictBuckets,
+			Reason: fmt.Sprintf("Block Public Access settings (IgnorePublicAcls=%v, RestrictPublicBuckets=%v)",
+				ignoreAcls, restrictBuckets),
+		}
+	}
+
+	return nil // No BPA configuration found
+}
+
+// checkS3PublicACLs checks S3 bucket ACLs for public access grants
+// Returns ACL grants and grantee type if public access found
+func (a *AwsResourcePolicyChecker) checkS3PublicACLs(
+	ctx context.Context,
+	client *s3.Client,
+	bucketName string,
+) S3ACLResult {
+	result := S3ACLResult{}
+
+	// Check Bucket Ownership Controls - if BucketOwnerEnforced, ACLs are disabled
+	ownershipResp, err := client.GetBucketOwnershipControls(ctx, &s3.GetBucketOwnershipControlsInput{
+		Bucket: aws.String(bucketName),
+	})
+	if err != nil {
+		slog.Debug("Failed to get bucket ownership controls", "bucket", bucketName, "error", err)
+	} else if ownershipResp.OwnershipControls != nil {
+		for _, rule := range ownershipResp.OwnershipControls.Rules {
+			if rule.ObjectOwnership == s3types.ObjectOwnershipBucketOwnerEnforced {
+				slog.Debug("Bucket ownership enforced - ACLs disabled", "bucket", bucketName)
+				return result // ACLs disabled, return empty result
+			}
+		}
+	}
+
+	// Check ACLs directly for public grantees
+	aclResp, err := client.GetBucketAcl(ctx, &s3.GetBucketAclInput{
+		Bucket: aws.String(bucketName),
+	})
+	if err != nil {
+		slog.Debug("Failed to get bucket ACL", "bucket", bucketName, "error", err)
+		return result
+	}
+
+	granteeTypes := make(map[string]bool)
+
+	if aclResp.Grants != nil {
+		for _, grant := range aclResp.Grants {
+			if grant.Grantee == nil || grant.Grantee.URI == nil {
+				continue
+			}
+
+			// Check for public grantees
+			switch *grant.Grantee.URI {
+			case "http://acs.amazonaws.com/groups/global/AllUsers":
+				granteeTypes["AllUsers"] = true
+				result.ACLGrants = append(result.ACLGrants, string(grant.Permission))
+			case "http://acs.amazonaws.com/groups/global/AuthenticatedUsers":
+				granteeTypes["AuthenticatedUsers"] = true
+				result.ACLGrants = append(result.ACLGrants, string(grant.Permission))
+			}
+		}
+	}
+
+	// Prioritize AllUsers (more permissive) over AuthenticatedUsers
+	if granteeTypes["AllUsers"] {
+		result.GranteeType = "AllUsers"
+	} else if granteeTypes["AuthenticatedUsers"] {
+		result.GranteeType = "AuthenticatedUsers"
+	}
+
+	return result
 }
 
 type AwsResourcePolicyFetcher struct {

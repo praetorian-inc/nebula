@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
@@ -247,27 +248,12 @@ func (l *EcsEcscapeAnalyzer) listServices(ctx context.Context, client *ecs.Clien
 	return allServices, nil
 }
 
-func (l *EcsEcscapeAnalyzer) extractAccountId(arn string) string {
-	parts := []rune(arn)
-	arnParts := []string{}
-	current := ""
-	for _, ch := range parts {
-		if ch == ':' || ch == '/' {
-			if current != "" {
-				arnParts = append(arnParts, current)
-				current = ""
-			}
-		} else {
-			current += string(ch)
-		}
+func (l *EcsEcscapeAnalyzer) extractAccountId(arnStr string) string {
+	parsed, err := arn.Parse(arnStr)
+	if err != nil {
+		return ""
 	}
-	if current != "" {
-		arnParts = append(arnParts, current)
-	}
-	if len(arnParts) >= 5 {
-		return arnParts[4]
-	}
-	return ""
+	return parsed.AccountID
 }
 
 func (l *EcsEcscapeAnalyzer) assessVulnerability(cluster ecstypes.Cluster, services []map[string]any, taskDefDetails []map[string]any) map[string]any {

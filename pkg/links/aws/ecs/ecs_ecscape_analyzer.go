@@ -277,30 +277,44 @@ func (l *EcsEcscapeAnalyzer) assessVulnerability(cluster ecstypes.Cluster, servi
 		usesFargateOnly = false
 	}
 
-	hasEC2Services := false
+	// Count EC2-capable services (not just boolean check)
+	ec2CapableCount := 0
 	for _, svc := range services {
 		launchType, _ := svc["launchType"].(string)
 
 		// Explicit EC2 launch type
 		if launchType == "EC2" {
-			hasEC2Services = true
-			break
+			ec2CapableCount++
+			continue
 		}
 
 		// Check capacity provider strategy when launch type is empty or not set
 		if launchType == "" {
 			capacityProviders, _ := svc["capacityProviderStrategy"].([]string)
-			for _, cp := range capacityProviders {
-				if cp != "FARGATE" && cp != "FARGATE_SPOT" {
-					hasEC2Services = true
-					break
+
+			// If service has capacity providers, check them
+			if len(capacityProviders) > 0 {
+				for _, cp := range capacityProviders {
+					if cp != "FARGATE" && cp != "FARGATE_SPOT" {
+						ec2CapableCount++
+						break
+					}
 				}
-			}
-			if hasEC2Services {
-				break
+			} else {
+				// Fall back to cluster's default capacity provider strategy
+				for _, cpStrategy := range cluster.DefaultCapacityProviderStrategy {
+					if cpStrategy.CapacityProvider != nil &&
+						*cpStrategy.CapacityProvider != "FARGATE" &&
+						*cpStrategy.CapacityProvider != "FARGATE_SPOT" {
+						ec2CapableCount++
+						break
+					}
+				}
 			}
 		}
 	}
+
+	hasEC2Services := ec2CapableCount > 0
 
 	isVulnerable := false
 	riskLevel := "LOW"
@@ -312,11 +326,11 @@ func (l *EcsEcscapeAnalyzer) assessVulnerability(cluster ecstypes.Cluster, servi
 		recommendation = "No action required. Fargate provides task-level isolation."
 	} else if usesEC2 || hasEC2Services {
 		isVulnerable = true
-		multipleServices := len(services) > 1
+		multipleServices := ec2CapableCount > 1
 
 		if multipleServices {
 			riskLevel = "HIGH"
-			vulnerabilityReason = fmt.Sprintf("Cluster uses EC2 launch type with %d services that could co-locate on shared container instances, enabling credential theft via ECScape", len(services))
+			vulnerabilityReason = fmt.Sprintf("Cluster uses EC2 launch type with %d services that could co-locate on shared container instances, enabling credential theft via ECScape", ec2CapableCount)
 			recommendation = "CRITICAL: Migrate to Fargate for task isolation, or implement strict IAM policies with conditions on task role ARNs. See https://github.com/naorhaziz/ecscape"
 		} else {
 			riskLevel = "MEDIUM"
@@ -336,6 +350,7 @@ func (l *EcsEcscapeAnalyzer) assessVulnerability(cluster ecstypes.Cluster, servi
 		"usesEC2":                usesEC2 || hasEC2Services,
 		"usesFargateOnly":        usesFargateOnly,
 		"serviceCount":           len(services),
+		"ec2CapableCount":        ec2CapableCount,
 		"containerInstanceCount": cluster.RegisteredContainerInstancesCount,
 	}
 }

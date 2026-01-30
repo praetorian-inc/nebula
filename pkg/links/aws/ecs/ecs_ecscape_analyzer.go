@@ -131,20 +131,23 @@ func (l *EcsEcscapeAnalyzer) analyzeCluster(ctx context.Context, client *ecs.Cli
 			// Extract capacity provider names
 			capacityProviders := []string{}
 			for _, cp := range svc.CapacityProviderStrategy {
-				capacityProviders = append(capacityProviders, *cp.CapacityProvider)
+				capacityProviders = append(capacityProviders, aws.ToString(cp.CapacityProvider))
 			}
 
+			taskDefArn := aws.ToString(svc.TaskDefinition)
 			serviceDetail := map[string]any{
-				"serviceName":              *svc.ServiceName,
-				"serviceArn":               *svc.ServiceArn,
+				"serviceName":              aws.ToString(svc.ServiceName),
+				"serviceArn":               aws.ToString(svc.ServiceArn),
 				"launchType":               string(svc.LaunchType),
-				"taskDefinition":           *svc.TaskDefinition,
+				"taskDefinition":           taskDefArn,
 				"desiredCount":             svc.DesiredCount,
 				"runningCount":             svc.RunningCount,
 				"capacityProviderStrategy": capacityProviders,
 			}
 			serviceDetails = append(serviceDetails, serviceDetail)
-			taskDefinitions[*svc.TaskDefinition] = true
+			if taskDefArn != "" {
+				taskDefinitions[taskDefArn] = true
+			}
 		}
 	}
 
@@ -159,17 +162,22 @@ func (l *EcsEcscapeAnalyzer) analyzeCluster(ctx context.Context, client *ecs.Cli
 		}
 
 		td := taskDef.TaskDefinition
+		if td == nil {
+			l.Logger.Warn("task definition is nil", "taskDef", taskDefArn)
+			continue
+		}
+
 		taskDefDetail := map[string]any{
-			"taskDefinitionArn": *td.TaskDefinitionArn,
-			"family":            *td.Family,
+			"taskDefinitionArn": aws.ToString(td.TaskDefinitionArn),
+			"family":            aws.ToString(td.Family),
 			"networkMode":       string(td.NetworkMode),
 		}
 
-		if td.TaskRoleArn != nil {
-			taskDefDetail["taskRoleArn"] = *td.TaskRoleArn
+		if taskRoleArn := aws.ToString(td.TaskRoleArn); taskRoleArn != "" {
+			taskDefDetail["taskRoleArn"] = taskRoleArn
 		}
-		if td.ExecutionRoleArn != nil {
-			taskDefDetail["executionRoleArn"] = *td.ExecutionRoleArn
+		if execRoleArn := aws.ToString(td.ExecutionRoleArn); execRoleArn != "" {
+			taskDefDetail["executionRoleArn"] = execRoleArn
 		}
 
 		hasSecrets := false

@@ -3,6 +3,7 @@ package ecs
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/arn"
@@ -26,7 +27,8 @@ func NewEcsEcscapeAnalyzer(configs ...cfg.Config) chain.Link {
 }
 
 func (l *EcsEcscapeAnalyzer) Process(input any) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
 
 	for _, region := range l.Regions {
 		l.Logger.Info("analyzing ECS clusters for ECScape vulnerability", "region", region)

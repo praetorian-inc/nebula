@@ -109,26 +109,42 @@ func (l *EcsEcscapeAnalyzer) analyzeCluster(ctx context.Context, client *ecs.Cli
 	serviceDetails := []map[string]any{}
 	taskDefinitions := make(map[string]bool)
 
-	if len(services) > 0 {
+	// DescribeServices API has a limit of 10 services per call
+	const describeServicesBatchSize = 10
+	for batchStart := 0; batchStart < len(services); batchStart += describeServicesBatchSize {
+		batchEnd := batchStart + describeServicesBatchSize
+		if batchEnd > len(services) {
+			batchEnd = len(services)
+		}
+		batch := services[batchStart:batchEnd]
+
 		describeServicesOutput, err := client.DescribeServices(ctx, &ecs.DescribeServicesInput{
 			Cluster:  &clusterArn,
-			Services: services,
+			Services: batch,
 		})
 		if err != nil {
-			l.Logger.Warn("failed to describe services", "cluster", clusterArn, "error", err)
-		} else {
-			for _, svc := range describeServicesOutput.Services {
-				serviceDetail := map[string]any{
-					"serviceName":    *svc.ServiceName,
-					"serviceArn":     *svc.ServiceArn,
-					"launchType":     string(svc.LaunchType),
-					"taskDefinition": *svc.TaskDefinition,
-					"desiredCount":   svc.DesiredCount,
-					"runningCount":   svc.RunningCount,
-				}
-				serviceDetails = append(serviceDetails, serviceDetail)
-				taskDefinitions[*svc.TaskDefinition] = true
+			l.Logger.Warn("failed to describe services", "cluster", clusterArn, "batchStart", batchStart, "batchEnd", batchEnd, "error", err)
+			continue
+		}
+
+		for _, svc := range describeServicesOutput.Services {
+			// Extract capacity provider names
+			capacityProviders := []string{}
+			for _, cp := range svc.CapacityProviderStrategy {
+				capacityProviders = append(capacityProviders, *cp.CapacityProvider)
 			}
+
+			serviceDetail := map[string]any{
+				"serviceName":              *svc.ServiceName,
+				"serviceArn":               *svc.ServiceArn,
+				"launchType":               string(svc.LaunchType),
+				"taskDefinition":           *svc.TaskDefinition,
+				"desiredCount":             svc.DesiredCount,
+				"runningCount":             svc.RunningCount,
+				"capacityProviderStrategy": capacityProviders,
+			}
+			serviceDetails = append(serviceDetails, serviceDetail)
+			taskDefinitions[*svc.TaskDefinition] = true
 		}
 	}
 
@@ -263,9 +279,24 @@ func (l *EcsEcscapeAnalyzer) assessVulnerability(cluster ecstypes.Cluster, servi
 
 	hasEC2Services := false
 	for _, svc := range services {
-		if launchType, ok := svc["launchType"].(string); ok {
-			if launchType == "EC2" || launchType == "" {
-				hasEC2Services = true
+		launchType, _ := svc["launchType"].(string)
+
+		// Explicit EC2 launch type
+		if launchType == "EC2" {
+			hasEC2Services = true
+			break
+		}
+
+		// Check capacity provider strategy when launch type is empty or not set
+		if launchType == "" {
+			capacityProviders, _ := svc["capacityProviderStrategy"].([]string)
+			for _, cp := range capacityProviders {
+				if cp != "FARGATE" && cp != "FARGATE_SPOT" {
+					hasEC2Services = true
+					break
+				}
+			}
+			if hasEC2Services {
 				break
 			}
 		}

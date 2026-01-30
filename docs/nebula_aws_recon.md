@@ -18,6 +18,7 @@ recon commands for aws
 * [nebula aws recon cloudfront-s3-takeover](nebula_aws_recon_cloudfront-s3-takeover.md)	 - Detects CloudFront distributions with S3 origins pointing to non-existent buckets, which could allow attackers to take over the domain by creating the missing bucket. Also identifies Route53 records pointing to vulnerable distributions.
 * [nebula aws recon ec2-screenshot-analysis](nebula_aws_recon_ec2-screenshot-analysis.md)	 - Capture EC2 console screenshots and analyze them for sensitive information using Claude AI
 * [nebula aws recon ecr-dump](nebula_aws_recon_ecr-dump.md)	 - Dump ECR container filesystems to disk and optionally scan for secrets using NoseyParker.
+* [nebula aws recon ecs-ecscape](nebula_aws_recon_ecs-ecscape.md)	 - Detects ECS clusters vulnerable to the ECScape credential theft attack (EC2 launch type only).
 * [nebula aws recon find-secrets](nebula_aws_recon_find-secrets.md)	 - Enumerate AWS resources and find secrets using NoseyParker
 * [nebula aws recon find-secrets-resource](nebula_aws_recon_find-secrets-resource.md)	 - Enumerate AWS resources and find secrets using NoseyParker for a specific resource type
 * [nebula aws recon get-console](nebula_aws_recon_get-console.md)	 - Generate a federated sign-in URL for the AWS Console using temporary credentials

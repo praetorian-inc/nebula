@@ -99,3 +99,49 @@ func (t MarkdownTable) Values() []any {
 	}
 	return values
 }
+
+// PrivescPath represents a single privilege escalation path
+type PrivescPath struct {
+	Source       string   `json:"source"`
+	Intermediate []string `json:"intermediate"`
+	Target       []string `json:"target"`
+	Hops         int      `json:"hops"`
+	Methods      []string `json:"methods"`
+}
+
+// ExternalTrustRole represents a role with external trust
+type ExternalTrustRole struct {
+	ARN                string   `json:"arn"`
+	RoleName           string   `json:"role_name"`
+	AccountID          string   `json:"account_id"`
+	IsPrivileged       bool     `json:"is_privileged"`
+	TrustsPublic       bool     `json:"trusts_public"`
+	TrustsAccountRoot  bool     `json:"trusts_root"`
+	ExternalPrincipals []string `json:"external_principals"`
+}
+
+// PrivescReport contains aggregated privilege escalation data
+type PrivescReport struct {
+	Total  int                   `json:"total"`
+	ByHops map[int]int           `json:"by_hops"`
+	Paths  map[int][]PrivescPath `json:"paths_by_hops"` // grouped by hop count
+}
+
+// ExternalTrustReport contains aggregated external trust data
+type ExternalTrustReport struct {
+	Total                   int                 `json:"total"`
+	PrivilegedWithExternal  int                 `json:"privileged_with_external"`
+	TrustsPublic            int                 `json:"trusts_public"`
+	TrustsRoot              int                 `json:"trusts_root"`
+	PrivilegedRoles         []ExternalTrustRole `json:"privileged_roles"`
+	PublicTrustRoles        []ExternalTrustRole `json:"public_trust_roles"`
+	RootTrustRoles          []ExternalTrustRole `json:"root_trust_roles"`
+	OtherExternalTrustRoles []ExternalTrustRole `json:"other_external_trust_roles"`
+}
+
+// ApolloReportData is the complete report structure sent to outputters
+type ApolloReportData struct {
+	Generated     string               `json:"generated"`
+	Privesc       *PrivescReport       `json:"privesc,omitempty"`
+	ExternalTrust *ExternalTrustReport `json:"external_trust,omitempty"`
+}

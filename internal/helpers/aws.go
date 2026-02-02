@@ -183,7 +183,7 @@ func GetAWSCfg(region string, profile string, opts []*types.Option, opsecLevel s
 	} else {
 		principal, err := GetCallerIdentity(cfg)
 		if err != nil {
-			slog.Error("Error getting principal", err)
+			slog.Error("Error getting principal", "error", err)
 			return aws.Config{}, err
 		}
 		CachePrep = GetCachePrepWithIdentity(principal, opts)

@@ -48,55 +48,6 @@ type InstanceProfileRole struct {
 	AssumeRolePolicyDocument Policy `json:"AssumeRolePolicyDocument"`
 }
 
-type RoleDL struct {
-	Arn                      string            `json:"Arn"`
-	RoleName                 string            `json:"RoleName"`
-	RoleId                   string            `json:"RoleId"`
-	Path                     string            `json:"Path"`
-	CreateDate               string            `json:"CreateDate"`
-	RoleLastUsed             map[string]string `json:"RoleLastUsed"`
-	AssumeRolePolicyDocument Policy            `json:"AssumeRolePolicyDocument"`
-	Tags                     []Tag             `json:"Tags"`
-	RolePolicyList           []PrincipalPL     `json:"RolePolicyList"`
-	AttachedManagedPolicies  []ManagedPL       `json:"AttachedManagedPolicies"`
-	PermissionsBoundary      ManagedPL         `json:"PermissionsBoundary"`
-	InstanceProfileList      []InstanceProfile `json:"InstanceProfileList"`
-}
-
-type GroupDL struct {
-	Path                    string        `json:"Path"`
-	GroupName               string        `json:"GroupName"`
-	GroupId                 string        `json:"GroupId"`
-	Arn                     string        `json:"Arn"`
-	CreateDate              string        `json:"CreateDate"`
-	GroupPolicyList         []PrincipalPL `json:"GroupPolicyList"`
-	AttachedManagedPolicies []ManagedPL   `json:"AttachedManagedPolicies"`
-}
-
-type PoliciesDL struct {
-	PolicyName                    string       `json:"PolicyName"`
-	PolicyId                      string       `json:"PolicyId"`
-	Arn                           string       `json:"Arn"`
-	Path                          string       `json:"Path"`
-	DefaultVersionId              string       `json:"DefaultVersionId"`
-	AttachmentCount               int          `json:"AttachmentCount"`
-	PermissionsBoundaryUsageCount int          `json:"PermissionsBoundaryUsageCount"`
-	IsAttachable                  bool         `json:"IsAttachable"`
-	CreateDate                    string       `json:"CreateDate"`
-	UpdateDate                    string       `json:"UpdateDate"`
-	PolicyVersionList             []PoliciesVL `json:"PolicyVersionList"`
-}
-
-// getDefaultPolicyDocument retrieves the default policy version document
-func (policy *PoliciesDL) DefaultPolicyDocument() *Policy {
-	for _, version := range policy.PolicyVersionList {
-		if version.IsDefaultVersion {
-			return &version.Document
-		}
-	}
-	return nil
-}
-
 type PoliciesVL struct {
 	VersionId        string `json:"VersionId"`
 	IsDefaultVersion bool   `json:"IsDefaultVersion"`

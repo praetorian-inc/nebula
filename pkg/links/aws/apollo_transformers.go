@@ -54,126 +54,6 @@ func isSSMAction(action string) bool {
 	return strings.HasPrefix(action, "ssm:")
 }
 
-// TransformUserDLToAWSResource converts a UserDL to an AWSResource with AWSUser type
-func TransformUserDLToAWSResource(user *types.UserDL) (*model.AWSResource, error) {
-	if user == nil {
-		return nil, fmt.Errorf("user cannot be nil")
-	}
-
-	// Extract account ID from ARN
-	accountID := ""
-	if user.Arn != "" {
-		if parsedArn, err := arn.Parse(user.Arn); err == nil {
-			accountID = parsedArn.AccountID
-		}
-	}
-
-	properties := map[string]any{
-		"userName": user.UserName,
-		"path":     user.Path,
-		"userId":   user.UserId,
-	}
-
-	// Add creation date if available
-	if user.CreateDate != "" {
-		properties["createDate"] = user.CreateDate
-	}
-
-	awsResource, err := model.NewAWSResource(
-		user.Arn,
-		accountID,
-		model.AWSUser,
-		properties,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return &awsResource, nil
-}
-
-// TransformRoleDLToAWSResource converts a RoleDL to an AWSResource with AWSRole type
-func TransformRoleDLToAWSResource(role *types.RoleDL) (*model.AWSResource, error) {
-	if role == nil {
-		return nil, fmt.Errorf("role cannot be nil")
-	}
-
-	// Extract account ID from ARN
-	accountID := ""
-	if role.Arn != "" {
-		if parsedArn, err := arn.Parse(role.Arn); err == nil {
-			accountID = parsedArn.AccountID
-		}
-	}
-
-	properties := map[string]any{
-		"roleName": role.RoleName,
-		"path":     role.Path,
-		"roleId":   role.RoleId,
-	}
-
-	// Add creation date if available
-	if role.CreateDate != "" {
-		properties["createDate"] = role.CreateDate
-	}
-
-	// Add assume role policy document if available
-	// Note: AssumeRolePolicyDocument is a types.Policy, convert to string representation
-	if role.AssumeRolePolicyDocument.Statement != nil {
-		properties["assumeRolePolicyDocument"] = "present" // Could serialize if needed
-	}
-
-	awsResource, err := model.NewAWSResource(
-		role.Arn,
-		accountID,
-		model.AWSRole,
-		properties,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return &awsResource, nil
-}
-
-// TransformGroupDLToAWSResource converts a GroupDL to an AWSResource with AWSGroup type
-func TransformGroupDLToAWSResource(group *types.GroupDL) (*model.AWSResource, error) {
-	if group == nil {
-		return nil, fmt.Errorf("group cannot be nil")
-	}
-
-	// Extract account ID from ARN
-	accountID := ""
-	if group.Arn != "" {
-		if parsedArn, err := arn.Parse(group.Arn); err == nil {
-			accountID = parsedArn.AccountID
-		}
-	}
-
-	properties := map[string]any{
-		"groupName": group.GroupName,
-		"path":      group.Path,
-		"groupId":   group.GroupId,
-	}
-
-	// Add creation date if available
-	if group.CreateDate != "" {
-		properties["createDate"] = group.CreateDate
-	}
-
-	awsResource, err := model.NewAWSResource(
-		group.Arn,
-		accountID,
-		model.AWSGroup,
-		properties,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return &awsResource, nil
-}
-
 // TransformERDToAWSResource converts an EnrichedResourceDescription to an AWSResource
 func TransformERDToAWSResource(erd *types.EnrichedResourceDescription) (*model.AWSResource, error) {
 	if erd == nil {
@@ -352,6 +232,130 @@ func TransformResultToRelationship(result iam.FullResult) (model.GraphRelationsh
 	rel.Visited = model.Now()
 
 	return rel, nil
+}
+
+// TransformUserDLToAWSResource converts a UserDL to an AWSResource with AWSUser type
+func TransformUserDLToAWSResource(user *types.UserDL) (*model.AWSResource, error) {
+	if user == nil {
+		return nil, fmt.Errorf("user cannot be nil")
+	}
+
+	// Extract account ID from ARN
+	accountID := ""
+	if user.Arn != "" {
+		if parsedArn, err := arn.Parse(user.Arn); err == nil {
+			accountID = parsedArn.AccountID
+		}
+	}
+
+	properties := map[string]any{
+		"userName": user.UserName,
+		"path":     user.Path,
+		"userId":   user.UserId,
+	}
+
+	// Add creation date if available
+	if user.CreateDate != "" {
+		properties["createDate"] = user.CreateDate
+	}
+
+	awsResource, err := model.NewAWSResource(
+		user.Arn,
+		accountID,
+		model.AWSUser,
+		properties,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &awsResource, nil
+}
+
+// TransformRoleDLToAWSResource converts a RoleDL to an AWSResource with AWSRole type
+func TransformRoleDLToAWSResource(role *types.RoleDL) (*model.AWSResource, error) {
+	if role == nil {
+		return nil, fmt.Errorf("role cannot be nil")
+	}
+
+	// Extract account ID from ARN
+	accountID := ""
+	if role.Arn != "" {
+		if parsedArn, err := arn.Parse(role.Arn); err == nil {
+			accountID = parsedArn.AccountID
+		}
+	}
+
+	properties := map[string]any{
+		"roleName": role.RoleName,
+		"path":     role.Path,
+		"roleId":   role.RoleId,
+	}
+
+	// Add creation date if available
+	if role.CreateDate != "" {
+		properties["createDate"] = role.CreateDate
+	}
+
+	// Add assume role policy document if available
+	// Note: AssumeRolePolicyDocument is a types.Policy, convert to string representation
+	if role.AssumeRolePolicyDocument.Statement != nil {
+		properties["assumeRolePolicyDocument"] = "present" // Could serialize if needed
+	}
+
+	if role.AttachedManagedPolicies != nil {
+		properties["attachManagedPolicies"] = role.AttachedManagedPolicies
+	}
+
+	awsResource, err := model.NewAWSResource(
+		role.Arn,
+		accountID,
+		model.AWSRole,
+		properties,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &awsResource, nil
+}
+
+// TransformGroupDLToAWSResource converts a GroupDL to an AWSResource with AWSGroup type
+func TransformGroupDLToAWSResource(group *types.GroupDL) (*model.AWSResource, error) {
+	if group == nil {
+		return nil, fmt.Errorf("group cannot be nil")
+	}
+
+	// Extract account ID from ARN
+	accountID := ""
+	if group.Arn != "" {
+		if parsedArn, err := arn.Parse(group.Arn); err == nil {
+			accountID = parsedArn.AccountID
+		}
+	}
+
+	properties := map[string]any{
+		"groupName": group.GroupName,
+		"path":      group.Path,
+		"groupId":   group.GroupId,
+	}
+
+	// Add creation date if available
+	if group.CreateDate != "" {
+		properties["createDate"] = group.CreateDate
+	}
+
+	awsResource, err := model.NewAWSResource(
+		group.Arn,
+		accountID,
+		model.AWSGroup,
+		properties,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &awsResource, nil
 }
 
 // CreateRepositoryFromGitHubSubject creates a Repository entity from GitHub Actions subject claims

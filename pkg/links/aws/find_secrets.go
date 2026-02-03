@@ -15,6 +15,7 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/links/aws/ec2"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/ecr"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/lambda"
+	"github.com/praetorian-inc/nebula/pkg/links/aws/s3"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/stepfunctions"
 	"github.com/praetorian-inc/nebula/pkg/types"
 	"github.com/praetorian-inc/tabularium/pkg/model/model"
@@ -154,6 +155,12 @@ func (fs *AWSFindSecrets) ResourceMap() map[string]func() chain.Chain {
 		)
 	}
 
+	resourceMap["AWS::S3::Bucket"] = func() chain.Chain {
+		return chain.NewChain(
+			s3.NewAWSS3BucketSecrets(),
+		)
+	}
+
 	return resourceMap
 }
 
@@ -264,6 +271,18 @@ func (fs *AWSFindSecrets) Permissions() []cfg.Permission {
 		{
 			Platform:   "aws",
 			Permission: "sts:GetCallerIdentity",
+		},
+		{
+			Platform:   "aws",
+			Permission: "s3:ListBucket",
+		},
+		{
+			Platform:   "aws",
+			Permission: "s3:GetObject",
+		},
+		{
+			Platform:   "aws",
+			Permission: "s3:GetBucketLocation",
 		},
 	}
 }

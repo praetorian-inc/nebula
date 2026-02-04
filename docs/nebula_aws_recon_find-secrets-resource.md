@@ -29,8 +29,8 @@ nebula aws recon find-secrets-resource [flags]
   -p, --profile string                 AWS profile to use
       --profile-dir string             Set to override the default AWS profile directory
   -r, --regions strings                AWS regions to scan (default [all])
-  -a, --resource-arn strings           AWS Cloud Control resource ARN (required)
   -t, --resource-type strings          AWS Cloud Control resource type (default [all])
+      --scan-mode string               Scan mode: critical (default) or all (default "critical")
 ```
 
 ### SEE ALSO

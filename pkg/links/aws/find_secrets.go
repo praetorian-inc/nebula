@@ -40,7 +40,7 @@ func (fs *AWSFindSecrets) Params() []cfg.Param {
 		cfg.NewParam[int]("max-events", "Maximum number of log events to fetch per log group/stream").WithDefault(10000),
 		cfg.NewParam[int]("max-streams", "Maximum number of log streams to sample per log group").WithDefault(10),
 		cfg.NewParam[bool]("newest-first", "Fetch newest events first instead of oldest").WithDefault(false),
-		cfg.NewParam[string]("scan-mode", "Scan mode: critical (default), high, or all").WithDefault("critical"),
+		cfg.NewParam[string]("scan-mode", "Scan mode: critical (default) or all").WithDefault("critical"),
 	)
 	return params
 }

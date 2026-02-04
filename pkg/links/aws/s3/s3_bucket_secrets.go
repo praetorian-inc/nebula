@@ -31,7 +31,7 @@ type S3SecretsConfig struct {
 	SkipExtensions  []string      // File extensions to skip
 	ExcludePatterns []string      // Path patterns to exclude
 	MaxAge          time.Duration // Only scan objects modified within this duration (0 = no limit)
-	ScanMode        string        // "critical" (default), "high", or "all"
+	ScanMode        string        // "critical" (default) or "all"
 }
 
 // AWSS3BucketSecrets scans S3 objects for secrets
@@ -91,7 +91,7 @@ func (s *AWSS3BucketSecrets) Params() []cfg.Param {
 
 	// Append our custom parameters
 	params = append(params,
-		cfg.NewParam[string]("scan-mode", "Scan mode: critical (default), high, or all").
+		cfg.NewParam[string]("scan-mode", "Scan mode: critical (default) or all").
 			WithDefault("critical"),
 	)
 
@@ -294,8 +294,9 @@ func matchesCriticalPattern(key string) bool {
 	lowerKey := strings.ToLower(key)
 
 	criticalPatterns := []string{
-		// Terraform (highest priority)
+		// Terraform state and vars
 		"terraform.tfstate", ".tfstate",
+		".tfvars", "terraform.tfvars",
 
 		// Environment files
 		".env",
@@ -312,27 +313,11 @@ func matchesCriticalPattern(key string) bool {
 		// Generic secret patterns
 		"secret.json", "secret.yml", "secrets.yaml",
 		"password", "token",
-	}
 
-	for _, pattern := range criticalPatterns {
-		if strings.Contains(lowerKey, pattern) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// matchesHighPriorityPattern checks if filename indicates high-priority credential file
-func matchesHighPriorityPattern(key string) bool {
-	lowerKey := strings.ToLower(key)
-
-	highPriorityPatterns := []string{
-		// Infrastructure-as-Code configs
-		".tfvars", "terraform.tfvars",
+		// Vault configs
 		".vault.yml", "vault.yml",
 
-		// Application configs
+		// Application configs (may contain secrets)
 		"config.json", "config.yml", "config.yaml",
 		"appsettings.json",
 		"database.yml", "database.json", "db.config",
@@ -355,13 +340,13 @@ func matchesHighPriorityPattern(key string) bool {
 		".pgpass",
 		".my.cnf",
 
-		// Package manager
+		// Package manager configs
 		".npmrc",
 		".pypirc",
 		"settings.xml", // Maven
 	}
 
-	for _, pattern := range highPriorityPatterns {
+	for _, pattern := range criticalPatterns {
 		if strings.Contains(lowerKey, pattern) {
 			return true
 		}
@@ -386,88 +371,65 @@ func (s *AWSS3BucketSecrets) shouldScanObject(obj s3types.Object) bool {
 		return true
 	}
 
-	// Tier 2: If in "high" or "all" mode, check high-priority patterns
-	if s.config.ScanMode == "high" || s.config.ScanMode == "all" {
-		if matchesHighPriorityPattern(key) {
-			// High-priority: Bypass extension filter, respect size
-			if obj.Size != nil && *obj.Size > s.config.MaxObjectSize {
-				slog.Debug("High-priority file exceeds size limit",
-					"key", *obj.Key,
-					"size", *obj.Size,
-					"max", s.config.MaxObjectSize)
-				return false
-			}
-
-			if obj.Size != nil && *obj.Size == 0 {
-				return false
-			}
-
-			slog.Debug("High-priority file - bypassing extension filter",
-				"key", *obj.Key,
-				"mode", s.config.ScanMode)
-			return true
-		}
+	// Tier 2: If mode is "all", apply standard filters
+	if s.config.ScanMode == "all" {
+		return s.passesStandardFilters(obj)
 	}
 
-	// If mode is "critical" or "high", stop here (don't scan normal files)
-	if s.config.ScanMode == "critical" || s.config.ScanMode == "high" {
-		slog.Debug("Skipping non-priority file",
-			"key", *obj.Key,
-			"mode", s.config.ScanMode)
+	// Tier 3: If mode is "critical" (default), skip everything else
+	slog.Debug("Skipping non-critical file in critical mode",
+		"key", *obj.Key)
+	return false
+}
+
+// passesStandardFilters checks if an object passes size, age, extension, and path filters
+func (s *AWSS3BucketSecrets) passesStandardFilters(obj s3types.Object) bool {
+	// Check size
+	if obj.Size == nil {
+		slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "nil size")
+		return false
+	}
+	if *obj.Size > s.config.MaxObjectSize {
+		slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "exceeds size limit", "size", *obj.Size)
+		return false
+	}
+	if *obj.Size == 0 {
+		slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "empty file", "size", 0)
 		return false
 	}
 
-	// If mode is "all", apply standard filters
-	if s.config.ScanMode == "all" {
-		// Check size
-		if obj.Size == nil {
-			slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "nil size")
+	// Check age (if configured)
+	if s.config.MaxAge > 0 && obj.LastModified != nil {
+		if time.Since(*obj.LastModified) > s.config.MaxAge {
+			slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "exceeds max age", "age", time.Since(*obj.LastModified))
 			return false
 		}
-		if *obj.Size > s.config.MaxObjectSize {
-			slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "exceeds size limit", "size", *obj.Size)
-			return false
-		}
-		if *obj.Size == 0 {
-			slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "empty file", "size", 0)
-			return false
-		}
-
-		// Check age (if configured)
-		if s.config.MaxAge > 0 && obj.LastModified != nil {
-			if time.Since(*obj.LastModified) > s.config.MaxAge {
-				slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "exceeds max age", "age", time.Since(*obj.LastModified))
-				return false
-			}
-		}
-
-		// Check extension
-		ext := strings.ToLower(filepath.Ext(*obj.Key))
-		for _, skipExt := range s.config.SkipExtensions {
-			if ext == skipExt {
-				slog.Debug("Skipping object", "key", *obj.Key, "reason", "binary extension", "ext", ext)
-				return false
-			}
-		}
-
-		// Check path exclusions
-		for _, pattern := range s.config.ExcludePatterns {
-			if strings.Contains(*obj.Key, pattern) {
-				slog.Debug("Skipping object", "key", *obj.Key, "reason", "excluded path", "pattern", pattern)
-				return false
-			}
-		}
-
-		// Skip directory markers
-		if strings.HasSuffix(*obj.Key, "/") {
-			slog.Debug("Skipping object", "key", *obj.Key, "reason", "directory marker")
-			return false
-		}
-
-		return true
 	}
 
-	return false
+	// Check extension
+	ext := strings.ToLower(filepath.Ext(*obj.Key))
+	for _, skipExt := range s.config.SkipExtensions {
+		if ext == skipExt {
+			slog.Debug("Skipping object", "key", *obj.Key, "reason", "binary extension", "ext", ext)
+			return false
+		}
+	}
+
+	// Check path exclusions
+	for _, pattern := range s.config.ExcludePatterns {
+		if strings.Contains(*obj.Key, pattern) {
+			slog.Debug("Skipping object", "key", *obj.Key, "reason", "excluded path", "pattern", pattern)
+			return false
+		}
+	}
+
+	// Skip directory markers
+	if strings.HasSuffix(*obj.Key, "/") {
+		slog.Debug("Skipping object", "key", *obj.Key, "reason", "directory marker")
+		return false
+	}
+
+	return true
 }
 
 func (s *AWSS3BucketSecrets) isBinaryObject(ctx context.Context, client *s3.Client, bucket string, obj s3types.Object) bool {

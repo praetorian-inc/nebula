@@ -365,7 +365,7 @@ func AwsOpsecLevel() cfg.Param {
 }
 
 func AwsScanMode() cfg.Param {
-	return cfg.NewParam[string]("scan-mode", "Scan mode: critical (default), high, or all").
+	return cfg.NewParam[string]("scan-mode", "Scan mode: critical (default) or all").
 		WithDefault("critical")
 }
 

@@ -88,6 +88,7 @@ func TestShouldScanObject(t *testing.T) {
 				SkipExtensions:  defaultSkipExtensions,
 				ExcludePatterns: defaultExcludePatterns,
 				MaxAge:          24 * time.Hour,
+				ScanMode:        "all",
 			},
 			expected: false,
 		},
@@ -103,6 +104,7 @@ func TestShouldScanObject(t *testing.T) {
 				SkipExtensions:  defaultSkipExtensions,
 				ExcludePatterns: defaultExcludePatterns,
 				MaxAge:          24 * time.Hour,
+				ScanMode:        "all",
 			},
 			expected: true,
 		},
@@ -183,12 +185,350 @@ func TestIsBinaryFile(t *testing.T) {
 	}
 }
 
+// TestMatchesCriticalPattern verifies that critical credential files are detected
+func TestMatchesCriticalPattern(t *testing.T) {
+	tests := []struct {
+		name     string
+		key      string
+		expected bool
+	}{
+		// Terraform state files (highest priority)
+		{"terraform.tfstate", "terraform.tfstate", true},
+		{"backend terraform.tfstate", "backend/terraform.tfstate", true},
+		{"custom.tfstate", "configs/prod.tfstate", true},
+
+		// Environment files
+		{".env", ".env", true},
+		{".env.production", "backend/.env.production", true},
+
+		// Cloud credentials
+		{"credentials.json", "credentials.json", true},
+		{"gcp credentials", "secrets/gcp-credentials.json", true},
+		{"credentials.csv", "aws-exports/credentials.csv", true},
+		{"service-account", "service-account.json", true},
+		{"gcp-keyfile", "keys/gcp-keyfile.json", true},
+		{"aws-config", "aws-config", true},
+		{"azure-credentials", "azure-credentials.xml", true},
+
+		// SSH/SSL keys
+		{"id_rsa", "id_rsa", true},
+		{"id_ed25519", ".ssh/id_ed25519", true},
+		{"private key", "certs/private-key.pem", true},
+		{"ssl key", "ssl/server.key", true},
+
+		// Generic secret patterns
+		{"secret.json", "config/secret.json", true},
+		{"secrets.yaml", "k8s/secrets.yaml", true},
+		{"password file", "database-password.txt", true},
+		{"token file", "api-token.json", true},
+
+		// NON-CRITICAL: Normal application files
+		{"regular source", "main.go", false},
+		{"config", "config.yaml", false},
+		{"documentation", "README.md", false},
+		{"data file", "data.csv", false},
+		{"log file", "application.log", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matchesCriticalPattern(tt.key)
+			assert.Equal(t, tt.expected, result, "matchesCriticalPattern(%q) = %v, want %v", tt.key, result, tt.expected)
+		})
+	}
+}
+
+// TestMatchesCriticalPattern_CaseInsensitive verifies case-insensitive matching
+func TestMatchesCriticalPattern_CaseInsensitive(t *testing.T) {
+	tests := []struct {
+		key      string
+		expected bool
+	}{
+		{"TERRAFORM.TFSTATE", true},
+		{"Credentials.JSON", true},
+		{"ID_RSA", true},
+		{".ENV", true},
+		{"SECRET.JSON", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			result := matchesCriticalPattern(tt.key)
+			assert.Equal(t, tt.expected, result, "matchesCriticalPattern should be case-insensitive")
+		})
+	}
+}
+
+// TestShouldScanObject_CriticalMode verifies critical-only scanning behavior
+func TestShouldScanObject_CriticalMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		obj      types.Object
+		scanMode string
+		expected bool
+	}{
+		{
+			name: "critical mode: terraform.tfstate should scan",
+			obj: types.Object{
+				Size: aws.Int64(1024),
+				Key:  aws.String("terraform.tfstate"),
+			},
+			scanMode: "critical",
+			expected: true,
+		},
+		{
+			name: "critical mode: .env should scan",
+			obj: types.Object{
+				Size: aws.Int64(512),
+				Key:  aws.String(".env"),
+			},
+			scanMode: "critical",
+			expected: true,
+		},
+		{
+			name: "critical mode: credentials.json should scan",
+			obj: types.Object{
+				Size: aws.Int64(2048),
+				Key:  aws.String("aws/credentials.json"),
+			},
+			scanMode: "critical",
+			expected: true,
+		},
+		{
+			name: "critical mode: regular file should skip",
+			obj: types.Object{
+				Size: aws.Int64(1024),
+				Key:  aws.String("src/main.go"),
+			},
+			scanMode: "critical",
+			expected: false,
+		},
+		{
+			name: "critical mode: config.yaml (non-critical) should skip",
+			obj: types.Object{
+				Size: aws.Int64(512),
+				Key:  aws.String("config.yaml"),
+			},
+			scanMode: "critical",
+			expected: false,
+		},
+		{
+			name: "all mode: regular file should scan",
+			obj: types.Object{
+				Size: aws.Int64(1024),
+				Key:  aws.String("src/main.go"),
+			},
+			scanMode: "all",
+			expected: true,
+		},
+		{
+			name: "all mode: critical file should still scan",
+			obj: types.Object{
+				Size: aws.Int64(1024),
+				Key:  aws.String("terraform.tfstate"),
+			},
+			scanMode: "all",
+			expected: true,
+		},
+		{
+			name: "critical mode: critical file exceeds size limit should still scan (bypass filters)",
+			obj: types.Object{
+				Size: aws.Int64(200 * 1024 * 1024), // 200MB, exceeds limit
+				Key:  aws.String("secrets/credentials.json"),
+			},
+			scanMode: "critical",
+			expected: true,
+		},
+		{
+			name: "critical mode: critical file in node_modules should still scan (bypass filters)",
+			obj: types.Object{
+				Size: aws.Int64(1024),
+				Key:  aws.String("node_modules/.env"),
+			},
+			scanMode: "critical",
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := defaultConfig()
+			config.ScanMode = tt.scanMode
+			link := &AWSS3BucketSecrets{config: config}
+
+			result := link.shouldScanObject(tt.obj)
+			assert.Equal(t, tt.expected, result, "scanMode=%s key=%s", tt.scanMode, aws.ToString(tt.obj.Key))
+		})
+	}
+}
+
+// TestMatchesHighPriorityPattern verifies high-priority credential files
+func TestMatchesHighPriorityPattern(t *testing.T) {
+	tests := []struct {
+		name     string
+		key      string
+		expected bool
+	}{
+		// Infrastructure-as-Code configs
+		{"terraform vars", "vars.tfvars", true},
+		{"terraform.tfvars", "terraform.tfvars", true},
+		{"vault yml", ".vault.yml", true},
+		{"vault.yml", "ansible/vault.yml", true},
+
+		// Application configs
+		{"config.json", "config.json", true},
+		{"config.yml", "config.yml", true},
+		{"config.yaml", "backend/config.yaml", true},
+		{"appsettings.json", "appsettings.json", true},
+		{"database.yml", "database.yml", true},
+		{"database.json", "config/database.json", true},
+		{"db.config", "db.config", true},
+		{"settings.json", "settings.json", true},
+		{"settings.yml", "app/settings.yml", true},
+		{"application.properties", "application.properties", true},
+
+		// Container configs
+		{"docker-compose.yml", "docker-compose.yml", true},
+		{"docker-compose.yaml", "docker-compose.yaml", true},
+		{".dockercfg", ".dockercfg", true},
+		{"kubeconfig", "kubeconfig", true},
+
+		// CI/CD configs
+		{".gitlab-ci.yml", ".gitlab-ci.yml", true},
+		{"buildspec.yml", "buildspec.yml", true},
+		{"jenkinsfile", "jenkinsfile", true},
+		{"circleci config", ".circleci/config.yml", true},
+		{"github workflows", ".github/workflows/deploy.yml", true},
+
+		// Database connection
+		{".pgpass", ".pgpass", true},
+		{".my.cnf", ".my.cnf", true},
+
+		// Package manager
+		{".npmrc", ".npmrc", true},
+		{".pypirc", ".pypirc", true},
+		{"settings.xml", "settings.xml", true},
+
+		// NON-HIGH-PRIORITY: Regular files
+		{"regular source", "main.go", false},
+		{"log file", "application.log", false},
+		{"documentation", "README.md", false},
+		{"data file", "data.csv", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matchesHighPriorityPattern(tt.key)
+			assert.Equal(t, tt.expected, result, "matchesHighPriorityPattern(%q) = %v, want %v", tt.key, result, tt.expected)
+		})
+	}
+}
+
+// TestShouldScanObject_HighMode verifies high-priority scanning behavior
+func TestShouldScanObject_HighMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		obj      types.Object
+		expected bool
+	}{
+		{
+			name: "high mode: config.json should scan",
+			obj: types.Object{
+				Size: aws.Int64(1024),
+				Key:  aws.String("config.json"),
+			},
+			expected: true,
+		},
+		{
+			name: "high mode: database.yml should scan",
+			obj: types.Object{
+				Size: aws.Int64(2048),
+				Key:  aws.String("database.yml"),
+			},
+			expected: true,
+		},
+		{
+			name: "high mode: docker-compose.yml should scan",
+			obj: types.Object{
+				Size: aws.Int64(512),
+				Key:  aws.String("docker-compose.yml"),
+			},
+			expected: true,
+		},
+		{
+			name: "high mode: .tfvars should scan",
+			obj: types.Object{
+				Size: aws.Int64(768),
+				Key:  aws.String("prod.tfvars"),
+			},
+			expected: true,
+		},
+		{
+			name: "high mode: .gitlab-ci.yml should scan",
+			obj: types.Object{
+				Size: aws.Int64(1024),
+				Key:  aws.String(".gitlab-ci.yml"),
+			},
+			expected: true,
+		},
+		{
+			name: "high mode: regular file should skip",
+			obj: types.Object{
+				Size: aws.Int64(1024),
+				Key:  aws.String("app.py"),
+			},
+			expected: false,
+		},
+		{
+			name: "high mode: high-priority file exceeds size should skip",
+			obj: types.Object{
+				Size: aws.Int64(200 * 1024 * 1024), // 200MB
+				Key:  aws.String("config.json"),
+			},
+			expected: false,
+		},
+		{
+			name: "high mode: high-priority empty file should skip",
+			obj: types.Object{
+				Size: aws.Int64(0),
+				Key:  aws.String("config.json"),
+			},
+			expected: false,
+		},
+		{
+			name: "high mode: critical file bypasses size limit",
+			obj: types.Object{
+				Size: aws.Int64(200 * 1024 * 1024), // 200MB
+				Key:  aws.String("terraform.tfstate"),
+			},
+			expected: true,
+		},
+	}
+
+	config := S3SecretsConfig{
+		MaxObjectSize:   100 * 1024 * 1024,
+		SkipExtensions:  defaultSkipExtensions,
+		ExcludePatterns: defaultExcludePatterns,
+		ScanMode:        "high",
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			link := &AWSS3BucketSecrets{config: config}
+			result := link.shouldScanObject(tt.obj)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 // Helper function to create default config for tests
+// Uses "all" mode for backward compatibility with existing tests
 func defaultConfig() S3SecretsConfig {
 	return S3SecretsConfig{
 		MaxObjectSize:   100 * 1024 * 1024, // 100MB
 		SkipExtensions:  defaultSkipExtensions,
 		ExcludePatterns: defaultExcludePatterns,
-		MaxAge:          0, // No age limit by default
+		MaxAge:          0,    // No age limit by default
+		ScanMode:        "all", // Use "all" for existing test compatibility
 	}
 }

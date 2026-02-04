@@ -27,6 +27,7 @@ type S3SecretsConfig struct {
 	SkipExtensions  []string      // File extensions to skip
 	ExcludePatterns []string      // Path patterns to exclude
 	MaxAge          time.Duration // Only scan objects modified within this duration (0 = no limit)
+	ScanMode        string        // "critical" (default), "high", or "all"
 }
 
 // AWSS3BucketSecrets scans S3 objects for secrets
@@ -71,11 +72,20 @@ func NewAWSS3BucketSecrets(configs ...cfg.Config) chain.Link {
 			MaxObjectSize:   100 * 1024 * 1024, // 100MB default
 			SkipExtensions:  defaultSkipExtensions,
 			ExcludePatterns: defaultExcludePatterns,
-			MaxAge:          0, // No age limit by default
+			MaxAge:          0,          // No age limit by default
+			ScanMode:        "critical", // Default to critical-only scanning
 		},
 	}
 	link.AwsReconLink = base.NewAwsReconLink(link, configs...)
 	return link
+}
+
+// Params returns the parameters for this link
+func (s *AWSS3BucketSecrets) Params() []cfg.Param {
+	return []cfg.Param{
+		cfg.NewParam[string]("scan-mode", "Scan mode: critical (default), high, or all").
+			WithDefault("critical"),
+	}
 }
 
 // getBucketRegion determines the actual region of an S3 bucket using GetBucketLocation API.
@@ -206,6 +216,7 @@ func (s *AWSS3BucketSecrets) Process(resource *nebulatypes.EnrichedResourceDescr
 
 	slog.Info("S3 bucket scan complete",
 		"bucket", bucketName,
+		"scan_mode", s.config.ScanMode,
 		"total_objects", totalProcessed,
 		"scanned", scannedCount,
 		"skipped", skippedCount,
@@ -248,32 +259,168 @@ func (s *AWSS3BucketSecrets) processObject(
 	return true, nil
 }
 
-// shouldScanObject checks if an object should be scanned based on metadata
-func (s *AWSS3BucketSecrets) shouldScanObject(obj s3types.Object) bool {
-	// Check size
-	if obj.Size == nil {
-		slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "nil size")
-		return false
-	}
-	if *obj.Size > s.config.MaxObjectSize {
-		slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "exceeds size limit", "size", *obj.Size)
-		return false
-	}
-	if *obj.Size == 0 {
-		slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "empty file", "size", 0)
-		return false
+// matchesCriticalPattern checks if filename indicates critical credential file
+func matchesCriticalPattern(key string) bool {
+	lowerKey := strings.ToLower(key)
+
+	criticalPatterns := []string{
+		// Terraform (highest priority)
+		"terraform.tfstate", ".tfstate",
+
+		// Environment files
+		".env",
+
+		// Cloud credentials
+		"credentials.json", "credentials.csv", "credentials",
+		"service-account.json", "gcp-keyfile",
+		"aws-config", "azure-credentials",
+
+		// SSH/SSL keys
+		"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+		".pem", ".key", "private-key",
+
+		// Generic secret patterns
+		"secret.json", "secret.yml", "secrets.yaml",
+		"password", "token",
 	}
 
-	// Check age (if configured)
-	if s.config.MaxAge > 0 && obj.LastModified != nil {
-		if time.Since(*obj.LastModified) > s.config.MaxAge {
-			slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "exceeds max age", "age", time.Since(*obj.LastModified))
-			return false
+	for _, pattern := range criticalPatterns {
+		if strings.Contains(lowerKey, pattern) {
+			return true
 		}
 	}
 
-	// Check extension
-	if obj.Key != nil {
+	return false
+}
+
+// matchesHighPriorityPattern checks if filename indicates high-priority credential file
+func matchesHighPriorityPattern(key string) bool {
+	lowerKey := strings.ToLower(key)
+
+	highPriorityPatterns := []string{
+		// Infrastructure-as-Code configs
+		".tfvars", "terraform.tfvars",
+		".vault.yml", "vault.yml",
+
+		// Application configs
+		"config.json", "config.yml", "config.yaml",
+		"appsettings.json",
+		"database.yml", "database.json", "db.config",
+		"settings.json", "settings.yml",
+		"application.properties",
+
+		// Container configs
+		"docker-compose.yml", "docker-compose.yaml",
+		".dockercfg",
+		"kubeconfig",
+
+		// CI/CD configs
+		".gitlab-ci.yml",
+		"buildspec.yml",
+		"jenkinsfile",
+		".circleci/config.yml",
+		".github/workflows",
+
+		// Database connection
+		".pgpass",
+		".my.cnf",
+
+		// Package manager
+		".npmrc",
+		".pypirc",
+		"settings.xml", // Maven
+	}
+
+	for _, pattern := range highPriorityPatterns {
+		if strings.Contains(lowerKey, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// shouldScanObject checks if an object should be scanned based on metadata
+func (s *AWSS3BucketSecrets) shouldScanObject(obj s3types.Object) bool {
+	if obj.Key == nil {
+		return false
+	}
+
+	// Get scan mode (with caching to avoid repeated lookups)
+	if s.config.ScanMode == "" {
+		if scanMode, err := cfg.As[string](s.Arg("scan-mode")); err == nil {
+			s.config.ScanMode = scanMode
+		} else {
+			s.config.ScanMode = "critical" // Default
+		}
+	}
+
+	key := strings.ToLower(*obj.Key)
+
+	// Tier 1: Critical patterns (bypass ALL filters)
+	if matchesCriticalPattern(key) {
+		slog.Debug("Critical priority file - bypassing all filters",
+			"key", *obj.Key,
+			"mode", s.config.ScanMode)
+		return true
+	}
+
+	// Tier 2: If in "high" or "all" mode, check high-priority patterns
+	if s.config.ScanMode == "high" || s.config.ScanMode == "all" {
+		if matchesHighPriorityPattern(key) {
+			// High-priority: Bypass extension filter, respect size
+			if obj.Size != nil && *obj.Size > s.config.MaxObjectSize {
+				slog.Debug("High-priority file exceeds size limit",
+					"key", *obj.Key,
+					"size", *obj.Size,
+					"max", s.config.MaxObjectSize)
+				return false
+			}
+
+			if obj.Size != nil && *obj.Size == 0 {
+				return false
+			}
+
+			slog.Debug("High-priority file - bypassing extension filter",
+				"key", *obj.Key,
+				"mode", s.config.ScanMode)
+			return true
+		}
+	}
+
+	// If mode is "critical" or "high", stop here (don't scan normal files)
+	if s.config.ScanMode == "critical" || s.config.ScanMode == "high" {
+		slog.Debug("Skipping non-priority file",
+			"key", *obj.Key,
+			"mode", s.config.ScanMode)
+		return false
+	}
+
+	// If mode is "all", apply standard filters
+	if s.config.ScanMode == "all" {
+		// Check size
+		if obj.Size == nil {
+			slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "nil size")
+			return false
+		}
+		if *obj.Size > s.config.MaxObjectSize {
+			slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "exceeds size limit", "size", *obj.Size)
+			return false
+		}
+		if *obj.Size == 0 {
+			slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "empty file", "size", 0)
+			return false
+		}
+
+		// Check age (if configured)
+		if s.config.MaxAge > 0 && obj.LastModified != nil {
+			if time.Since(*obj.LastModified) > s.config.MaxAge {
+				slog.Debug("Skipping object", "key", aws.ToString(obj.Key), "reason", "exceeds max age", "age", time.Since(*obj.LastModified))
+				return false
+			}
+		}
+
+		// Check extension
 		ext := strings.ToLower(filepath.Ext(*obj.Key))
 		for _, skipExt := range s.config.SkipExtensions {
 			if ext == skipExt {
@@ -295,9 +442,11 @@ func (s *AWSS3BucketSecrets) shouldScanObject(obj s3types.Object) bool {
 			slog.Debug("Skipping object", "key", *obj.Key, "reason", "directory marker")
 			return false
 		}
+
+		return true
 	}
 
-	return true
+	return false
 }
 
 func (s *AWSS3BucketSecrets) isBinaryObject(ctx context.Context, client *s3.Client, bucket string, obj s3types.Object) bool {

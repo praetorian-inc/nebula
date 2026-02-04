@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -20,6 +21,9 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/links/aws/base"
 	nebulatypes "github.com/praetorian-inc/nebula/pkg/types"
 )
+
+// scannedBuckets prevents duplicate scans when bucket appears in multiple regions
+var scannedBuckets sync.Map
 
 // S3SecretsConfig configures secrets scanning for S3 objects
 type S3SecretsConfig struct {
@@ -73,19 +77,25 @@ func NewAWSS3BucketSecrets(configs ...cfg.Config) chain.Link {
 			SkipExtensions:  defaultSkipExtensions,
 			ExcludePatterns: defaultExcludePatterns,
 			MaxAge:          0,          // No age limit by default
-			ScanMode:        "critical", // Default to critical-only scanning
+			ScanMode:        "", // Default to critical-only scanning
 		},
 	}
 	link.AwsReconLink = base.NewAwsReconLink(link, configs...)
 	return link
 }
 
-// Params returns the parameters for this link
+// Params returns the parameters for this link, including parent parameters
 func (s *AWSS3BucketSecrets) Params() []cfg.Param {
-	return []cfg.Param{
+	// Get parent parameters (profile, regions, etc.) - CRITICAL!
+	params := s.AwsReconLink.Params()
+
+	// Append our custom parameters
+	params = append(params,
 		cfg.NewParam[string]("scan-mode", "Scan mode: critical (default), high, or all").
 			WithDefault("critical"),
-	}
+	)
+
+	return params
 }
 
 // getBucketRegion determines the actual region of an S3 bucket using GetBucketLocation API.
@@ -116,6 +126,26 @@ func (s *AWSS3BucketSecrets) Process(resource *nebulatypes.EnrichedResourceDescr
 
 	// Extract bucket name from resource (use Identifier which contains the bucket name)
 	bucketName := resource.Identifier
+
+	// Read scan-mode parameter HERE (before scanning)
+	if s.config.ScanMode == "" {
+		if scanMode, err := cfg.As[string](s.Arg("scan-mode")); err == nil {
+			s.config.ScanMode = scanMode
+			slog.Debug("Set scan-mode from parameter", "mode", scanMode)
+		} else {
+			s.config.ScanMode = "critical"
+			slog.Debug("Using default scan-mode", "mode", "critical", "error", err)
+		}
+	}
+
+	// Deduplicate: Skip if already scanned
+	if _, alreadyScanned := scannedBuckets.LoadOrStore(bucketName, true); alreadyScanned {
+		slog.Info("Skipping already-scanned bucket (duplicate from multi-region query)",
+			"bucket", bucketName,
+			"region", resource.Region)
+		return nil
+	}
+
 	if bucketName == "" {
 		return fmt.Errorf("bucket name is empty")
 	}
@@ -344,15 +374,6 @@ func matchesHighPriorityPattern(key string) bool {
 func (s *AWSS3BucketSecrets) shouldScanObject(obj s3types.Object) bool {
 	if obj.Key == nil {
 		return false
-	}
-
-	// Get scan mode (with caching to avoid repeated lookups)
-	if s.config.ScanMode == "" {
-		if scanMode, err := cfg.As[string](s.Arg("scan-mode")); err == nil {
-			s.config.ScanMode = scanMode
-		} else {
-			s.config.ScanMode = "critical" // Default
-		}
 	}
 
 	key := strings.ToLower(*obj.Key)

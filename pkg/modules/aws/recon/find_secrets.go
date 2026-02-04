@@ -41,6 +41,8 @@ var AWSFindSecrets = chain.NewModule(
 	options.AwsResourceType().WithDefault([]string{"all"}),
 ).WithInputParam(
 	options.AwsProfile(),
+).WithInputParam(
+	options.AwsScanMode(),
 ).WithParams(
 	cfg.NewParam[string]("module-name", "name of the module for dynamic file naming"),
 	cfg.NewParam[int]("max-events", "Maximum number of log events to fetch per log group/stream (applies to CloudWatch Logs resources)").WithDefault(10000),

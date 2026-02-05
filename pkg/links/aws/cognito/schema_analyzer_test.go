@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestPrivilegePatternMatching verifies that all 31 privilege patterns are correctly detected
+// TestPrivilegePatternMatching verifies that all 42 privilege patterns are correctly detected
 func TestPrivilegePatternMatching(t *testing.T) {
 	tests := []struct {
 		name        string

@@ -236,7 +236,7 @@ func calculateRisk(attrCount int, selfSignupEnabled bool) string {
 
 // TestPrivilegePatternsCoverage verifies all patterns in privilegePatterns are included
 func TestPrivilegePatternsCoverage(t *testing.T) {
-	// Verify we have exactly 31 patterns as documented
+	// Verify we have exactly 42 patterns as documented
 	assert.Equal(t, 42, len(privilegePatterns), "Should have 42 privilege patterns")
 
 	// Verify some key patterns exist

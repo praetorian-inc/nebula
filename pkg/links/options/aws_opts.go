@@ -364,6 +364,11 @@ func AwsOpsecLevel() cfg.Param {
 		WithDefault("none")
 }
 
+func AwsScanMode() cfg.Param {
+	return cfg.NewParam[string]("scan-mode", "Scan mode: critical (default) or all").
+		WithDefault("critical")
+}
+
 func AwsApolloOfflineOptions() []cfg.Param {
 	baseOpts := AwsReconBaseOptions()
 	return append(baseOpts, []cfg.Param{

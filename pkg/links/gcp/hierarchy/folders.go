@@ -158,6 +158,11 @@ func (g *GcpFolderProjectListLink) Process(resource tab.GCPResource) error {
 	listReq := g.resourceManagerService.Projects.List().Filter(fmt.Sprintf("parent.id:%s", folderID))
 	err := listReq.Pages(context.Background(), func(page *cloudresourcemanager.ListProjectsResponse) error {
 		for _, project := range page.Projects {
+			// Skip non-active projects (deleted, pending deletion, etc.)
+			if project.LifecycleState != "ACTIVE" {
+				slog.Debug("Skipping non-active project", "projectId", project.ProjectId, "lifecycleState", project.LifecycleState)
+				continue
+			}
 			if !g.IncludeSysProjects && isSysProject(project) {
 				continue
 			}

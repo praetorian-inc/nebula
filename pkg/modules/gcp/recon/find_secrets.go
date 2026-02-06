@@ -8,6 +8,7 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/janus-framework/pkg/links/noseyparker"
 	"github.com/praetorian-inc/nebula/internal/registry"
+	"github.com/praetorian-inc/nebula/pkg/links/docker"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/applications"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/common"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/compute"
@@ -249,6 +250,10 @@ func buildSecretsChains(resourceTypes []string) []chain.Link {
 			containers.NewGcpRepositoryListLink(),
 			containers.NewGcpContainerImageListLink(),
 			containers.NewGcpContainerImageSecretsLink(),
+			docker.NewDockerPull(),
+			docker.NewDockerSave(),
+			docker.NewDockerExtractToFS(),
+			docker.NewDockerExtractToNP(),
 		))
 	}
 

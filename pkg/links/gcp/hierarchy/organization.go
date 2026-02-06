@@ -208,6 +208,11 @@ func (g *GcpOrgProjectListLink) Process(resource tab.GCPResource) error {
 	// list all projects under any parent
 	err := listReq.Pages(context.Background(), func(page *cloudresourcemanager.ListProjectsResponse) error {
 		for _, project := range page.Projects {
+			// Skip non-active projects (deleted, pending deletion, etc.)
+			if project.LifecycleState != "ACTIVE" {
+				slog.Debug("Skipping non-active project", "projectId", project.ProjectId, "lifecycleState", project.LifecycleState)
+				continue
+			}
 			if !g.IncludeSysProjects && isSysProject(project) {
 				continue
 			}

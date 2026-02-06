@@ -79,7 +79,8 @@ func (g *GcpStorageBucketInfoLink) Process(bucketName string) error {
 		slog.Error("Failed to create GCP bucket resource", "error", err, "bucket", bucket.Name)
 		return err
 	}
-	g.Send(gcpBucket)
+	//g.Send(gcpBucket)
+	slog.Debug("skipping bucket", "bucket", gcpBucket)
 	return nil
 }
 
@@ -362,14 +363,13 @@ func calculateRiskLevel(info AnonymousAccessInfo) string {
 
 func linkPostProcessBucket(bucket *storage.Bucket, storageService *storage.Service) map[string]any {
 	properties := map[string]any{
-		"name":                   bucket.Name,
-		"id":                     bucket.Id,
-		"location":               bucket.Location,
-		"selfLink":               bucket.SelfLink,
-		"gsUtilURL":              fmt.Sprintf("gs://%s", bucket.Name),
-		"publicURL":              fmt.Sprintf("https://storage.googleapis.com/%s", bucket.Name), // also <bucket-name>.storage.googleapis.com
-		"labels":                 bucket.Labels,
-		"publicAccessPrevention": bucket.IamConfiguration.PublicAccessPrevention,
+		"name":      bucket.Name,
+		"id":        bucket.Id,
+		"location":  bucket.Location,
+		"selfLink":  bucket.SelfLink,
+		"gsUtilURL": fmt.Sprintf("gs://%s", bucket.Name),
+		"publicURL": fmt.Sprintf("https://storage.googleapis.com/%s", bucket.Name), // also <bucket-name>.storage.googleapis.com
+		"labels":    bucket.Labels,
 	}
 	if bucket.IamConfiguration != nil && bucket.IamConfiguration.PublicAccessPrevention == "inherited" {
 		properties["publicAccessPrevention"] = false

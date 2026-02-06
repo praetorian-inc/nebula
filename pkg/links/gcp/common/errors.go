@@ -22,22 +22,22 @@ func HandleGcpError(err error, msg string) error {
 			for _, detail := range trueErr.Details {
 				if detailMap, ok := detail.(map[string]any); ok {
 					if reason, ok := detailMap["reason"]; ok && reason == "SERVICE_DISABLED" {
-						slog.Info("Skipping", "message", "API disabled for project")
+						slog.Debug("Skipping", "message", "API disabled for project")
 						return nil
 					}
 					if reason, ok := detailMap["reason"]; ok && reason == "BILLING_DISABLED" {
-						slog.Info("Skipping", "message", "Billing disabled for project")
+						slog.Debug("Skipping", "message", "Billing disabled for project")
 						return nil
 					}
 				}
 			}
 			// Check plain text error body for billing/service disabled messages
 			if strings.Contains(trueErr.Body, "billing account") && strings.Contains(trueErr.Body, "disabled") {
-				slog.Info("Skipping", "message", "Billing disabled for project")
+				slog.Debug("Skipping", "message", "Billing disabled for project")
 				return nil
 			}
 			if strings.Contains(trueErr.Body, "service") && strings.Contains(trueErr.Body, "disabled") {
-				slog.Info("Skipping", "message", "API disabled for project")
+				slog.Debug("Skipping", "message", "API disabled for project")
 				return nil
 			}
 		}

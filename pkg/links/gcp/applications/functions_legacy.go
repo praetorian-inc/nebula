@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"strconv"
 	"strings"
 
@@ -20,6 +19,7 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 	"google.golang.org/api/cloudfunctions/v1"
+	"google.golang.org/api/storage/v1"
 )
 
 // FILE INFO:
@@ -159,6 +159,7 @@ func (g *GcpFunctionListLink) Process(resource tab.GCPResource) error {
 type GcpFunctionSecretsLink struct {
 	*base.GcpBaseLink
 	functionsService *cloudfunctions.Service
+	storageService   *storage.Service
 }
 
 // creates a link to scan cloud function for secrets
@@ -176,6 +177,10 @@ func (g *GcpFunctionSecretsLink) Initialize() error {
 	g.functionsService, err = cloudfunctions.NewService(context.Background(), g.ClientOptions...)
 	if err != nil {
 		return fmt.Errorf("failed to create cloud functions service: %w", err)
+	}
+	g.storageService, err = storage.NewService(context.Background(), g.ClientOptions...)
+	if err != nil {
+		return fmt.Errorf("failed to create storage service: %w", err)
 	}
 	return nil
 }
@@ -202,23 +207,34 @@ func (g *GcpFunctionSecretsLink) Process(input tab.GCPResource) error {
 			})
 		}
 	}
-	if fn.SourceArchiveUrl != "" {
-		if err := g.scanFunctionSourceCode(fn.SourceArchiveUrl, input); err != nil {
+	// Check both SourceArchiveUrl and SourceUploadUrl
+	sourceURL := fn.SourceArchiveUrl
+	if sourceURL == "" {
+		sourceURL = fn.SourceUploadUrl
+	}
+	if sourceURL != "" {
+		if err := g.scanFunctionSourceCode(sourceURL, input); err != nil {
 			slog.Error("Failed to scan function source code", "error", err, "function", input.Name)
 		}
 	}
 	return nil
 }
 
-func (g *GcpFunctionSecretsLink) scanFunctionSourceCode(sourceArchiveUrl string, input tab.GCPResource) error {
-	resp, err := http.Get(sourceArchiveUrl)
+func (g *GcpFunctionSecretsLink) scanFunctionSourceCode(sourceURL string, input tab.GCPResource) error {
+	// Parse GCS URL: https://storage.googleapis.com/BUCKET/OBJECT
+	bucket, object, err := parseGCSURL(sourceURL)
+	if err != nil {
+		return fmt.Errorf("failed to parse GCS URL: %w", err)
+	}
+
+	// Use authenticated GCS download
+	getReq := g.storageService.Objects.Get(bucket, object)
+	resp, err := getReq.Download()
 	if err != nil {
 		return fmt.Errorf("failed to download source archive: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to download source archive: status %d", resp.StatusCode)
-	}
+
 	archiveData, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read archive data: %w", err)
@@ -320,6 +336,29 @@ func checkFunctionAnonymousAccess(policy *cloudfunctions.Policy) AnonymousAccess
 	}
 
 	return info
+}
+
+// parseGCSURL parses a GCS URL and extracts bucket and object names
+// Handles both https://storage.googleapis.com/BUCKET/OBJECT and gs://BUCKET/OBJECT formats
+func parseGCSURL(url string) (bucket, object string, err error) {
+	const httpsPrefix = "https://storage.googleapis.com/"
+	const gsPrefix = "gs://"
+
+	var path string
+	switch {
+	case strings.HasPrefix(url, httpsPrefix):
+		path = strings.TrimPrefix(url, httpsPrefix)
+	case strings.HasPrefix(url, gsPrefix):
+		path = strings.TrimPrefix(url, gsPrefix)
+	default:
+		return "", "", fmt.Errorf("not a GCS URL (expected https://storage.googleapis.com/ or gs://): %s", url)
+	}
+
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid GCS URL format: %s", url)
+	}
+	return parts[0], parts[1], nil
 }
 
 func linkPostProcessFunction(function *cloudfunctions.CloudFunction) map[string]any {

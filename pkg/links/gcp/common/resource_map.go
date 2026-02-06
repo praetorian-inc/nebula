@@ -8,6 +8,12 @@ import (
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 )
 
+// Firebase resource types not yet published in tabularium
+const (
+	GCPResourceFirebaseHostingSite tab.CloudResourceType = "firebasehosting.googleapis.com/Site"
+	GCPResourceFirebaseWebApp      tab.CloudResourceType = "firebase.googleapis.com/WebApp"
+)
+
 // shows implemented resource types only for list resources links
 var listResourceMap = map[tab.CloudResourceType][]string{
 	// Storage
@@ -33,6 +39,10 @@ var listResourceMap = map[tab.CloudResourceType][]string{
 	tab.GCRArtifactRepository:     {"artifactrepo"},
 	tab.GCRContainerImage:         {"containerimage"},
 	tab.GCRArtifactoryDockerImage: {"dockerimage", "artifactoryimage"},
+
+	// Firebase
+	GCPResourceFirebaseHostingSite: {"firebase", "hostingsite", "firebasehosting"},
+	GCPResourceFirebaseWebApp:      {"firebaseapp", "webapp"},
 
 	// Hierarchy (Info only - use hierarchy modules for listing)
 	tab.GCPResourceProject:      {"project"},

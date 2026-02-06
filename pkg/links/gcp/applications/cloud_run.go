@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	jtypes "github.com/praetorian-inc/janus-framework/pkg/types"
+	gcperrors "github.com/praetorian-inc/nebula/pkg/gcp/errors"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/base"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/common"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
@@ -174,7 +176,11 @@ func (g *GcpCloudRunServiceListLink) Process(resource tab.GCPResource) error {
 					g.Send(gcpCloudRunService)
 				}
 			} else if err != nil {
-				slog.Error("Failed to list Cloud Run services in region", "error", err, "region", regionId)
+				if gcperrors.IsServiceDisabled(err) {
+					slog.Debug("Cloud Run API disabled for project", "project", projectId, "region", regionId)
+				} else {
+					slog.Error("Failed to list Cloud Run services in region", "error", err, "region", regionId)
+				}
 			}
 		}(region.Name)
 	}
@@ -316,6 +322,53 @@ func calculateRiskLevel(info AnonymousAccessInfo) string {
 	return "low"
 }
 
+// isGen2CloudFunction checks if a Cloud Run service is actually a Gen 2 Cloud Function
+// Gen 2 functions are deployed as Cloud Run services but have cloudfunctions.net URLs
+// or the goog-managed-by: cloudfunctions label
+func isGen2CloudFunction(service *run.GoogleCloudRunV2Service) bool {
+	// Check for cloudfunctions.net URL (match host, not arbitrary substring)
+	for _, urlStr := range service.Urls {
+		if u, err := url.Parse(urlStr); err == nil {
+			// Check if host ends with .cloudfunctions.net
+			if strings.HasSuffix(u.Host, ".cloudfunctions.net") {
+				return true
+			}
+		}
+	}
+
+	// Check for goog-managed-by label
+	if service.Labels != nil {
+		if service.Labels["goog-managed-by"] == "cloudfunctions" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// extractGen2FunctionName extracts the function name from a Gen 2 Cloud Function's cloudfunctions.net URL
+func extractGen2FunctionName(service *run.GoogleCloudRunV2Service) string {
+	for _, urlStr := range service.Urls {
+		if u, err := url.Parse(urlStr); err == nil {
+			if strings.HasSuffix(u.Host, ".cloudfunctions.net") {
+				// URL format: https://REGION-PROJECT.cloudfunctions.net/FUNCTION_NAME
+				// Path is /FUNCTION_NAME, trim leading and trailing slashes
+				path := strings.Trim(u.Path, "/")
+				// Query params are already handled by url.Parse
+				if path != "" {
+					return path
+				}
+			}
+		}
+	}
+	// Fallback to service name (last segment)
+	parts := strings.Split(service.Name, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return ""
+}
+
 func linkPostProcessCloudRunService(service *run.GoogleCloudRunV2Service) map[string]any {
 	properties := map[string]any{
 		"name":      service.Name,
@@ -324,6 +377,13 @@ func linkPostProcessCloudRunService(service *run.GoogleCloudRunV2Service) map[st
 	}
 	properties["uid"] = service.Annotations["cloud.googleapis.com/uid"]
 	properties["publicURLs"] = service.Urls
+
+	// Detect if this is a Gen 2 Cloud Function
+	if isGen2CloudFunction(service) {
+		properties["isGen2CloudFunction"] = true
+		properties["functionName"] = extractGen2FunctionName(service)
+	}
+
 	if service.Template != nil {
 		properties["serviceAccountName"] = service.Template.ServiceAccount
 		if len(service.Template.Containers) > 0 {

@@ -11,6 +11,7 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/common"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/compute"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/containers"
+	"github.com/praetorian-inc/nebula/pkg/links/gcp/firebase"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/hierarchy"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/storage"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
@@ -325,6 +326,10 @@ func buildResourceChains(resourceTypes []string) []chain.Link {
 			containers.NewGcpRepositoryListLink(),
 			containers.NewGcpContainerImageListLink(),
 		))
+	}
+
+	if shouldInclude("firebase") || shouldInclude("hostingsite") || shouldInclude("firebasehosting") {
+		chains = append(chains, chain.NewChain(firebase.NewGcpFirebaseHostingSiteListLink()))
 	}
 
 	return chains

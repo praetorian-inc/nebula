@@ -8,29 +8,27 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
-	"github.com/praetorian-inc/nebula/internal/helpers"
+	"github.com/praetorian-inc/nebula/pkg/links/aws/base"
 	"github.com/praetorian-inc/nebula/pkg/types"
 )
 
 // CognitoUserPoolGetDomains is a Janus link that adds domain information to Cognito user pools
 type CognitoUserPoolGetDomains struct {
-	*chain.Base
+	*base.AwsReconBaseLink
 }
 
 func NewCognitoUserPoolGetDomains(configs ...cfg.Config) chain.Link {
 	l := &CognitoUserPoolGetDomains{}
-	l.Base = chain.NewBase(l, configs...)
+	l.AwsReconBaseLink = base.NewAwsReconBaseLink(l, configs...)
 	return l
 }
 
 func (l *CognitoUserPoolGetDomains) Params() []cfg.Param {
-	return []cfg.Param{
-		cfg.NewParam[string]("profile", "AWS profile to use").WithDefault("default"),
-	}
+	return l.AwsReconBaseLink.Params()
 }
 
 func (l *CognitoUserPoolGetDomains) Process(resource types.EnrichedResourceDescription) error {
-	config, err := helpers.GetAWSCfg(resource.Region, l.Arg("profile").(string), nil, "none")
+	config, err := l.GetConfigWithRuntimeArgs(resource.Region)
 	if err != nil {
 		return fmt.Errorf("could not set up client config: %w", err)
 	}
@@ -49,21 +47,26 @@ func (l *CognitoUserPoolGetDomains) Process(resource types.EnrichedResourceDescr
 	}
 
 	// Convert the properties to a map to make it easier to work with
-	var propsMap map[string]interface{}
+	var propsMap map[string]any
 	switch props := resource.Properties.(type) {
 	case string:
 		if err := json.Unmarshal([]byte(props), &propsMap); err != nil {
-			propsMap = make(map[string]interface{})
+			propsMap = make(map[string]any)
 		}
-	case map[string]interface{}:
+	case map[string]any:
 		propsMap = props
 	default:
-		propsMap = make(map[string]interface{})
+		propsMap = make(map[string]any)
 	}
 
 	// Add self-signup information
 	isSelfSignupEnabled := !cognitoOutput.UserPool.AdminCreateUserConfig.AllowAdminCreateUserOnly
 	propsMap["SelfSignupEnabled"] = isSelfSignupEnabled
+
+	// Add description to properties if self-signup is enabled
+	if isSelfSignupEnabled {
+		propsMap["Description"] = "Self-signup enabled - unauthenticated users can create accounts"
+	}
 
 	// Collect domains and sign-up URLs
 	var domains []string
@@ -101,6 +104,35 @@ func (l *CognitoUserPoolGetDomains) Process(resource types.EnrichedResourceDescr
 		propsMap["SignupUrls"] = signupUrls
 	}
 
+	// Extract schema attributes for privilege escalation analysis
+	if cognitoOutput.UserPool.SchemaAttributes != nil {
+		var schemaList []map[string]any
+		for _, attr := range cognitoOutput.UserPool.SchemaAttributes {
+			// Safely dereference pointer fields
+			name := ""
+			if attr.Name != nil {
+				name = *attr.Name
+			}
+			mutable := false
+			if attr.Mutable != nil {
+				mutable = *attr.Mutable
+			}
+			required := false
+			if attr.Required != nil {
+				required = *attr.Required
+			}
+
+			schemaAttr := map[string]any{
+				"Name":              name,
+				"Mutable":           mutable,
+				"AttributeDataType": string(attr.AttributeDataType),
+				"Required":          required,
+			}
+			schemaList = append(schemaList, schemaAttr)
+		}
+		propsMap["Schema"] = schemaList
+	}
+
 	// Create a new resource with the updated properties
 	enrichedResource := types.EnrichedResourceDescription{
 		Identifier: resource.Identifier,
@@ -116,23 +148,21 @@ func (l *CognitoUserPoolGetDomains) Process(resource types.EnrichedResourceDescr
 
 // CognitoUserPoolDescribeClients is a Janus link that adds client information to Cognito user pools
 type CognitoUserPoolDescribeClients struct {
-	*chain.Base
+	*base.AwsReconBaseLink
 }
 
 func NewCognitoUserPoolDescribeClients(configs ...cfg.Config) chain.Link {
 	l := &CognitoUserPoolDescribeClients{}
-	l.Base = chain.NewBase(l, configs...)
+	l.AwsReconBaseLink = base.NewAwsReconBaseLink(l, configs...)
 	return l
 }
 
 func (l *CognitoUserPoolDescribeClients) Params() []cfg.Param {
-	return []cfg.Param{
-		cfg.NewParam[string]("profile", "AWS profile to use").WithDefault("default"),
-	}
+	return l.AwsReconBaseLink.Params()
 }
 
 func (l *CognitoUserPoolDescribeClients) Process(resource types.EnrichedResourceDescription) error {
-	config, err := helpers.GetAWSCfg(resource.Region, l.Arg("profile").(string), nil, "none")
+	config, err := l.GetConfigWithRuntimeArgs(resource.Region)
 	if err != nil {
 		return fmt.Errorf("could not set up client config: %w", err)
 	}
@@ -140,23 +170,23 @@ func (l *CognitoUserPoolDescribeClients) Process(resource types.EnrichedResource
 	cognitoClient := cognitoidentityprovider.NewFromConfig(config)
 
 	// Convert the properties to a map if it's not already one
-	var propsMap map[string]interface{}
+	var propsMap map[string]any
 	switch props := resource.Properties.(type) {
 	case string:
 		if err := json.Unmarshal([]byte(props), &propsMap); err != nil {
-			propsMap = make(map[string]interface{})
+			propsMap = make(map[string]any)
 		}
-	case map[string]interface{}:
+	case map[string]any:
 		propsMap = props
 	default:
-		propsMap = make(map[string]interface{})
+		propsMap = make(map[string]any)
 	}
 
 	cognitoInput := &cognitoidentityprovider.ListUserPoolClientsInput{
 		UserPoolId: aws.String(resource.Identifier),
 	}
 
-	var clientProperties []map[string]interface{}
+	var clientProperties []map[string]any
 
 	for {
 		clientsOutput, err := cognitoClient.ListUserPoolClients(l.Context(), cognitoInput)
@@ -176,9 +206,10 @@ func (l *CognitoUserPoolDescribeClients) Process(resource types.EnrichedResource
 				continue
 			}
 
-			clientProperty := map[string]interface{}{
+			clientProperty := map[string]any{
 				"ClientId":           describeClientOutput.UserPoolClient.ClientId,
 				"ClientName":         describeClientOutput.UserPoolClient.ClientName,
+				"HasClientSecret":    describeClientOutput.UserPoolClient.ClientSecret != nil && *describeClientOutput.UserPoolClient.ClientSecret != "",
 				"CallbackURLs":       describeClientOutput.UserPoolClient.CallbackURLs,
 				"LogoutURLs":         describeClientOutput.UserPoolClient.LogoutURLs,
 				"AllowedOAuthFlows":  describeClientOutput.UserPoolClient.AllowedOAuthFlows,

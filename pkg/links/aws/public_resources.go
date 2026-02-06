@@ -9,6 +9,7 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/links/aws/base"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/cloudcontrol"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/lambda"
+	"github.com/praetorian-inc/nebula/pkg/links/aws/cognito"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	"github.com/praetorian-inc/nebula/pkg/types"
 	"github.com/praetorian-inc/tabularium/pkg/model/model"
@@ -151,6 +152,14 @@ func (a *AwsPublicResources) ResourceMap() map[string]func() chain.Chain {
 		return chain.NewChain(
 			cloudcontrol.NewCloudControlGet(),
 			NewAwsResourcePolicyChecker(),
+		)
+	}
+
+	resourceMap["AWS::Cognito::UserPool"] = func() chain.Chain {
+		return chain.NewChain(
+			cloudcontrol.NewCloudControlGet(),
+			cognito.NewCognitoUserPoolGetDomains(),
+			NewPropertyFilterLink(cfg.WithArg("property", "SelfSignupEnabled")),
 		)
 	}
 

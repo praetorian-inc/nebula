@@ -76,7 +76,7 @@ func (g *GcpFirebaseHostingSiteListLink) Process(resource tab.GCPResource) error
 		gcpSite, err := tab.NewGCPResource(
 			site.Name,
 			projectId,
-			tab.GCPResourceFirebaseHostingSite,
+			common.GCPResourceFirebaseHostingSite,
 			properties,
 		)
 		if err != nil {

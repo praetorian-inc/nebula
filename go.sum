@@ -345,6 +345,8 @@ github.com/praetorian-inc/janus-framework v0.0.0-20250918211123-5f90adc9184b h1:
 github.com/praetorian-inc/janus-framework v0.0.0-20250918211123-5f90adc9184b/go.mod h1:/K/qM9j43mrPe0VsYy5xUDNWT+pnk7ejBE4O7Lcg8RY=
 github.com/praetorian-inc/konstellation v0.0.0-20251205230404-ed78bd75cfb8 h1:GorBf9cf8ScYTBuxjEFCBiWivI4C9ItbqUKhQKaIS/8=
 github.com/praetorian-inc/konstellation v0.0.0-20251205230404-ed78bd75cfb8/go.mod h1:sbwY5GVsqieoJXogpMMK+5GWZ15UgNnd9nRSkjBG8rQ=
+github.com/praetorian-inc/tabularium v1.0.166-pre-0-jwh-cloud-relations-pt2 h1:JSG4KYDMbH1/h/mNw61eewUyTPV0nE0boTt8MAA2m3c=
+github.com/praetorian-inc/tabularium v1.0.166-pre-0-jwh-cloud-relations-pt2/go.mod h1:vj8oiHB0mS8sGs2ZvZlN1UZLWDRp7DC0w6aseSObDe8=
 github.com/redis/go-redis/v9 v9.8.0 h1:q3nRvjrlge/6UD7eTu/DSg2uYiU2mCL0G/uzBWqhicI=
 github.com/redis/go-redis/v9 v9.8.0/go.mod h1:huWgSWd8mW6+m0VPhJjSSQ+d6Nh1VICQ6Q5lHuCH/Iw=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=

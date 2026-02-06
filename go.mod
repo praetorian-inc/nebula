@@ -67,7 +67,7 @@ require (
 	github.com/neo4j/neo4j-go-driver/v5 v5.28.1
 	github.com/praetorian-inc/janus-framework v0.0.0-20250918211123-5f90adc9184b
 	github.com/praetorian-inc/konstellation v0.0.0-20251205230404-ed78bd75cfb8
-	github.com/praetorian-inc/tabularium v1.0.132-pre-0-jwh-cloud-relations
+	github.com/praetorian-inc/tabularium v1.0.166-pre-0-jwh-cloud-relations-pt2
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/oauth2 v0.34.0
@@ -179,5 +179,3 @@ require (
 	golang.org/x/text v0.33.0
 	gopkg.in/yaml.v3 v3.0.1
 )
-
-replace github.com/praetorian-inc/tabularium => ../../../modules/tabularium

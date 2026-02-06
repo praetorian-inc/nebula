@@ -11,7 +11,7 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/base"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/common"
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
-	"google.golang.org/api/firebasehosting/v1beta1"
+	firebasehosting "google.golang.org/api/firebasehosting/v1beta1"
 )
 
 // FILE INFO:

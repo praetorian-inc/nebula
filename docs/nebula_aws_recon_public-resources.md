@@ -27,6 +27,7 @@ nebula aws recon public-resources [flags]
       --profile-dir string               Set to override the default AWS profile directory
   -r, --regions strings                  AWS regions to scan (default [all])
   -t, --resource-type strings            AWS Cloud Control resource type (default [all])
+      --workers int                      Number of concurrent workers for processing resources (default 20)
 ```
 
 ### SEE ALSO

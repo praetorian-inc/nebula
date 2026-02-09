@@ -1197,7 +1197,7 @@ func (l *Neo4jImporterLink) createManagementGroupToManagementGroupContains(sessi
 					// Convert parent ID to full path format for consistency
 					var fullParentId string
 					if strings.HasPrefix(parentId, "/providers/Microsoft.Management/managementGroups/") {
-						fullParentId = parentId
+						fullParentId = l.normalizeResourceId(parentId)
 					} else {
 						fullParentId = l.normalizeResourceId("/providers/Microsoft.Management/managementGroups/" + parentId)
 					}
@@ -1221,10 +1221,10 @@ func (l *Neo4jImporterLink) createManagementGroupToManagementGroupContains(sessi
 		UNWIND $relationships as rel
 		MATCH (parentMg:Resource)
 		WHERE toLower(parentMg.resourceType) = "microsoft.management/managementgroups"
-		AND parentMg.id = rel.parentMgId
+		AND toLower(parentMg.id) = toLower(rel.parentMgId)
 		MATCH (childMg:Resource)
 		WHERE toLower(childMg.resourceType) = "microsoft.management/managementgroups"
-		AND childMg.id = rel.childMgId
+		AND toLower(childMg.id) = toLower(rel.childMgId)
 		MERGE (parentMg)-[:CONTAINS]->(childMg)
 	`
 

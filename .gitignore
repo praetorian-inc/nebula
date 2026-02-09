@@ -20,3 +20,4 @@ out.json
 debug.log*
 *.json
 docker-images
+chat.txt

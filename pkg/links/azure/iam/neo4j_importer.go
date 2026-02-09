@@ -763,29 +763,55 @@ func (l *Neo4jImporterLink) createHierarchyResources() int {
 		}
 	}
 
-	// Create Subscriptions and Resource Groups
+	// Create Subscriptions from management_groups array (includes ALL subscriptions)
+	subscriptionNodes := make([]map[string]interface{}, 0)
+	managementGroups = l.getArrayValue(l.consolidatedData, "management_groups")
+
+	for _, item := range managementGroups {
+		if itemMap, ok := item.(map[string]interface{}); ok {
+			itemType := l.getStringValue(itemMap, "type")
+
+			// Filter for subscriptions in the management_groups array
+			if strings.ToLower(itemType) == "microsoft.resources/subscriptions" {
+				subscriptionId := l.getStringValue(itemMap, "name")
+				subscriptionName := l.getStringValue(itemMap, "name")
+				subscriptionFullId := l.getStringValue(itemMap, "id")
+
+				if subscriptionId != "" && subscriptionFullId != "" {
+					// Create subscription metadata
+					subscriptionMetadata := map[string]interface{}{
+						"subscriptionId": subscriptionId,
+					}
+
+					subscriptionNodes = append(subscriptionNodes, map[string]interface{}{
+						"id":             l.normalizeResourceId(subscriptionFullId),
+						"resourceType":   "Microsoft.Resources/subscriptions",
+						"displayName":    subscriptionName,
+						"name":           subscriptionName,
+						"subscriptionId": subscriptionId,
+						"metadata":       l.toJSONString(subscriptionMetadata),
+					})
+				}
+			}
+		}
+	}
+
+	// Create subscription nodes
+	if created := l.createResourceNodesBatch(session, ctx, subscriptionNodes, []string{"Resource", "Hierarchy"}); created > 0 {
+		totalCreated += created
+		message.Info("Created Subscription resource nodes", "count", created)
+	}
+
+	// Create Resource Groups from azure_resources map
 	azureResources := l.getMapValue(l.consolidatedData, "azure_resources")
 	if azureResources != nil {
-		subscriptionNodes := make([]map[string]interface{}, 0)
 		resourceGroupNodes := make([]map[string]interface{}, 0)
+		seenResourceGroups := make(map[string]bool) // Global deduplication across all subscriptions
 
 		for subscriptionId, subscriptionData := range azureResources {
-			// Create subscription node with metadata
-			subscriptionMetadata := map[string]interface{}{
-				"subscriptionId": subscriptionId,
-			}
-			subscriptionNodes = append(subscriptionNodes, map[string]interface{}{
-				"id": l.normalizeResourceId("/subscriptions/" + subscriptionId),
-				"resourceType": "Microsoft.Resources/subscriptions",
-				"displayName": "Subscription " + subscriptionId,
-				"subscriptionId": subscriptionId,
-				"metadata": l.toJSONString(subscriptionMetadata),
-			})
-
 			// Create resource groups from azureResourceGroups collection
 			if subData, ok := subscriptionData.(map[string]interface{}); ok {
 				azureResourceGroupsList := l.getArrayValue(subData, "azureResourceGroups")
-				seenResourceGroups := make(map[string]bool) // Use case-insensitive key
 
 				for _, resourceGroup := range azureResourceGroupsList {
 					if rgMap, ok := resourceGroup.(map[string]interface{}); ok {
@@ -821,12 +847,6 @@ func (l *Neo4jImporterLink) createHierarchyResources() int {
 					}
 				}
 			}
-		}
-
-		// Create subscription nodes
-		if created := l.createResourceNodesBatch(session, ctx, subscriptionNodes, []string{"Resource", "Hierarchy"}); created > 0 {
-			totalCreated += created
-			message.Info("Created Subscription resource nodes", "count", created)
 		}
 
 		// Create resource group nodes
@@ -1271,11 +1291,20 @@ func (l *Neo4jImporterLink) createManagementGroupToSubscriptionContains(session 
 	for _, item := range managementGroups {
 		if itemMap, ok := item.(map[string]interface{}); ok {
 			itemType := l.getStringValue(itemMap, "type")
-			itemName := l.getStringValue(itemMap, "name")
+			itemId := l.getStringValue(itemMap, "id")
 			parentId := l.getStringValue(itemMap, "ParentId")
 
 			// Look for subscriptions that have a management group as parent
-			if itemType == "microsoft.resources/subscriptions" && itemName != "" && parentId != "" {
+			if itemType == "microsoft.resources/subscriptions" && itemId != "" && parentId != "" {
+				// Extract subscription GUID from id field (/subscriptions/{guid})
+				var subscriptionId string
+				if strings.HasPrefix(itemId, "/subscriptions/") {
+					parts := strings.Split(itemId, "/")
+					if len(parts) >= 3 {
+						subscriptionId = parts[2]
+					}
+				}
+
 				// Extract management group ID from parent path
 				// ParentId format: "/providers/Microsoft.Management/managementGroups/{mgId}" OR just "{mgId}"
 				var parentMgId string
@@ -1288,7 +1317,7 @@ func (l *Neo4jImporterLink) createManagementGroupToSubscriptionContains(session 
 					parentMgId = parentId
 				}
 
-				if parentMgId != "" {
+				if parentMgId != "" && subscriptionId != "" {
 					cypher := `
 						MATCH (mg:Resource)
 						WHERE toLower(mg.resourceType) = "microsoft.management/managementgroups"
@@ -1301,7 +1330,7 @@ func (l *Neo4jImporterLink) createManagementGroupToSubscriptionContains(session 
 					result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
 						result, err := tx.Run(ctx, cypher, map[string]interface{}{
 							"mgId":          strings.ToLower(parentMgId),
-							"subscriptionId": itemName,
+							"subscriptionId": subscriptionId,
 						})
 						if err != nil {
 							return nil, err
@@ -1316,7 +1345,7 @@ func (l *Neo4jImporterLink) createManagementGroupToSubscriptionContains(session 
 					})
 
 					if err != nil {
-						l.Logger.Warn("Error creating management group-subscription CONTAINS edge", "mgId", parentMgId, "subscriptionId", itemName, "error", err)
+						l.Logger.Warn("Error creating management group-subscription CONTAINS edge", "mgId", parentMgId, "subscriptionId", subscriptionId, "error", err)
 					} else if edgesCreated, ok := l.convertToInt64(result); ok {
 						totalEdges += int(edgesCreated)
 					}
@@ -1345,14 +1374,27 @@ func (l *Neo4jImporterLink) createTenantToOrphanSubscriptionContains(session neo
 	for _, item := range managementGroups {
 		if itemMap, ok := item.(map[string]interface{}); ok {
 			itemType := l.getStringValue(itemMap, "type")
-			itemName := l.getStringValue(itemMap, "name")
+			itemId := l.getStringValue(itemMap, "id")
 			parentId := l.getStringValue(itemMap, "ParentId")
 
 			// If it's a subscription with a management group parent, mark it as "in MG"
-			if itemType == "microsoft.resources/subscriptions" && itemName != "" && parentId != "" {
+			if itemType == "microsoft.resources/subscriptions" && itemId != "" && parentId != "" {
+				// Extract subscription GUID from id field (/subscriptions/{guid})
+				var subscriptionId string
+				if strings.HasPrefix(itemId, "/subscriptions/") {
+					parts := strings.Split(itemId, "/")
+					if len(parts) >= 3 {
+						subscriptionId = parts[2]
+					}
+				}
+
 				// Check if parent is a management group (not the tenant root)
-				if strings.Contains(parentId, "/providers/Microsoft.Management/managementGroups/") {
-					subscriptionsInMGs[itemName] = true
+				// ParentId can be either:
+				// - Full path: "/providers/Microsoft.Management/managementGroups/{mgId}"
+				// - Short form: "{mgId}" or "MG-Name"
+				// - Tenant root: exact match with tenantID
+				if subscriptionId != "" && parentId != tenantID {
+					subscriptionsInMGs[subscriptionId] = true
 				}
 			}
 		}

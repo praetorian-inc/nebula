@@ -23,11 +23,11 @@ Represents ownership of Entra ID service principals. Owners have administrative 
 
 ## Source & Target Nodes
 
-**Source:** [User Node](../NODES/user.md) or [Service Principal Node](../NODES/service-principal.md)
+**Source:** [User Node](../../Azure_IAM_Nodes/user.md) or [Service Principal Node](../../Azure_IAM_Nodes/service-principal.md)
 - Labels: `Resource:Identity:Principal`
 - Type: `"Microsoft.DirectoryServices/users"` or `"Microsoft.DirectoryServices/serviceprincipals"`
 
-**Target:** [Service Principal Node](../NODES/service-principal.md)
+**Target:** [Service Principal Node](../../Azure_IAM_Nodes/service-principal.md)
 - Labels: `Resource:Identity:Principal`
 - Type: `"Microsoft.DirectoryServices/serviceprincipals"`
 
@@ -424,8 +424,8 @@ RETURN count(r) as edge_count
 
 ## Related Documentation
 
-- [User Node](../NODES/user.md) - Source node (user owners)
-- [Service Principal Node](../NODES/service-principal.md) - Source and target node
+- [User Node](../../Azure_IAM_Nodes/user.md) - Source node (user owners)
+- [Service Principal Node](../../Azure_IAM_Nodes/service-principal.md) - Source and target node
 - [Application CONTAINS SP](../CONTAINS/application-to-sp.md) - Application relationship
 - [MI CONTAINS SP](../CONTAINS/mi-to-sp.md) - Managed identity relationship
 - [CAN_ESCALATE via SP Owner](../CAN_ESCALATE/) - Escalation analysis

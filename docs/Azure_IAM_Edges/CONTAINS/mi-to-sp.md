@@ -20,14 +20,14 @@ Represents the relationship between a managed identity (user-assigned or system-
 
 ## Source & Target Nodes
 
-**Source:** [User-Assigned MI Node](../NODES/user-assigned-mi.md) or [System-Assigned MI Node](../NODES/system-assigned-mi.md)
+**Source:** [User-Assigned MI Node](../../Azure_IAM_Nodes/user-assigned-mi.md) or [System-Assigned MI Node](../../Azure_IAM_Nodes/system-assigned-mi.md)
 - Labels: `Resource:AzureResource`
 - Types:
   - `"Microsoft.ManagedIdentity/userAssignedIdentities"` (real resource)
   - `"Microsoft.ManagedIdentity/systemAssigned"` (synthetic node)
 - Property: `principalId` (GUID - links to SP)
 
-**Target:** [Service Principal Node](../NODES/service-principal.md)
+**Target:** [Service Principal Node](../../Azure_IAM_Nodes/service-principal.md)
 - Labels: `Resource:Identity:Principal`
 - Type: `"Microsoft.DirectoryServices/serviceprincipals"`
 - Property: `id` matches MI's `principalId`
@@ -388,8 +388,8 @@ RETURN count(r) as edge_count
 
 ## Related Documentation
 
-- [User-Assigned MI Node](../NODES/user-assigned-mi.md) - Source node (user-assigned)
-- [System-Assigned MI Node](../NODES/system-assigned-mi.md) - Source node (system-assigned)
-- [Service Principal Node](../NODES/service-principal.md) - Target node
+- [User-Assigned MI Node](../../Azure_IAM_Nodes/user-assigned-mi.md) - Source node (user-assigned)
+- [System-Assigned MI Node](../../Azure_IAM_Nodes/system-assigned-mi.md) - Source node (system-assigned)
+- [Service Principal Node](../../Azure_IAM_Nodes/service-principal.md) - Target node
 - [CAN_ESCALATE](../CAN_ESCALATE/) - IMDS token theft vectors
 - [../overview.md](../overview.md) - Hierarchy overview

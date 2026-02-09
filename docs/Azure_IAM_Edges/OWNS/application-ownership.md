@@ -23,11 +23,11 @@ Represents ownership of Entra ID applications. Owners have full administrative c
 
 ## Source & Target Nodes
 
-**Source:** [User Node](../NODES/user.md) or [Service Principal Node](../NODES/service-principal.md)
+**Source:** [User Node](../../Azure_IAM_Nodes/user.md) or [Service Principal Node](../../Azure_IAM_Nodes/service-principal.md)
 - Labels: `Resource:Identity:Principal`
 - Type: `"Microsoft.DirectoryServices/users"` or `"Microsoft.DirectoryServices/serviceprincipals"`
 
-**Target:** [Application Node](../NODES/application.md)
+**Target:** [Application Node](../../Azure_IAM_Nodes/application.md)
 - Labels: `Resource:Identity` (NOT Principal)
 - Type: `"Microsoft.DirectoryServices/applications"`
 
@@ -363,9 +363,9 @@ RETURN count(r) as edge_count
 
 ## Related Documentation
 
-- [User Node](../NODES/user.md) - Source node (user owners)
-- [Service Principal Node](../NODES/service-principal.md) - Source node (SP owners)
-- [Application Node](../NODES/application.md) - Target node
+- [User Node](../../Azure_IAM_Nodes/user.md) - Source node (user owners)
+- [Service Principal Node](../../Azure_IAM_Nodes/service-principal.md) - Source node (SP owners)
+- [Application Node](../../Azure_IAM_Nodes/application.md) - Target node
 - [Application CONTAINS SP](../CONTAINS/application-to-sp.md) - Backing SP relationship
 - [CAN_ESCALATE via Application Owner](../CAN_ESCALATE/) - Escalation analysis
 - [../overview.md](../overview.md#owns-edges) - OWNS edge architecture

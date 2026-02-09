@@ -20,11 +20,11 @@ Represents subscription assignment to management groups in Azure's organizationa
 
 ## Source & Target Nodes
 
-**Source:** [Management Group Node](../NODES/management-group.md)
+**Source:** [Management Group Node](../../Azure_IAM_Nodes/management-group.md)
 - Labels: `Resource:Hierarchy`
 - Type: `"Microsoft.Management/managementGroups"`
 
-**Target:** [Subscription Node](../NODES/subscription.md)
+**Target:** [Subscription Node](../../Azure_IAM_Nodes/subscription.md)
 - Labels: `Resource:Hierarchy`
 - Type: `"Microsoft.Resources/subscriptions"`
 
@@ -485,8 +485,8 @@ RETURN count(sub) as subscription_count
 
 ## Related Documentation
 
-- [Management Group Node](../NODES/management-group.md) - Source node
-- [Subscription Node](../NODES/subscription.md) - Target node
+- [Management Group Node](../../Azure_IAM_Nodes/management-group.md) - Source node
+- [Subscription Node](../../Azure_IAM_Nodes/subscription.md) - Target node
 - [Tenant CONTAINS Root MG](tenant-to-root-mg.md) - Root of hierarchy
 - [MG CONTAINS Child MG](mg-to-child-mg.md) - MG hierarchy
 - [Subscription CONTAINS RG](subscription-to-rg.md) - Next level down

@@ -201,7 +201,7 @@ Each OWNS edge type should have test cases verifying:
 
 ## Related Documentation
 
-- [../NODES/](../NODES/) - Node types that OWNS edges connect
+- [../../Azure_IAM_Nodes/](../../Azure_IAM_Nodes/) - Node types that OWNS edges connect
 - [../data-schema.md](../data-schema.md) - Source data for ownership
 - [../CAN_ESCALATE/](../CAN_ESCALATE/) - Ownership-based escalation vectors
 - [../HAS_PERMISSION/](../HAS_PERMISSION/) - Potential permissions via ownership

@@ -20,12 +20,12 @@ Represents the relationship between an Entra ID application registration and its
 
 ## Source & Target Nodes
 
-**Source:** [Application Node](../NODES/application.md)
+**Source:** [Application Node](../../Azure_IAM_Nodes/application.md)
 - Labels: `Resource:Identity` (NOT Principal - applications cannot receive permissions directly)
 - Type: `"Microsoft.DirectoryServices/applications"`
 - Property: `appId` (GUID)
 
-**Target:** [Service Principal Node](../NODES/service-principal.md)
+**Target:** [Service Principal Node](../../Azure_IAM_Nodes/service-principal.md)
 - Labels: `Resource:Identity:Principal`
 - Type: `"Microsoft.DirectoryServices/serviceprincipals"`
 - Property: `appId` (GUID - matches application's appId)
@@ -360,8 +360,8 @@ RETURN count(r) as edge_count
 
 ## Related Documentation
 
-- [Application Node](../NODES/application.md) - Source node
-- [Service Principal Node](../NODES/service-principal.md) - Target node
+- [Application Node](../../Azure_IAM_Nodes/application.md) - Source node
+- [Service Principal Node](../../Azure_IAM_Nodes/service-principal.md) - Target node
 - [OWNS Application](../OWNS/application-ownership.md) - Application ownership
 - [CAN_ESCALATE](../CAN_ESCALATE/) - Application owner escalation vectors
 - [../overview.md](../overview.md) - Hierarchy overview

@@ -20,11 +20,11 @@ Represents the management group hierarchy in Azure, allowing nested organization
 
 ## Source & Target Nodes
 
-**Source:** [Management Group Node](../NODES/management-group.md)
+**Source:** [Management Group Node](../../Azure_IAM_Nodes/management-group.md)
 - Labels: `Resource:Hierarchy`
 - Type: `"Microsoft.Management/managementGroups"`
 
-**Target:** [Management Group Node](../NODES/management-group.md)
+**Target:** [Management Group Node](../../Azure_IAM_Nodes/management-group.md)
 - Labels: `Resource:Hierarchy`
 - Type: `"Microsoft.Management/managementGroups"`
 - Property: Child MG has `parentId` pointing to parent MG
@@ -334,7 +334,7 @@ RETURN count(r) as edge_count
 
 ## Related Documentation
 
-- [Management Group Node](../NODES/management-group.md) - Source and target node
+- [Management Group Node](../../Azure_IAM_Nodes/management-group.md) - Source and target node
 - [Tenant CONTAINS Root MG](tenant-to-root-mg.md) - Parent edge (root)
 - [MG CONTAINS Subscription](mg-to-subscription.md) - Child edges (subscriptions)
 - [../overview.md](../overview.md) - Hierarchy overview

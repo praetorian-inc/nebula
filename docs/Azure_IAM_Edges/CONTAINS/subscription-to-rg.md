@@ -20,11 +20,11 @@ Represents the containment of resource groups within subscriptions. Resource gro
 
 ## Source & Target Nodes
 
-**Source:** [Subscription Node](../NODES/subscription.md)
+**Source:** [Subscription Node](../../Azure_IAM_Nodes/subscription.md)
 - Labels: `Resource:Hierarchy`
 - Type: `"Microsoft.Resources/subscriptions"`
 
-**Target:** [Resource Group Node](../NODES/resource-group.md)
+**Target:** [Resource Group Node](../../Azure_IAM_Nodes/resource-group.md)
 - Labels: `Resource:Hierarchy`
 - Type: `"Microsoft.Resources/resourceGroups"`
 
@@ -318,8 +318,8 @@ RETURN count(r) as edge_count
 
 ## Related Documentation
 
-- [Subscription Node](../NODES/subscription.md) - Source node
-- [Resource Group Node](../NODES/resource-group.md) - Target node
+- [Subscription Node](../../Azure_IAM_Nodes/subscription.md) - Source node
+- [Resource Group Node](../../Azure_IAM_Nodes/resource-group.md) - Target node
 - [MG CONTAINS Subscription](mg-to-subscription.md) - Parent edge
 - [RG CONTAINS Resource](rg-to-resource.md) - Child edges
 - [../overview.md](../overview.md) - Hierarchy overview

@@ -20,11 +20,11 @@ Represents group membership in Entra ID (Azure AD). Groups can contain users, se
 
 ## Source & Target Nodes
 
-**Source:** [Group Node](../NODES/group.md)
+**Source:** [Group Node](../../Azure_IAM_Nodes/group.md)
 - Labels: `Resource:Identity:Principal`
 - Type: `"Microsoft.DirectoryServices/groups"`
 
-**Target:** [User Node](../NODES/user.md), [Group Node](../NODES/group.md), or [Service Principal Node](../NODES/service-principal.md)
+**Target:** [User Node](../../Azure_IAM_Nodes/user.md), [Group Node](../../Azure_IAM_Nodes/group.md), or [Service Principal Node](../../Azure_IAM_Nodes/service-principal.md)
 - Labels: `Resource:Identity:Principal`
 - Types:
   - `"Microsoft.DirectoryServices/users"`
@@ -514,8 +514,8 @@ RETURN count(r) as edge_count
 
 ## Related Documentation
 
-- [Group Node](../NODES/group.md) - Source node
-- [User Node](../NODES/user.md) - Target node (users)
-- [Service Principal Node](../NODES/service-principal.md) - Target node (SPs)
+- [Group Node](../../Azure_IAM_Nodes/group.md) - Source node
+- [User Node](../../Azure_IAM_Nodes/user.md) - Target node (users)
+- [Service Principal Node](../../Azure_IAM_Nodes/service-principal.md) - Target node (SPs)
 - [HAS_PERMISSION](../HAS_PERMISSION/) - Permission inheritance
 - [../overview.md](../overview.md) - Hierarchy overview

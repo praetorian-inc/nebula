@@ -20,11 +20,11 @@ Represents the containment of Azure resources within resource groups. Resource g
 
 ## Source & Target Nodes
 
-**Source:** [Resource Group Node](../NODES/resource-group.md)
+**Source:** [Resource Group Node](../../Azure_IAM_Nodes/resource-group.md)
 - Labels: `Resource:Hierarchy`
 - Type: `"Microsoft.Resources/resourceGroups"`
 
-**Target:** [Azure Resource Node](../NODES/azure-resource.md)
+**Target:** [Azure Resource Node](../../Azure_IAM_Nodes/azure-resource.md)
 - Labels: `Resource:AzureResource`
 - Type: Security-relevant types (VMs, storage accounts, key vaults, etc.)
 - **Excludes:** Subscriptions, resource groups, tenant nodes
@@ -142,7 +142,7 @@ Subscription
 - `Microsoft.OperationalInsights/workspaces` - Log Analytics
 - `Microsoft.Insights/components` - Application Insights
 
-See [Azure Resource Node documentation](../NODES/azure-resource.md#security-relevant-resource-types) for filtering logic.
+See [Azure Resource Node documentation](../../Azure_IAM_Nodes/azure-resource.md#security-relevant-resource-types) for filtering logic.
 
 ## Query Examples
 
@@ -384,7 +384,7 @@ RETURN count(hierarchyNode) as invalid_edges
 
 ## Related Documentation
 
-- [Resource Group Node](../NODES/resource-group.md) - Source node
-- [Azure Resource Node](../NODES/azure-resource.md) - Target node
+- [Resource Group Node](../../Azure_IAM_Nodes/resource-group.md) - Source node
+- [Azure Resource Node](../../Azure_IAM_Nodes/azure-resource.md) - Target node
 - [Subscription CONTAINS RG](subscription-to-rg.md) - Parent edge
 - [../overview.md](../overview.md) - Hierarchy overview

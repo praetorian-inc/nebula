@@ -23,11 +23,11 @@ Represents ownership of Entra ID groups. Owners have administrative control over
 
 ## Source & Target Nodes
 
-**Source:** [User Node](../NODES/user.md) or [Service Principal Node](../NODES/service-principal.md)
+**Source:** [User Node](../../Azure_IAM_Nodes/user.md) or [Service Principal Node](../../Azure_IAM_Nodes/service-principal.md)
 - Labels: `Resource:Identity:Principal`
 - Type: `"Microsoft.DirectoryServices/users"` or `"Microsoft.DirectoryServices/serviceprincipals"`
 
-**Target:** [Group Node](../NODES/group.md)
+**Target:** [Group Node](../../Azure_IAM_Nodes/group.md)
 - Labels: `Resource:Identity:Principal`
 - Type: `"Microsoft.DirectoryServices/groups"`
 
@@ -395,9 +395,9 @@ RETURN count(r) as edge_count
 
 ## Related Documentation
 
-- [User Node](../NODES/user.md) - Source node (user owners)
-- [Service Principal Node](../NODES/service-principal.md) - Source node (SP owners)
-- [Group Node](../NODES/group.md) - Target node
+- [User Node](../../Azure_IAM_Nodes/user.md) - Source node (user owners)
+- [Service Principal Node](../../Azure_IAM_Nodes/service-principal.md) - Source node (SP owners)
+- [Group Node](../../Azure_IAM_Nodes/group.md) - Target node
 - [Group CONTAINS Member](../CONTAINS/group-to-member.md) - Membership relationship
 - [CAN_ESCALATE via Group Owner](../CAN_ESCALATE/) - Escalation analysis
 - [../overview.md](../overview.md#owns-edges) - OWNS edge architecture

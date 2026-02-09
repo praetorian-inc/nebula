@@ -20,11 +20,11 @@ Connects the Azure AD tenant (identity root) to the root management group (resou
 
 ## Source & Target Nodes
 
-**Source:** [Tenant Node](../NODES/tenant.md)
+**Source:** [Tenant Node](../../Azure_IAM_Nodes/tenant.md)
 - Labels: `Resource:Hierarchy`
 - Type: `"Microsoft.DirectoryServices/tenant"`
 
-**Target:** [Root Management Group Node](../NODES/management-group.md)
+**Target:** [Root Management Group Node](../../Azure_IAM_Nodes/management-group.md)
 - Labels: `Resource:Hierarchy`
 - Type: `"Microsoft.Management/managementGroups"`
 - Property: `isRoot = true`
@@ -199,8 +199,8 @@ RETURN count(r) as edge_count
 
 ## Related Documentation
 
-- [Tenant Node](../NODES/tenant.md) - Source node
-- [Management Group Node](../NODES/management-group.md) - Target node (root MG)
+- [Tenant Node](../../Azure_IAM_Nodes/tenant.md) - Source node
+- [Management Group Node](../../Azure_IAM_Nodes/management-group.md) - Target node (root MG)
 - [MG CONTAINS Child MG](mg-to-child-mg.md) - Next level in hierarchy
 - [MG CONTAINS Subscription](mg-to-subscription.md) - Subscription attachment
 - [../overview.md](../overview.md) - Hierarchy overview

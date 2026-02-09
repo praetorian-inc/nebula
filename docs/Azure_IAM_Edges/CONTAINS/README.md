@@ -136,6 +136,6 @@ Each CONTAINS edge type should have test cases verifying:
 
 ## Related Documentation
 
-- [../NODES/](../NODES/) - Node types that CONTAINS edges connect
+- [../../Azure_IAM_Nodes/](../../Azure_IAM_Nodes/) - Node types that CONTAINS edges connect
 - [../data-schema.md](../data-schema.md) - Source data for edge creation
 - [../overview.md](../overview.md#contains-edges) - CONTAINS edge architecture

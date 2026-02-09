@@ -1,0 +1,18 @@
+# Azure IAM Privilege Escalation Research - Python Dependencies
+#
+# Install with: pip3 install -r requirements.txt
+
+# HTTP requests and web scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# YAML parsing for frontmatter
+PyYAML>=6.0.0
+
+# Optional: For advanced web scraping (if needed)
+# selenium>=4.15.0
+# playwright>=1.40.0
+
+# Optional: For LLM-assisted parsing (if implementing)
+# anthropic>=0.7.0

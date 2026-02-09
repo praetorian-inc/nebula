@@ -16,6 +16,9 @@ recon commands for azure
 * [nebula azure recon devops-secrets](nebula_azure_recon_devops-secrets.md)	 - Scans Azure DevOps organizations for secrets in repositories, variable groups, pipelines, and service endpoints using NoseyParker.
 * [nebula azure recon find-secrets](nebula_azure_recon_find-secrets.md)	 - Enumerate Azure resources and find secrets using NoseyParker across VMs, web apps, automation accounts, key vaults, and storage accounts
 * [nebula azure recon find-secrets-resource](nebula_azure_recon_find-secrets-resource.md)	 - Find secrets using NoseyParker for a specific Azure resource
+* [nebula azure recon iam-pull](nebula_azure_recon_iam-pull.md)	 - Collects Azure AD, PIM, and Azure Resource Manager data. Requires refresh token authentication.
+* [nebula azure recon iam-pull-sdk](nebula_azure_recon_iam-pull-sdk.md)	 - Collects Azure AD, PIM, and Azure Resource Manager data using Azure SDKs with standard authentication via az login.
+* [nebula azure recon iam-push](nebula_azure_recon_iam-push.md)	 - Imports consolidated Azure IAM data into Neo4j for Entra ID attack path analysis using simplified graph model.
 * [nebula azure recon list-all](nebula_azure_recon_list-all.md)	 - List all Azure resources across subscriptions with complete details including identifier. This might take a while for large subscriptions.
 * [nebula azure recon public-resources](nebula_azure_recon_public-resources.md)	 - Detects publicly accessible Azure resources including storage accounts, app services, SQL databases, VMs, and more.
 * [nebula azure recon role-assignments](nebula_azure_recon_role-assignments.md)	 - Enumerate role assignments across all Azure scopes including management groups, subscriptions, and resources

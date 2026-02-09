@@ -9,6 +9,7 @@ import (
 	"github.com/praetorian-inc/nebula/pkg/links/aws/base"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/cloudcontrol"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/lambda"
+	"github.com/praetorian-inc/nebula/pkg/links/aws/cognito"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	"github.com/praetorian-inc/nebula/pkg/types"
 	"github.com/praetorian-inc/tabularium/pkg/model/model"
@@ -32,6 +33,7 @@ func (a *AwsPublicResources) Params() []cfg.Param {
 	params := a.AwsReconLink.Params()
 	params = append(params, options.AwsCommonReconOptions()...)
 	params = append(params, options.AwsRegions(), options.AwsResourceType())
+	params = append(params, options.AwsEnableEC2SecurityEnrichment())
 	return params
 }
 
@@ -94,10 +96,21 @@ func (a *AwsPublicResources) ResourceMap() map[string]func() chain.Chain {
 	resourceMap := make(map[string]func() chain.Chain)
 
 	resourceMap["AWS::EC2::Instance"] = func() chain.Chain {
-		return chain.NewChain(
+		links := []chain.Link{
 			cloudcontrol.NewCloudControlGet(),
 			NewPropertyFilterLink(cfg.WithArg("property", "PublicIp")),
-		)
+		}
+
+		// Check if EC2 security enrichment is enabled (checked lazily when chain is constructed)
+		if args := a.Args(); args != nil {
+			if val, exists := args["enable-ec2-security-enrichment"]; exists {
+				if boolVal, ok := val.(bool); ok && boolVal {
+					links = append(links, NewEC2SecurityEnrichmentLink())
+				}
+			}
+		}
+
+		return chain.NewChain(links...)
 	}
 
 	resourceMap["AWS::SNS::Topic"] = func() chain.Chain {
@@ -139,6 +152,14 @@ func (a *AwsPublicResources) ResourceMap() map[string]func() chain.Chain {
 		return chain.NewChain(
 			cloudcontrol.NewCloudControlGet(),
 			NewAwsResourcePolicyChecker(),
+		)
+	}
+
+	resourceMap["AWS::Cognito::UserPool"] = func() chain.Chain {
+		return chain.NewChain(
+			cloudcontrol.NewCloudControlGet(),
+			cognito.NewCognitoUserPoolGetDomains(),
+			NewPropertyFilterLink(cfg.WithArg("property", "SelfSignupEnabled")),
 		)
 	}
 

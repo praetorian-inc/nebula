@@ -29,9 +29,13 @@ The Nebula IAM module uses **two distinct relationship types**:
 ## Quick Start
 
 1. **[Overview](overview.md)** - Introduction to Azure IAM edge concepts and HAS_PERMISSION vs CAN_ESCALATE distinction
-2. **[HAS_PERMISSION Edges](HAS_PERMISSION/)** - Current state representation (role assignments, permissions, grants)
-3. **[CAN_ESCALATE Edges](CAN_ESCALATE/)** - Escalation analysis (attack vectors, privilege escalation paths)
-4. **[Analysis Examples](analysis-examples.md)** - Query examples for attack path analysis
+2. **[Data Schema](data-schema.md)** - Complete JSON contract between collector and importer
+3. **[Node Types](NODES/)** - All 11 node types (users, groups, resources, managed identities, hierarchy)
+4. **[CONTAINS Edges](CONTAINS/)** - Hierarchy and containment relationships (8 sub-types)
+5. **[OWNS Edges](OWNS/)** - Ownership relationships (3 sub-types)
+6. **[HAS_PERMISSION Edges](HAS_PERMISSION/)** - Current state representation (role assignments, permissions, grants)
+7. **[CAN_ESCALATE Edges](CAN_ESCALATE/)** - Escalation analysis (attack vectors, privilege escalation paths)
+8. **[Analysis Examples](analysis-examples.md)** - Query examples for attack path analysis
 
 ### Documentation by Edge Type
 

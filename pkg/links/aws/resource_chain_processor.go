@@ -85,7 +85,7 @@ func (p *AWSResourceChainProcessor) extractEssentialArgs(args map[string]any) ma
 		"max-events":       true, // Max log events for CloudWatch Logs resources
 		"max-streams":      true, // Max log streams for CloudWatch Logs resources
 		"newest-first":     true, // Fetch newest events first for CloudWatch Logs resources
-		"scan-mode":        true, // S3 secrets scan mode (critical, high, all)
+		"scan-mode":        true, // S3 secrets scan mode (critical or all)
 	}
 
 	essential := make(map[string]any)

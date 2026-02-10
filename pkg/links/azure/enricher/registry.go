@@ -37,7 +37,8 @@ func NewEnrichmentRegistry() *EnrichmentRegistry {
 			&RedisCacheEnricher{},
 			&SQLServerEnricher{},
 			&DatabaseAllowAzureServicesEnricher{},
-
+			&MySQLFlexibleServerEnricher{},
+			&PostgreSQLFlexibleServerEnricher{},
 			// Web & Application Services
 			&VirtualMachineEnricher{},
 			&AppServiceEnricher{},

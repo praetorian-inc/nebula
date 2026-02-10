@@ -44,14 +44,21 @@ func NewEnrichmentRegistry() *EnrichmentRegistry {
 			&AppServiceEnricher{},
 			&ContainerRegistryEnricher{},
 			&AKSClusterEnricher{},
+			&FunctionAppEnricher{},
 
 			// Messaging & Event Services
 			&EventHubEnricher{},
 			&ServiceBusEnricher{},
 			&EventGridEnricher{},
 
+			// Search Services
+			&SearchServiceEnricher{},
+
 			// Security Services
 			&KeyVaultEnricher{},
+
+			// Cognitive & AI Services
+			&CognitiveServicesEnricher{},
 
 			// API Management
 			&APIManagementEnricher{},

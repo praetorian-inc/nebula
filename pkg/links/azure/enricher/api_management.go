@@ -18,7 +18,8 @@ import (
 type APIManagementEnricher struct{}
 
 func (a *APIManagementEnricher) CanEnrich(templateID string) bool {
-	return templateID == "apim_cross_tenant_signup_bypass"
+	return templateID == "apim_cross_tenant_signup_bypass" ||
+	       templateID == "api_management_public_access"
 }
 
 // signupPayload represents the test payload for the signup API

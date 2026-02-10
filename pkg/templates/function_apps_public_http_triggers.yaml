@@ -1,0 +1,59 @@
+id: function_apps_public_http_triggers
+name: "Publicly Accessible Azure Function Apps with HTTP Triggers"
+description: "Detects Azure Function Apps with public network access and HTTP-triggered functions accessible from the internet"
+severity: Medium-High
+category: ["Public Access", "arg-scan"]
+reportability: Automatic
+triageNotes: |
+  Potential Risk:
+  - Public HTTP endpoints allow anonymous function invocation
+  - Potential for code execution through malicious input
+  - Function key exposure through URL parameters or headers
+  - Resource exhaustion through excessive function calls
+  - Information disclosure through function responses or error messages
+  - Business impact: unauthorized code execution, data exposure, unexpected charges
+
+  Triage Guidance:
+  - This finding confirms network-level accessibility from internet
+  - Does NOT confirm code execution vulnerability (depends on function logic)
+  - Manual verification required:
+    1. Check function endpoint: curl -v https://<app>.azurewebsites.net/api/<function>
+    2. Test function invocation: curl -X POST https://<app>.azurewebsites.net/api/<function>
+    3. Review Authorization level (Anonymous, Function, Admin)
+    4. Check if function keys are properly protected
+    5. Review ipSecurityRestrictions configuration
+  - Consider: Does this function need internet access? Should it require authentication?
+
+  Remediation Considerations:
+  - Disable public network access (requires VNet integration and private endpoints)
+  - Restrict HTTP triggers to authenticated users (set Authorization level to 'Function' or 'Admin')
+  - Implement IP allowlisting via ipSecurityRestrictions
+  - Use managed identity for cross-service authentication
+  - Rotate function keys regularly
+  - Implement API Management in front of functions for rate limiting
+  - Use Azure API key secrets instead of embedding in code
+
+references:
+  - https://learn.microsoft.com/en-us/azure/azure-functions/functions-networking-options
+  - https://learn.microsoft.com/en-us/azure/azure-functions/functions-bindings-http-webhook
+  - https://learn.microsoft.com/en-us/azure/azure-functions/security-concepts
+
+query: |
+  resources
+  | where type =~ 'Microsoft.Web/sites'
+  | where kind contains 'functionapp'
+  | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'enabled'))
+  | extend ipSecurityRestrictions = properties.siteConfig.ipSecurityRestrictions
+  | where publicNetworkAccess != 'disabled'
+  | extend hasRestrictions = isnotnull(ipSecurityRestrictions) and array_length(ipSecurityRestrictions) > 0
+  | where hasRestrictions == false
+  | project
+      id,
+      name,
+      type,
+      location,
+      resourceGroup,
+      subscriptionId,
+      publicNetworkAccess,
+      hasIpRestrictions = hasRestrictions,
+      defaultHostName = properties.defaultHostName

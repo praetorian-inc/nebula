@@ -11,6 +11,7 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	jtypes "github.com/praetorian-inc/janus-framework/pkg/types"
 	"github.com/praetorian-inc/nebula/internal/helpers"
+	"github.com/praetorian-inc/nebula/pkg/links/azure/blob"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	"github.com/praetorian-inc/nebula/pkg/outputters"
 	"github.com/praetorian-inc/tabularium/pkg/model/model"
@@ -32,6 +33,7 @@ func (l *AzureFindSecretsLink) Params() []cfg.Param {
 		options.AzureSubscription(),
 		options.AzureResourceSecretsTypes(),
 		options.AzureWorkerCount(),
+		cfg.NewParam[string]("scan-mode", "Scan mode: critical (default) or all").WithDefault("critical"),
 	}
 }
 
@@ -51,6 +53,7 @@ func (l *AzureFindSecretsLink) SupportedResourceTypes() []model.CloudResourceTyp
 		model.AzureAutomationRunbooks,
 		model.AzureAutomationVariables,
 		model.AzureAutomationJobs,
+		model.CloudResourceType("Microsoft.Storage/storageAccounts"),
 	}
 }
 
@@ -121,6 +124,15 @@ func (l *AzureFindSecretsLink) Process(input any) error {
 		if err != nil {
 			l.Logger.Debug("Failed to process automation account, skipping", "automation_id", resource.Key, "error", err.Error())
 			return nil // Don't fail the whole chain
+		}
+		return err
+	case "microsoft.storage/storageaccounts", "Microsoft.Storage/storageAccounts":
+		l.Logger.Debug("Processing Storage Account for blob secrets", "storage_id", resource.Key)
+		err := l.processStorageAccountBlobs(resource)
+		if err != nil {
+			l.Logger.Debug("Failed to process storage account blobs, skipping",
+				"storage_id", resource.Key, "error", err.Error())
+			return nil
 		}
 		return err
 	default:
@@ -536,4 +548,17 @@ func (l *AzureFindSecretsLink) parseAutomationAccountResourceID(resourceID strin
 	}
 
 	return resourceGroup, automationAccountName, nil
+}
+
+func (l *AzureFindSecretsLink) processStorageAccountBlobs(resource *model.AzureResource) error {
+	scanMode := "critical"
+	if mode, err := cfg.As[string](l.Arg("scan-mode")); err == nil && mode != "" {
+		scanMode = mode
+	}
+
+	scanner := blob.NewAzureBlobSecrets(scanMode)
+	return scanner.Process(l.Context(), resource, func(input any) error {
+		l.Send(input)
+		return nil
+	})
 }

@@ -3997,7 +3997,7 @@ func (l *Neo4jImporterLink) getValidatedPrivilegedRoleAdminQuery() string {
 	`
 }
 
-// getValidatedPrivilegedAuthAdminQuery - Privileged Authentication Administrator can reset ANY user's auth
+// getValidatedPrivilegedAuthAdminQuery - Privileged Authentication Administrator can reset ANY user's passwords
 func (l *Neo4jImporterLink) getValidatedPrivilegedAuthAdminQuery() string {
 	return `
 	MATCH (user:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
@@ -4006,8 +4006,8 @@ func (l *Neo4jImporterLink) getValidatedPrivilegedAuthAdminQuery() string {
 	MATCH (escalate_target:Resource)
 	WHERE escalate_target <> user AND toLower(escalate_target.resourceType) = "microsoft.directoryservices/users"
 	WITH DISTINCT user, escalate_target, perm
-	MERGE (user)-[r:CAN_ESCALATE {method: "PrivilegedAuthenticationAdmin"}]->(escalate_target)
-	ON CREATE SET r.method = "PrivilegedAuthenticationAdmin",
+	MERGE (user)-[r:CAN_ESCALATE {method: "PasswordResetViaPrivilegedAuthAdmin"}]->(escalate_target)
+	ON CREATE SET r.method = "PasswordResetViaPrivilegedAuthAdmin",
 	    r.condition = "Can reset passwords and authentication methods for ANY user including Global Administrators",
 	    r.category = "DirectoryRole",
 	    r.sourcePermission = perm.source,
@@ -4088,12 +4088,36 @@ func (l *Neo4jImporterLink) getValidatedUserAdminQuery() string {
 	WHERE perm.roleName = "User Administrator" OR perm.templateId = "fe930be7-5e62-47db-91af-98c3a49a38b1"
 	WITH user, perm
 	MATCH (escalate_target:Resource)
-	WHERE escalate_target <> user AND toLower(escalate_target.resourceType) = "microsoft.directoryservices/users"
-	  AND NOT EXISTS { (escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource) WHERE toLower(admin_perm.roleName) CONTAINS "administrator" }
+	WHERE escalate_target <> user
+	  AND toLower(escalate_target.resourceType) = "microsoft.directoryservices/users"
+	  AND (
+	    // Non-admin users (no role assignments)
+	    NOT EXISTS { (escalate_target)-[:HAS_PERMISSION]->(:Resource) }
+	    OR
+	    // OR users with ONLY roles from the allowed whitelist
+	    (
+	      EXISTS { (escalate_target)-[:HAS_PERMISSION]->(:Resource) }
+	      AND NOT EXISTS {
+	        (escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource)
+	        WHERE NOT admin_perm.templateId IN [
+	          "88d8e3e3-8f55-4a1e-953a-9b9898b8876b",  // Directory Readers
+	          "fdd7a751-b60b-444a-984c-02652fe8fa1c",  // Groups Administrator
+	          "95e79109-95c0-4d8e-aee3-d01accf2d47b",  // Guest Inviter
+	          "729827e3-9c14-49f7-bb1b-9608f156bbb8",  // Helpdesk Administrator
+	          "790c1fb9-7f7d-4f88-86a1-ef1f95c05c1b",  // Message Center Reader
+	          "966707d0-3269-4727-9be2-8c3a10f19b9d",  // Password Administrator
+	          "4a5d8f65-41da-4de4-8968-e035b65339cf",  // Reports Reader
+	          "fe930be7-5e62-47db-91af-98c3a49a38b1",  // User Administrator
+	          "27460883-1df1-4691-b032-3b79643e5e63",  // User Experience Success Manager
+	          "75934031-6c7e-415a-99d7-48dbd49e875e"   // Usage Summary Reports Reader
+	        ]
+	      }
+	    )
+	  )
 	WITH DISTINCT user, escalate_target, perm
-	MERGE (user)-[r:CAN_ESCALATE {method: "UserAdministrator"}]->(escalate_target)
-	ON CREATE SET r.method = "UserAdministrator",
-	    r.condition = "Can reset passwords and modify properties of non-administrator users",
+	MERGE (user)-[r:CAN_ESCALATE {method: "PasswordResetViaUserAdmin"}]->(escalate_target)
+	ON CREATE SET r.method = "PasswordResetViaUserAdmin",
+	    r.condition = "Can reset passwords and modify properties of users with no admin roles or specific low-privilege admin roles (Directory Readers, Groups Administrator, Guest Inviter, Helpdesk Administrator, Message Center Reader, Password Administrator, Reports Reader, User Administrator, User Experience Success Manager, Usage Summary Reports Reader)",
 	    r.category = "DirectoryRole",
 	    r.sourcePermission = perm.source,
 	    r.viaGroup = perm.viaGroupName,
@@ -4103,19 +4127,37 @@ func (l *Neo4jImporterLink) getValidatedUserAdminQuery() string {
 	`
 }
 
-// getValidatedAuthenticationAdminQuery - Authentication Administrator for non-admin users
+// getValidatedAuthenticationAdminQuery - Authentication Administrator for non-admin users and specific low-privilege admin roles
 func (l *Neo4jImporterLink) getValidatedAuthenticationAdminQuery() string {
 	return `
 	MATCH (user:Resource)-[perm:HAS_PERMISSION]->(target:Resource)
 	WHERE perm.roleName = "Authentication Administrator" OR perm.templateId = "c4e39bd9-1100-46d3-8c65-fb160da0071f"
 	WITH user, perm
 	MATCH (escalate_target:Resource)
-	WHERE escalate_target <> user AND toLower(escalate_target.resourceType) = "microsoft.directoryservices/users"
-	  AND NOT EXISTS { (escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource) WHERE toLower(admin_perm.roleName) CONTAINS "administrator" }
+	WHERE escalate_target <> user
+	  AND toLower(escalate_target.resourceType) = "microsoft.directoryservices/users"
+	  AND (
+	    // Non-admin users (no role assignments)
+	    NOT EXISTS { (escalate_target)-[:HAS_PERMISSION]->(:Resource) }
+	    OR
+	    // OR users with ONLY roles from the allowed whitelist
+	    (
+	      EXISTS { (escalate_target)-[:HAS_PERMISSION]->(:Resource) }
+	      AND NOT EXISTS {
+	        (escalate_target)-[admin_perm:HAS_PERMISSION]->(:Resource)
+	        WHERE NOT admin_perm.templateId IN [
+	          "c4e39bd9-1100-46d3-8c65-fb160da0071f",  // Authentication Administrator (self)
+	          "88d8e3e3-8f55-4a1e-953a-9b9898b8876b",  // Directory Readers
+	          "95e79109-95c0-4d8e-aee3-d01accf2d47b",  // Guest Inviter
+	          "790c1fb9-7f7d-4f88-86a1-ef1f95c05c1b"   // Message Center Reader
+	        ]
+	      }
+	    )
+	  )
 	WITH DISTINCT user, escalate_target, perm
-	MERGE (user)-[r:CAN_ESCALATE {method: "AuthenticationAdmin"}]->(escalate_target)
-	ON CREATE SET r.method = "AuthenticationAdmin",
-	    r.condition = "Can reset authentication methods including passwords and MFA for non-administrator users",
+	MERGE (user)-[r:CAN_ESCALATE {method: "PasswordResetViaAuthAdmin"}]->(escalate_target)
+	ON CREATE SET r.method = "PasswordResetViaAuthAdmin",
+	    r.condition = "Can reset passwords and authentication methods for users with no admin roles or specific low-privilege admin roles (Authentication Administrator, Directory Readers, Guest Inviter, Message Center Reader)",
 	    r.category = "DirectoryRole",
 	    r.sourcePermission = perm.source,
 	    r.viaGroup = perm.viaGroupName,

@@ -42,11 +42,10 @@ query: |
   resources
   | where type =~ 'Microsoft.Web/sites'
   | where kind contains 'functionapp'
-  | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'enabled'))
-  | extend ipSecurityRestrictions = properties.siteConfig.ipSecurityRestrictions
-  | where publicNetworkAccess != 'disabled'
-  | extend hasRestrictions = isnotnull(ipSecurityRestrictions) and array_length(ipSecurityRestrictions) > 0
-  | where hasRestrictions == false
+  | extend publicNetworkAccess = coalesce(properties.publicNetworkAccess, 'Enabled')
+  | where publicNetworkAccess != 'Disabled'
+  | extend hasIpRestrictions = (isnotnull(properties.siteConfig.ipSecurityRestrictions) and array_length(properties.siteConfig.ipSecurityRestrictions) > 0)
+  | where hasIpRestrictions == false
   | project
       id,
       name,
@@ -55,5 +54,5 @@ query: |
       resourceGroup,
       subscriptionId,
       publicNetworkAccess,
-      hasIpRestrictions = hasRestrictions,
+      hasIpRestrictions,
       defaultHostName = properties.defaultHostName

@@ -48,6 +48,7 @@ func NewEnrichmentRegistry() *EnrichmentRegistry {
 			&EventHubEnricher{},
 			&ServiceBusEnricher{},
 			&EventGridEnricher{},
+			&EventGridSubscriptionEnricher{},
 
 			// Security Services
 			&KeyVaultEnricher{},

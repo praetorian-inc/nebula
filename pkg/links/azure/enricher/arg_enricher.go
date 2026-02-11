@@ -40,7 +40,7 @@ func (l *ARGEnrichmentLink) Process(data outputters.NamedOutputData) error {
 		l.Logger.Debug("Failed to get disable-enrichment parameter, defaulting to enabled", "error", err)
 		disableEnrichment = false
 	}
-	
+
 	if disableEnrichment {
 		l.Logger.Debug("Enrichment disabled, skipping resource enrichment")
 		l.Send(data)

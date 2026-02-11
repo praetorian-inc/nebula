@@ -86,7 +86,7 @@ func (l *LogicAppsEnricher) testAccessEndpoint(client *http.Client, endpoint str
 func (l *LogicAppsEnricher) testTriggerDiscovery(client *http.Client, endpoint string) Command {
 	// Ensure endpoint doesn't end with slash
 	endpoint = strings.TrimSuffix(endpoint, "/")
-	triggersURL := fmt.Sprintf("%s/triggers", endpoint)
+	triggersURL := fmt.Sprintf("%s/triggers?api-version=2016-10-01", endpoint)
 
 	cmd := Command{
 		Command:                   fmt.Sprintf("curl -i '%s' --max-time 10", triggersURL),

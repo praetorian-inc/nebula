@@ -50,7 +50,7 @@ func (i *IoTHubEnricher) Enrich(ctx context.Context, resource *model.AzureResour
 	mainEndpointCommand := i.testMainEndpoint(client, iotHubEndpoint)
 	commands = append(commands, mainEndpointCommand)
 
-	// Test 2: Test device registry endpoint
+	// Test 2: Test device registry endpoint with api-version
 	registryAPICommand := i.testRegistryAPI(client, iotHubEndpoint)
 	commands = append(commands, registryAPICommand)
 
@@ -89,12 +89,12 @@ func (i *IoTHubEnricher) testRegistryAPI(client *http.Client, endpoint string) C
 		cleanEndpoint = strings.TrimSuffix(cleanEndpoint, ":443")
 	}
 
-	registryURL := fmt.Sprintf("%s/devices", cleanEndpoint)
+	registryURL := fmt.Sprintf("%s/devices?api-version=2021-04-12", cleanEndpoint)
 
 	cmd := Command{
-		Command:                   fmt.Sprintf("curl -i '%s' --max-time 10", registryURL),
+		Command:                   fmt.Sprintf("curl -i '%s/devices?api-version=2021-04-12' --max-time 10", cleanEndpoint),
 		Description:               "Test IoT Hub device registry endpoint (enumeration test)",
-		ExpectedOutputDescription: "401 = requires API key | 403 = forbidden | 404 = not found | 200 = devices accessible",
+		ExpectedOutputDescription: "401 = authentication required (endpoint publicly reachable) | 403 = forbidden | 404 = not found | 200 = devices accessible",
 	}
 
 	resp, err := client.Get(registryURL)

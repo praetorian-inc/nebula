@@ -46,9 +46,6 @@ func (l *LogicAppsEnricher) Enrich(ctx context.Context, resource *model.AzureRes
 		},
 	}
 
-	accessEndpointCommand := l.testAccessEndpoint(client, accessEndpoint)
-	commands = append(commands, accessEndpointCommand)
-
 	triggerDiscoveryCommand := l.testTriggerDiscovery(client, accessEndpoint)
 	commands = append(commands, triggerDiscoveryCommand)
 
@@ -56,30 +53,6 @@ func (l *LogicAppsEnricher) Enrich(ctx context.Context, resource *model.AzureRes
 	commands = append(commands, cliCommand)
 
 	return commands
-}
-
-// testAccessEndpoint tests if the Logic App access endpoint is reachable
-func (l *LogicAppsEnricher) testAccessEndpoint(client *http.Client, endpoint string) Command {
-	cmd := Command{
-		Command:                   fmt.Sprintf("curl -i '%s' --max-time 10", endpoint),
-		Description:               "Test if Logic App access endpoint is reachable",
-		ExpectedOutputDescription: "401/403 = endpoint exists but requires auth | 404 = not found | 200 = accessible",
-	}
-
-	resp, err := client.Get(endpoint)
-	if err != nil {
-		cmd.Error = err.Error()
-		cmd.ActualOutput = fmt.Sprintf("Request failed: %s", err.Error())
-		cmd.ExitCode = -1
-		return cmd
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1000))
-	cmd.ActualOutput = fmt.Sprintf("Status: %d, Body preview: %s", resp.StatusCode, truncateString(string(body), 500))
-	cmd.ExitCode = resp.StatusCode
-
-	return cmd
 }
 
 // testTriggerDiscovery tests the Logic App trigger discovery endpoint

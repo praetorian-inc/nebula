@@ -46,39 +46,11 @@ func (i *IoTHubEnricher) Enrich(ctx context.Context, resource *model.AzureResour
 		},
 	}
 
-	// Test 1: Check main endpoint accessibility
-	mainEndpointCommand := i.testMainEndpoint(client, iotHubEndpoint)
-	commands = append(commands, mainEndpointCommand)
-
-	// Test 2: Test device registry endpoint with api-version
+	// Test device registry endpoint with api-version
 	registryAPICommand := i.testRegistryAPI(client, iotHubEndpoint)
 	commands = append(commands, registryAPICommand)
 
 	return commands
-}
-
-// testMainEndpoint tests if the IoT Hub endpoint is accessible
-func (i *IoTHubEnricher) testMainEndpoint(client *http.Client, endpoint string) Command {
-	cmd := Command{
-		Command:                   fmt.Sprintf("curl -i '%s' --max-time 10", endpoint),
-		Description:               "Test if IoT Hub endpoint is accessible",
-		ExpectedOutputDescription: "401 = requires authentication | 403 = forbidden | 404 = not found | 200 = accessible without key (unusual)",
-	}
-
-	resp, err := client.Get(endpoint)
-	if err != nil {
-		cmd.Error = err.Error()
-		cmd.ActualOutput = fmt.Sprintf("Request failed: %s", err.Error())
-		cmd.ExitCode = -1
-		return cmd
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1000))
-	cmd.ActualOutput = fmt.Sprintf("Status: %d, Body preview: %s", resp.StatusCode, truncateString(string(body), 500))
-	cmd.ExitCode = resp.StatusCode
-
-	return cmd
 }
 
 // testRegistryAPI tests the device registry API endpoint

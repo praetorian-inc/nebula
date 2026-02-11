@@ -49,6 +49,6 @@ query: |
       location,
       resourceGroup,
       subscriptionId,
-      kind = properties.kind,
+      serviceKind = properties.kind,
       publicNetworkAccess,
       networkAclsDefaultAction = defaultAction

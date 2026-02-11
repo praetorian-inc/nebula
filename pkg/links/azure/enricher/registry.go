@@ -51,6 +51,10 @@ func NewEnrichmentRegistry() *EnrichmentRegistry {
 			&ServiceBusEnricher{},
 			&EventGridEnricher{},
 
+			// Tier 3: IoT & Event Services
+			&IoTHubEnricher{},
+			&EventGridTopicsEnricher{},
+			&NotificationHubsEnricher{},
 			// Search Services
 			&SearchServiceEnricher{},
 

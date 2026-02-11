@@ -42,6 +42,8 @@ query: |
   | extend publicNetworkAccess = coalesce(properties.publicNetworkAccess, 'Enabled')
   | extend sku = sku.name
   | extend discoveryUrl = properties.discoveryUrl
+  | extend notebookFqdn = properties.notebookInfo.fqdn
+  | extend isPrivateLinkEnabled = properties.notebookInfo.isPrivateLinkEnabled
   | where publicNetworkAccess != 'Disabled'
   | project
       id,
@@ -51,5 +53,7 @@ query: |
       publicNetworkAccess,
       sku,
       discoveryUrl,
+      notebookFqdn,
+      isPrivateLinkEnabled,
       subscriptionId,
       resourceGroup

@@ -20,11 +20,15 @@ func (m *MLWorkspaceEnricher) CanEnrich(templateID string) bool {
 func (m *MLWorkspaceEnricher) Enrich(ctx context.Context, resource *model.AzureResource) []Command {
 	commands := []Command{}
 
-	// Extract discovery URL from properties
+	// Extract discovery URL and notebook FQDN from properties
 	discoveryURL := ""
+	notebookFqdn := ""
 	if resource.Properties != nil {
 		if discoveryProp, ok := resource.Properties["discoveryUrl"].(string); ok && discoveryProp != "" {
 			discoveryURL = discoveryProp
+		}
+		if nbFqdn, ok := resource.Properties["notebookFqdn"].(string); ok && nbFqdn != "" {
+			notebookFqdn = nbFqdn
 		}
 	}
 
@@ -55,8 +59,11 @@ func (m *MLWorkspaceEnricher) Enrich(ctx context.Context, resource *model.AzureR
 	discoveryEndpointCommand := m.testDiscoveryEndpoint(client, discoveryURL)
 	commands = append(commands, discoveryEndpointCommand)
 
-	workspaceAPICommand := m.testWorkspaceAPI(client, resource.Region)
-	commands = append(commands, workspaceAPICommand)
+	// Test workspace-specific notebook endpoint if available
+	if notebookFqdn != "" {
+		notebookCommand := m.testNotebookEndpoint(client, notebookFqdn)
+		commands = append(commands, notebookCommand)
+	}
 
 	cliCommand := m.cliCommand(resource.Name, resource.ResourceGroup)
 	commands = append(commands, cliCommand)
@@ -88,25 +95,17 @@ func (m *MLWorkspaceEnricher) testDiscoveryEndpoint(client *http.Client, discove
 	return cmd
 }
 
-// testWorkspaceAPI tests the ML workspace REST API discovery endpoint
-func (m *MLWorkspaceEnricher) testWorkspaceAPI(client *http.Client, region string) Command {
-	if region == "" {
-		return Command{
-			Command:      "",
-			Description:  "Test ML workspace REST API discovery endpoint",
-			ActualOutput: "Error: region is empty, cannot construct API URL",
-		}
-	}
-
-	apiURL := fmt.Sprintf("https://%s.api.azureml.ms/discovery", region)
+// testNotebookEndpoint tests if the workspace-specific notebook endpoint is accessible
+func (m *MLWorkspaceEnricher) testNotebookEndpoint(client *http.Client, notebookFqdn string) Command {
+	notebookURL := fmt.Sprintf("https://%s", notebookFqdn)
 
 	cmd := Command{
-		Command:                   fmt.Sprintf("curl -i 'https://%s.api.azureml.ms/discovery' --max-time 10", region),
-		Description:               "Test ML workspace REST API discovery endpoint",
-		ExpectedOutputDescription: "401 = requires authentication | 403 = forbidden | 200 = API accessible",
+		Command:                   fmt.Sprintf("curl -i '%s' --max-time 10", notebookURL),
+		Description:               "Test workspace-specific notebook endpoint accessibility",
+		ExpectedOutputDescription: "401 = authentication required (workspace publicly reachable) | 403 = forbidden | Timeout = not publicly accessible",
 	}
 
-	resp, err := client.Get(apiURL)
+	resp, err := client.Get(notebookURL)
 	if err != nil {
 		cmd.Error = err.Error()
 		cmd.ActualOutput = fmt.Sprintf("Request failed: %s", err.Error())
@@ -115,8 +114,8 @@ func (m *MLWorkspaceEnricher) testWorkspaceAPI(client *http.Client, region strin
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1500))
-	cmd.ActualOutput = fmt.Sprintf("Status: %d, Body preview: %s", resp.StatusCode, truncateString(string(body), 800))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1000))
+	cmd.ActualOutput = fmt.Sprintf("Status: %d, Body preview: %s", resp.StatusCode, truncateString(string(body), 500))
 	cmd.ExitCode = resp.StatusCode
 
 	return cmd

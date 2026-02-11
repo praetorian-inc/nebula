@@ -61,7 +61,7 @@ func (s *SearchServiceEnricher) testMainEndpoint(client *http.Client, endpoint s
 	cmd := Command{
 		Command:                   fmt.Sprintf("curl -i '%s' --max-time 10", endpoint),
 		Description:               "Test if Search Service endpoint is accessible",
-		ExpectedOutputDescription: "401 = requires API key | 403 = forbidden | 404 = not found | 200 = accessible without key (unusual)",
+		ExpectedOutputDescription: "401/403 = authentication required (API key needed) | 404 = not found | 200 = accessible without key (unusual)",
 	}
 
 	resp, err := client.Get(endpoint)
@@ -87,7 +87,7 @@ func (s *SearchServiceEnricher) testSearchAPI(client *http.Client, endpoint stri
 	cmd := Command{
 		Command:                   fmt.Sprintf("curl -i '%s' --max-time 10", indexesURL),
 		Description:               "Test Search Service indexes endpoint (enumeration test)",
-		ExpectedOutputDescription: "401 = requires API key | 403 = forbidden | 404 = not found | 200 = indexes accessible",
+		ExpectedOutputDescription: "401/403 = authentication required (API key needed) | 404 = not found | 200 = indexes accessible",
 	}
 
 	resp, err := client.Get(indexesURL)

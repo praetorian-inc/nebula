@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/praetorian-inc/tabularium/pkg/model/model"
@@ -46,6 +47,14 @@ func (s *SynapseEnricher) Enrich(ctx context.Context, resource *model.AzureResou
 		}
 	}
 
+
+	// Ensure endpoints have https:// scheme (ARG returns hostnames without scheme)
+	if devEndpoint != "" && !strings.HasPrefix(devEndpoint, "https://") && !strings.HasPrefix(devEndpoint, "http://") {
+		devEndpoint = "https://" + devEndpoint
+	}
+	if sqlEndpoint != "" && !strings.HasPrefix(sqlEndpoint, "https://") && !strings.HasPrefix(sqlEndpoint, "http://") {
+		sqlEndpoint = "https://" + sqlEndpoint
+	}
 	// Construct dev endpoint if not found in properties
 	if devEndpoint == "" {
 		devEndpoint = fmt.Sprintf("https://%s.dev.azuresynapse.net", workspaceName)

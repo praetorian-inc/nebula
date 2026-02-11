@@ -20,30 +20,12 @@ func (m *MLWorkspaceEnricher) CanEnrich(templateID string) bool {
 func (m *MLWorkspaceEnricher) Enrich(ctx context.Context, resource *model.AzureResource) []Command {
 	commands := []Command{}
 
-	// Extract discovery URL and notebook FQDN from properties
-	discoveryURL := ""
+	// Extract workspace-specific notebook FQDN from properties
 	notebookFqdn := ""
 	if resource.Properties != nil {
-		if discoveryProp, ok := resource.Properties["discoveryUrl"].(string); ok && discoveryProp != "" {
-			discoveryURL = discoveryProp
-		}
 		if nbFqdn, ok := resource.Properties["notebookFqdn"].(string); ok && nbFqdn != "" {
 			notebookFqdn = nbFqdn
 		}
-	}
-
-	// If no discovery URL in properties, construct from region
-	if discoveryURL == "" {
-		region := resource.Region
-		if region == "" {
-			commands = append(commands, Command{
-				Command:      "",
-				Description:  "Missing ML workspace region",
-				ActualOutput: "Error: ML workspace region is empty",
-			})
-			return commands
-		}
-		discoveryURL = fmt.Sprintf("https://%s.api.azureml.ms", region)
 	}
 
 	client := &http.Client{
@@ -56,10 +38,7 @@ func (m *MLWorkspaceEnricher) Enrich(ctx context.Context, resource *model.AzureR
 		},
 	}
 
-	discoveryEndpointCommand := m.testDiscoveryEndpoint(client, discoveryURL)
-	commands = append(commands, discoveryEndpointCommand)
-
-	// Test workspace-specific notebook endpoint if available
+	// Test workspace-specific notebook endpoint
 	if notebookFqdn != "" {
 		notebookCommand := m.testNotebookEndpoint(client, notebookFqdn)
 		commands = append(commands, notebookCommand)
@@ -69,30 +48,6 @@ func (m *MLWorkspaceEnricher) Enrich(ctx context.Context, resource *model.AzureR
 	commands = append(commands, cliCommand)
 
 	return commands
-}
-
-// testDiscoveryEndpoint tests if the ML workspace discovery endpoint is accessible
-func (m *MLWorkspaceEnricher) testDiscoveryEndpoint(client *http.Client, discoveryURL string) Command {
-	cmd := Command{
-		Command:                   fmt.Sprintf("curl -i '%s' --max-time 10", discoveryURL),
-		Description:               "Test if ML workspace discovery endpoint is accessible",
-		ExpectedOutputDescription: "401 = requires Azure AD authentication | 403 = forbidden | 200 = discovery accessible",
-	}
-
-	resp, err := client.Get(discoveryURL)
-	if err != nil {
-		cmd.Error = err.Error()
-		cmd.ActualOutput = fmt.Sprintf("Request failed: %s", err.Error())
-		cmd.ExitCode = -1
-		return cmd
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1000))
-	cmd.ActualOutput = fmt.Sprintf("Status: %d, Body preview: %s", resp.StatusCode, truncateString(string(body), 500))
-	cmd.ExitCode = resp.StatusCode
-
-	return cmd
 }
 
 // testNotebookEndpoint tests if the workspace-specific notebook endpoint is accessible

@@ -25,9 +25,9 @@ query: |
       resources
       | where type =~ 'Microsoft.Network/networkInterfaces'
       | extend nicId = id
-      | extend subnetId = tostring(properties.ipConfigurations[0].properties.subnet.id)
       | extend nicNsgId = tostring(properties.networkSecurityGroup.id)
       | mv-expand ipconfig = properties.ipConfigurations
+      | extend subnetId = tostring(ipconfig.properties.subnet.id)
       | extend publicIPId = tostring(ipconfig.properties.publicIPAddress.id)
       | extend privateIP = tostring(ipconfig.properties.privateIPAddress)
       | where isnotempty(publicIPId)

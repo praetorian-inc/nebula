@@ -66,6 +66,21 @@ func NewEnrichmentRegistry() *EnrichmentRegistry {
 
 			// API Management
 			&APIManagementEnricher{},
+
+			// Tier 4A: Configuration & Container Services
+			&AppConfigurationEnricher{},
+			&DataExplorerEnricher{},
+			&ContainerInstancesEnricher{},
+			&DatabricksEnricher{},
+
+			// Tier 4B: Analytics & ML Services
+			&SynapseEnricher{},
+			&MLWorkspaceEnricher{},
+
+			// Tier 4C: Apps & Networking Services
+			&ContainerAppsEnricher{},
+			&LogicAppsEnricher{},
+			&ApplicationGatewayEnricher{},
 		},
 	}
 }

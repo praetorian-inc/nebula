@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/appservice/armappservice"
 	"github.com/praetorian-inc/tabularium/pkg/model/model"
 )
 
@@ -15,10 +17,115 @@ import (
 type AppServiceEnricher struct{}
 
 func (a *AppServiceEnricher) CanEnrich(templateID string) bool {
-	return templateID == "app_services_public_access"
+	return templateID == "app_services_public_access" || templateID == "app_service_remote_debugging_enabled"
 }
 
 func (a *AppServiceEnricher) Enrich(ctx context.Context, resource *model.AzureResource) []Command {
+	// Get template ID to determine which enrichment to perform
+	templateID, _ := resource.Properties["templateID"].(string)
+
+	// Route to appropriate enrichment logic
+	switch templateID {
+	case "app_service_remote_debugging_enabled":
+		return a.checkRemoteDebugging(ctx, resource)
+	case "app_services_public_access":
+		return a.checkPublicAccess(ctx, resource)
+	default:
+		return []Command{}
+	}
+}
+
+// checkRemoteDebugging checks if remote debugging is enabled via Azure API
+func (a *AppServiceEnricher) checkRemoteDebugging(ctx context.Context, resource *model.AzureResource) []Command {
+	appServiceName := resource.Name
+	subscriptionID := resource.AccountRef
+	resourceGroupName := resource.ResourceGroup
+
+	if appServiceName == "" || subscriptionID == "" || resourceGroupName == "" {
+		return []Command{{
+			Command:      "",
+			Description:  "Check App Service remote debugging configuration",
+			ActualOutput: "Error: App Service name, subscription ID, or resource group is missing",
+			ExitCode:     1,
+		}}
+	}
+
+	// Get Azure credentials
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	if err != nil {
+		return []Command{{
+			Command:      "",
+			Description:  "Check App Service remote debugging configuration",
+			ActualOutput: fmt.Sprintf("Error getting Azure credentials: %s", err.Error()),
+			ExitCode:     1,
+		}}
+	}
+
+	// Create App Service client
+	webAppsClient, err := armappservice.NewWebAppsClient(subscriptionID, cred, nil)
+	if err != nil {
+		return []Command{{
+			Command:      "",
+			Description:  "Check App Service remote debugging configuration",
+			ActualOutput: fmt.Sprintf("Error creating WebApps client: %s", err.Error()),
+			ExitCode:     1,
+		}}
+	}
+
+	// Get site configuration
+	siteConfig, err := webAppsClient.GetConfiguration(ctx, resourceGroupName, appServiceName, nil)
+	if err != nil {
+		return []Command{{
+			Command:      fmt.Sprintf("az webapp config show --resource-group %s --name %s --query remoteDebuggingEnabled", resourceGroupName, appServiceName),
+			Description:  "Check App Service remote debugging configuration",
+			ActualOutput: fmt.Sprintf("Error getting site configuration: %s", err.Error()),
+			ExitCode:     1,
+		}}
+	}
+
+	// Check if remote debugging is enabled
+	remoteDebuggingEnabled := false
+	remoteDebuggingVersion := "N/A"
+
+	if siteConfig.Properties != nil && siteConfig.Properties.RemoteDebuggingEnabled != nil {
+		remoteDebuggingEnabled = *siteConfig.Properties.RemoteDebuggingEnabled
+		if siteConfig.Properties.RemoteDebuggingVersion != nil {
+			remoteDebuggingVersion = *siteConfig.Properties.RemoteDebuggingVersion
+		}
+	}
+
+	// If remote debugging is NOT enabled, this resource should not be flagged
+	// Return a command indicating it's secure
+	if !remoteDebuggingEnabled {
+		return []Command{{
+			Command:      fmt.Sprintf("az webapp config show --resource-group %s --name %s --query remoteDebuggingEnabled", resourceGroupName, appServiceName),
+			Description:  "Verify remote debugging is disabled",
+			ActualOutput: fmt.Sprintf("✓ Remote debugging is DISABLED (secure configuration)"),
+			ExitCode:     0,
+		}}
+	}
+
+	// Remote debugging IS enabled - this is a vulnerability
+	return []Command{
+		{
+			Command:                   fmt.Sprintf("az webapp config show --resource-group %s --name %s --query '{remoteDebuggingEnabled: remoteDebuggingEnabled, remoteDebuggingVersion: remoteDebuggingVersion}'", resourceGroupName, appServiceName),
+			Description:               "Check remote debugging configuration",
+			ExpectedOutputDescription: "remoteDebuggingEnabled should be false for production environments",
+			ActualOutput:              fmt.Sprintf("✗ VULNERABLE: Remote debugging is ENABLED\nVersion: %s\nThis provides RCE-equivalent access to the application", remoteDebuggingVersion),
+			ExitCode:                  1,
+		},
+		{
+			Command:                   fmt.Sprintf("az webapp config set --resource-group %s --name %s --remote-debugging-enabled false", resourceGroupName, appServiceName),
+			Description:               "Remediation: Disable remote debugging",
+			ExpectedOutputDescription: "Remote debugging will be disabled",
+			ActualOutput:              "Run this command to disable remote debugging",
+			ExitCode:                  0,
+		},
+	}
+}
+
+// checkPublicAccess performs HTTP testing for publicly accessible App Services
+func (a *AppServiceEnricher) checkPublicAccess(ctx context.Context, resource *model.AzureResource) []Command {
 	commands := []Command{}
 
 	// Extract App Service name

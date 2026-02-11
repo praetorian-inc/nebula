@@ -1,7 +1,7 @@
 id: databricks_public_access
 name: "Publicly Accessible Databricks Workspace"
 description: "Detects Azure Databricks workspaces with public network access enabled"
-severity: High
+severity: Medium
 category: ["Public Access", "arg-scan"]
 reportability: Automatic
 triageNotes: |

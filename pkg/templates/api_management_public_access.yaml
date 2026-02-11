@@ -1,7 +1,7 @@
 id: api_management_public_access
 name: "Publicly Accessible Azure API Management Gateway"
 description: "Detects Azure API Management instances not protected by internal virtual network isolation (publicNetworkAccess enabled and virtualNetworkType != 'Internal')"
-severity: High
+severity: Medium
 category: ["Public Access", "arg-scan"]
 reportability: Automatic
 triageNotes: |

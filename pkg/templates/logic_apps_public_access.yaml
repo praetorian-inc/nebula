@@ -1,7 +1,7 @@
 id: logic_apps_public_access
 name: "Publicly Accessible Logic Apps"
 description: "Detects Azure Logic Apps workflows without access control restrictions on triggers"
-severity: High
+severity: Medium
 category: ["Public Access", "arg-scan"]
 reportability: Automatic
 triageNotes: |

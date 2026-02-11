@@ -1,7 +1,7 @@
 id: data_explorer_public_access
 name: "Publicly Accessible Data Explorer (Kusto) Cluster"
 description: "Detects Azure Data Explorer (Kusto) clusters with public network access enabled"
-severity: High
+severity: Medium
 category: ["Public Access", "arg-scan"]
 reportability: Automatic
 triageNotes: |

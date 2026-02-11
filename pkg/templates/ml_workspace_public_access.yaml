@@ -1,7 +1,7 @@
 id: ml_workspace_public_access
 name: "Publicly Accessible Machine Learning Workspace"
 description: "Detects Azure Machine Learning workspaces with public network access enabled"
-severity: High
+severity: Medium
 category: ["Public Access", "arg-scan"]
 reportability: Automatic
 triageNotes: |

@@ -1,7 +1,7 @@
 id: iot_hub_public_access
 name: "Publicly Accessible IoT Hub"
 description: "Detects Azure IoT Hub instances with public network access enabled and no IP restrictions"
-severity: High
+severity: Medium
 category: ["Public Access", "arg-scan"]
 reportability: Automatic
 triageNotes: |

@@ -1,7 +1,7 @@
 id: container_apps_public_access
 name: "Publicly Accessible Container Apps"
 description: "Detects Azure Container Apps with external ingress enabled"
-severity: High
+severity: Medium
 category: ["Public Access", "arg-scan"]
 reportability: Automatic
 triageNotes: |

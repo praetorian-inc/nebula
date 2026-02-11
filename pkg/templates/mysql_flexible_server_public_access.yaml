@@ -1,7 +1,7 @@
 id: mysql_flexible_server_public_access
 name: "Publicly Accessible Azure Database for MySQL Flexible Server"
 description: "Detects Azure Database for MySQL Flexible Servers with public network access enabled (no VNet integration)"
-severity: High
+severity: Medium
 category: ["Public Access", "arg-scan"]
 reportability: Automatic
 triageNotes: |

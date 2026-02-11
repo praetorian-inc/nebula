@@ -1,7 +1,7 @@
 id: function_apps_public_http_triggers
 name: "Publicly Accessible Azure Function Apps with HTTP Triggers"
 description: "Detects Azure Function Apps with public network access and HTTP-triggered functions accessible from the internet"
-severity: Medium-High
+severity: Medium
 category: ["Public Access", "arg-scan"]
 reportability: Automatic
 triageNotes: |

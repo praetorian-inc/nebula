@@ -1,7 +1,7 @@
 id: synapse_public_access
 name: "Publicly Accessible Synapse Analytics Workspace"
 description: "Detects Azure Synapse Analytics workspaces with public network access enabled"
-severity: High
+severity: Medium
 category: ["Public Access", "arg-scan"]
 reportability: Automatic
 triageNotes: |

@@ -2,7 +2,7 @@ id: load_balancers_public
 name: Publicly Accessible Load Balancers
 description: Identifies Azure Load Balancers with public IP addresses and their backend configurations
 category: ["Public Access", "arg-scan"]
-severity: High
+severity: Medium
 reportability: Automatic
 triageNotes: |
   This finding shows publicly accessible Azure Load Balancers and their configurations:

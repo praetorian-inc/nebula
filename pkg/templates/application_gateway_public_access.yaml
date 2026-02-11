@@ -1,7 +1,7 @@
 id: application_gateway_public_access
 name: "Publicly Accessible Application Gateway"
 description: "Detects Azure Application Gateways with public IP frontend configurations"
-severity: High
+severity: Medium
 category: ["Public Access", "arg-scan"]
 reportability: Automatic
 triageNotes: |

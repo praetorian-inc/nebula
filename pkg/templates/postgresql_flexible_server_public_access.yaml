@@ -1,7 +1,7 @@
 id: postgresql_flexible_server_public_access
 name: "Publicly Accessible Azure Database for PostgreSQL Flexible Server"
 description: "Detects Azure Database for PostgreSQL Flexible Servers with public network access enabled (no VNet integration)"
-severity: High
+severity: Medium
 category: ["Public Access", "arg-scan"]
 reportability: Automatic
 triageNotes: |

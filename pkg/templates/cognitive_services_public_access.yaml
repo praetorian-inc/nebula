@@ -1,7 +1,7 @@
 id: cognitive_services_public_access
 name: "Publicly Accessible Azure Cognitive Services / OpenAI API"
 description: "Detects Azure Cognitive Services accounts with public network access enabled and defaultAction set to 'allow' in network ACLs"
-severity: High
+severity: Medium
 category: ["Public Access", "arg-scan"]
 reportability: Automatic
 triageNotes: |

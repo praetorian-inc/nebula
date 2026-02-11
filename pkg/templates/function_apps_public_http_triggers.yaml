@@ -42,8 +42,8 @@ query: |
   resources
   | where type =~ 'Microsoft.Web/sites'
   | where kind contains 'functionapp'
-  | extend publicNetworkAccess = coalesce(properties.publicNetworkAccess, 'Enabled')
-  | where publicNetworkAccess != 'Disabled'
+  | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'enabled'))
+  | where publicNetworkAccess != 'disabled'
   | extend hasIpRestrictions = (isnotnull(properties.siteConfig.ipSecurityRestrictions) and array_length(properties.siteConfig.ipSecurityRestrictions) > 0)
   | where hasIpRestrictions == false
   | project

@@ -43,10 +43,10 @@ references:
 query: |
   resources
   | where type =~ 'Microsoft.ApiManagement/service'
-  | extend publicNetworkAccess = coalesce(properties.publicNetworkAccess, 'Enabled')
-  | extend virtualNetworkType = coalesce(properties.virtualNetworkType, 'None')
-  | where publicNetworkAccess != 'Disabled'
-  | where virtualNetworkType != 'Internal'
+  | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'enabled'))
+  | extend virtualNetworkType = tolower(coalesce(properties.virtualNetworkType, 'none'))
+  | where publicNetworkAccess != 'disabled'
+  | where virtualNetworkType != 'internal'
   | project
       id,
       name,

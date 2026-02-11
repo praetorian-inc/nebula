@@ -38,9 +38,9 @@ references:
 query: |
   resources
   | where type =~ 'Microsoft.Search/searchServices'
-  | extend publicNetworkAccess = coalesce(properties.publicNetworkAccess, 'Enabled')
+  | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'enabled'))
   | extend hasNetworkRules = isnotnull(properties.networkRuleSet) and isnotnull(properties.networkRuleSet.ipRules)
-  | where publicNetworkAccess != 'Disabled'
+  | where publicNetworkAccess != 'disabled'
   | where hasNetworkRules == false or array_length(properties.networkRuleSet.ipRules) == 0
   | project
       id,

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -211,13 +210,4 @@ func (a *AppServiceEnricher) checkPublicAccess(ctx context.Context, resource *mo
 	commands = append(commands, scmCommand)
 
 	return commands
-}
-
-// Helper function to extract domain from URL
-func extractDomain(urlStr string) string {
-	parsedURL, err := url.Parse(urlStr)
-	if err != nil {
-		return urlStr
-	}
-	return parsedURL.Host
 }

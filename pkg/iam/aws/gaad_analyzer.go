@@ -81,6 +81,9 @@ func (ga *GaadAnalyzer) AnalyzePrincipalPermissions() (*PermissionsSummary, erro
 	// Wait for all workers to finish
 	evalWg.Wait()
 
+	// Post-processing: add synthetic edges for "create-then-use" attack patterns
+	applyCreateThenUseEdges(summary)
+
 	return summary, nil
 }
 

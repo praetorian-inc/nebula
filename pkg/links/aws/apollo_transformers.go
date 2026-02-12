@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -118,9 +119,11 @@ func TransformRoleDLToAWSResource(role *types.RoleDL) (*model.AWSResource, error
 	}
 
 	// Add assume role policy document if available
-	// Note: AssumeRolePolicyDocument is a types.Policy, convert to string representation
+	// Serialize to JSON string so enrichment queries can extract trusted services
 	if role.AssumeRolePolicyDocument.Statement != nil {
-		properties["assumeRolePolicyDocument"] = "present" // Could serialize if needed
+		if docBytes, err := json.Marshal(role.AssumeRolePolicyDocument); err == nil {
+			properties["assumeRolePolicyDoc"] = string(docBytes)
+		}
 	}
 
 	awsResource, err := model.NewAWSResource(

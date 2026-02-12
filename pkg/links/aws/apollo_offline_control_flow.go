@@ -46,10 +46,11 @@ func (a *AwsApolloOfflineControlFlow) Initialize() error {
 		return err
 	}
 
-	// Initialize PolicyData with empty resources slice
+	// Initialize PolicyData with empty resources slice and ResourcePolicies map
 	resources := make([]types.EnrichedResourceDescription, 0)
 	a.pd = &iam.PolicyData{
-		Resources: &resources,
+		Resources:        &resources,
+		ResourcePolicies: make(map[string]*types.Policy),
 	}
 
 	// Initialize Neo4j connection
@@ -84,6 +85,10 @@ func (a *AwsApolloOfflineControlFlow) Process(input any) error {
 	if a.pd.Gaad == nil {
 		return fmt.Errorf("GAAD data is required but not loaded")
 	}
+
+	// Add resource policies (trust policies) from GAAD roles
+	// This must be called after GAAD is loaded to populate ResourcePolicies map
+	a.pd.AddResourcePolicies()
 
 	// Perform the same analysis as online Apollo
 	analyzer := iam.NewGaadAnalyzer(a.pd)

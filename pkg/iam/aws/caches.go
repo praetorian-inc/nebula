@@ -124,6 +124,7 @@ func addServicesToResourceCache() {
 		"glue.amazonaws.com",
 		"sagemaker.amazonaws.com",
 		"apigateway.amazonaws.com",
+		"autoscaling.amazonaws.com",
 	}
 
 	// Add services to the cache

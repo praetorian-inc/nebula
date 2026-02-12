@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -25,6 +26,16 @@ type SSMIAMRelationship struct {
 // Label returns the sanitized permission as the relationship label
 func (s *SSMIAMRelationship) Label() string {
 	return s.IAMRelationship.Label()
+}
+
+// GetSSMDocumentRestrictions returns the list of allowed SSM document ARNs/patterns
+func (s *SSMIAMRelationship) GetSSMDocumentRestrictions() []string {
+	return s.SSMDocumentRestrictions
+}
+
+// GetAllowsShellExecution returns whether shell execution is allowed
+func (s *SSMIAMRelationship) GetAllowsShellExecution() bool {
+	return s.AllowsShellExecution
 }
 
 // NewSSMIAMRelationship creates a new SSM IAM relationship with document restrictions
@@ -79,6 +90,41 @@ func TransformUserDLToAWSResource(user *types.UserDL) (*model.AWSResource, error
 		properties["createDate"] = user.CreateDate
 	}
 
+	// Add attached managed policies for enrichment queries
+	if len(user.AttachedManagedPolicies) > 0 {
+		policyArns := make([]string, len(user.AttachedManagedPolicies))
+		for i, p := range user.AttachedManagedPolicies {
+			policyArns[i] = p.PolicyArn
+		}
+		properties["attachedManagedPolicies"] = policyArns
+	}
+
+	// Add group list
+	if len(user.GroupList) > 0 {
+		properties["groupList"] = user.GroupList
+	}
+
+	// Add user inline policies as JSON for enrichment
+	if len(user.UserPolicyList) > 0 {
+		if jsonBytes, err := json.Marshal(user.UserPolicyList); err == nil {
+			properties["userPolicyList"] = string(jsonBytes)
+		}
+	}
+
+	// Add permissions boundary if present (check by PolicyArn since it's a struct, not pointer)
+	if user.PermissionsBoundary.PolicyArn != "" {
+		if jsonBytes, err := json.Marshal(user.PermissionsBoundary); err == nil {
+			properties["permissionsBoundary"] = string(jsonBytes)
+		}
+	}
+
+	// Add tags if present
+	if len(user.Tags) > 0 {
+		if jsonBytes, err := json.Marshal(user.Tags); err == nil {
+			properties["tags"] = string(jsonBytes)
+		}
+	}
+
 	awsResource, err := model.NewAWSResource(
 		user.Arn,
 		accountID,
@@ -117,10 +163,49 @@ func TransformRoleDLToAWSResource(role *types.RoleDL) (*model.AWSResource, error
 		properties["createDate"] = role.CreateDate
 	}
 
-	// Add assume role policy document if available
-	// Note: AssumeRolePolicyDocument is a types.Policy, convert to string representation
+	// Add assume role policy document as JSON string for enrichment queries
+	// Queries like extract_role_trusted_services.yaml use CONTAINS on this field
 	if role.AssumeRolePolicyDocument.Statement != nil {
-		properties["assumeRolePolicyDocument"] = "present" // Could serialize if needed
+		if jsonBytes, err := json.Marshal(role.AssumeRolePolicyDocument); err == nil {
+			properties["assumeRolePolicyDoc"] = string(jsonBytes)
+		}
+	}
+
+	// Add attached managed policies for enrichment queries
+	if len(role.AttachedManagedPolicies) > 0 {
+		policyArns := make([]string, len(role.AttachedManagedPolicies))
+		for i, p := range role.AttachedManagedPolicies {
+			policyArns[i] = p.PolicyArn
+		}
+		properties["attachedManagedPolicies"] = policyArns
+	}
+
+	// Add role inline policies as JSON for enrichment
+	if len(role.RolePolicyList) > 0 {
+		if jsonBytes, err := json.Marshal(role.RolePolicyList); err == nil {
+			properties["rolePolicyList"] = string(jsonBytes)
+		}
+	}
+
+	// Add instance profile list as JSON
+	if len(role.InstanceProfileList) > 0 {
+		if jsonBytes, err := json.Marshal(role.InstanceProfileList); err == nil {
+			properties["instanceProfileList"] = string(jsonBytes)
+		}
+	}
+
+	// Add permissions boundary if present (check by PolicyArn since it's a struct, not pointer)
+	if role.PermissionsBoundary.PolicyArn != "" {
+		if jsonBytes, err := json.Marshal(role.PermissionsBoundary); err == nil {
+			properties["permissionsBoundary"] = string(jsonBytes)
+		}
+	}
+
+	// Add tags if present
+	if len(role.Tags) > 0 {
+		if jsonBytes, err := json.Marshal(role.Tags); err == nil {
+			properties["tags"] = string(jsonBytes)
+		}
 	}
 
 	awsResource, err := model.NewAWSResource(
@@ -161,6 +246,22 @@ func TransformGroupDLToAWSResource(group *types.GroupDL) (*model.AWSResource, er
 		properties["createDate"] = group.CreateDate
 	}
 
+	// Add attached managed policies for enrichment queries
+	if len(group.AttachedManagedPolicies) > 0 {
+		policyArns := make([]string, len(group.AttachedManagedPolicies))
+		for i, p := range group.AttachedManagedPolicies {
+			policyArns[i] = p.PolicyArn
+		}
+		properties["attachedManagedPolicies"] = policyArns
+	}
+
+	// Add group inline policies as JSON for enrichment
+	if len(group.GroupPolicyList) > 0 {
+		if jsonBytes, err := json.Marshal(group.GroupPolicyList); err == nil {
+			properties["groupPolicyList"] = string(jsonBytes)
+		}
+	}
+
 	awsResource, err := model.NewAWSResource(
 		group.Arn,
 		accountID,
@@ -192,8 +293,17 @@ func TransformERDToAWSResource(erd *types.EnrichedResourceDescription) (*model.A
 				properties[k] = v
 			}
 		} else if propsStr, ok := erd.Properties.(string); ok {
-			// Sometimes properties are stored as JSON strings
-			properties["_raw_properties"] = propsStr
+			// Try to parse JSON string to extract key properties
+			var parsedProps map[string]any
+			if err := json.Unmarshal([]byte(propsStr), &parsedProps); err == nil {
+				// Successfully parsed - extract all properties
+				for k, v := range parsedProps {
+					properties[k] = v
+				}
+			} else {
+				// Failed to parse - store as raw
+				properties["_raw_properties"] = propsStr
+			}
 		} else {
 			properties["_raw_properties"] = erd.Properties
 		}

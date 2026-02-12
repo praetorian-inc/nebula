@@ -380,6 +380,10 @@ func (e *PolicyEvaluator) Evaluate(req *EvaluationRequest) (*EvaluationResult, e
 	resourceAllowed := false
 	explicitPrincipalAllow := false
 
+	// Check if this is an AssumeRole operation on an IAM role (needed for early return check)
+	isAssumeRoleOperation := strings.HasPrefix(req.Action, "sts:AssumeRole") &&
+		strings.Contains(req.Resource, ":role/")
+
 	if e.policyData.ResourcePolicies != nil {
 		if resourcePolicy, exists := e.policyData.ResourcePolicies[req.Resource]; exists {
 			resourceStatements := policyToStatementList(resourcePolicy)
@@ -394,7 +398,9 @@ func (e *PolicyEvaluator) Evaluate(req *EvaluationRequest) (*EvaluationResult, e
 			// Check if principal is explicitly allowed
 			explicitPrincipalAllow = e.hasExplicitPrincipalAllow(resourceStatements, req.Context.PrincipalArn)
 
-			if resourceAllowed && explicitPrincipalAllow && result.PolicyResult.IsAllowed() {
+			// For non-AssumeRole operations, we can early-return if explicitly allowed by resource policy.
+			// For AssumeRole, we MUST also check identity policy, so don't early return.
+			if resourceAllowed && explicitPrincipalAllow && result.PolicyResult.IsAllowed() && !isAssumeRoleOperation {
 				result.Allowed = true
 				result.EvaluationDetails = "Explicitly allowed by resource policy"
 				return result, nil
@@ -415,10 +421,6 @@ func (e *PolicyEvaluator) Evaluate(req *EvaluationRequest) (*EvaluationResult, e
 	// 8. Make final determination based on cross-account status, policy evaluations,
 	//    and special handling for assume role operations
 
-	// Check if this is an AssumeRole operation on an IAM role
-	isAssumeRoleOperation := strings.HasPrefix(req.Action, "sts:AssumeRole") &&
-		strings.Contains(req.Resource, ":role/")
-
 	if result.CrossAccountAccess {
 		if isAssumeRoleOperation {
 			// Special case: For cross-account assume role, the trust policy (resource policy)
@@ -431,12 +433,25 @@ func (e *PolicyEvaluator) Evaluate(req *EvaluationRequest) (*EvaluationResult, e
 			result.EvaluationDetails = "Cross-account access"
 		}
 	} else {
-		// Same account access allows if:
-		// - Principal is explicitly named in resource policy, OR
-		// - Either identity or resource policy allows (when not explicitly named)
-		result.Allowed = explicitPrincipalAllow && result.PolicyResult.hasTypeAllow(EvalTypeResource) ||
-			result.PolicyResult.hasTypeAllow(EvalTypeIdentity)
-		result.EvaluationDetails = "Same-account access"
+		// Same account access
+		if isAssumeRoleOperation {
+			// Special case: AssumeRole ALWAYS requires BOTH:
+			// 1. Identity policy grants sts:AssumeRole permission
+			// 2. Target role's trust policy allows the principal (resourceAllowed)
+			// This is different from other resources where same-account access
+			// can be granted by either identity OR resource policy alone.
+			// Note: resourceAllowed already includes principal matching since
+			// evaluateStatement() only sets ExplicitAllow when principal matches.
+			result.Allowed = result.PolicyResult.hasTypeAllow(EvalTypeIdentity) && resourceAllowed
+			result.EvaluationDetails = "Same-account assume role access"
+		} else {
+			// Normal same-account access allows if:
+			// - Principal is explicitly named in resource policy, OR
+			// - Either identity or resource policy allows (when not explicitly named)
+			result.Allowed = explicitPrincipalAllow && result.PolicyResult.hasTypeAllow(EvalTypeResource) ||
+				result.PolicyResult.hasTypeAllow(EvalTypeIdentity)
+			result.EvaluationDetails = "Same-account access"
+		}
 	}
 
 	// Extract SSM document restrictions for relevant actions

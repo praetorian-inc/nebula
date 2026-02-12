@@ -366,6 +366,14 @@ func (e *EnrichedResourceDescription) GetRoleArn() string {
 		if roleArn, ok := props["RoleARN"].(string); ok {
 			return roleArn
 		}
+	case "AWS::CodeBuild::Project":
+		if role, ok := props["Role"].(string); ok {
+			return role
+		}
+	case "AWS::SageMaker::NotebookInstance":
+		if role, ok := props["Role"].(string); ok {
+			return role
+		}
 	}
 
 	return ""
@@ -389,4 +397,6 @@ var ServiceToResourceType = map[string]string{
 	"kms":            "AWS::KMS::Key",
 	"secretsmanager": "AWS::SecretsManager::Secret",
 	"ssm":            "AWS::SSM::Parameter",
+	"codebuild":      "AWS::CodeBuild::Project",
+	"sagemaker":      "AWS::SageMaker::NotebookInstance",
 }

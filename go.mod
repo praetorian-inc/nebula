@@ -32,6 +32,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/cloudformation v1.57.0
 	github.com/aws/aws-sdk-go-v2/service/cloudfront v1.54.4
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.58.5
+	github.com/aws/aws-sdk-go-v2/service/codebuild v1.68.8
 	github.com/aws/aws-sdk-go-v2/service/cognitoidentity v1.33.18
 	github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.46.3
 	github.com/aws/aws-sdk-go-v2/service/costexplorer v1.38.1
@@ -48,6 +49,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/pinpointsmsvoice v1.24.2
 	github.com/aws/aws-sdk-go-v2/service/route53 v1.58.4
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.66.0
+	github.com/aws/aws-sdk-go-v2/service/sagemaker v1.229.0
 	github.com/aws/aws-sdk-go-v2/service/serverlessapplicationrepository v1.24.2
 	github.com/aws/aws-sdk-go-v2/service/sfn v1.34.11
 	github.com/aws/aws-sdk-go-v2/service/sns v1.33.3
@@ -69,7 +71,7 @@ require (
 	github.com/mpvl/unique v0.0.0-20150818121801-cbe035fff7de
 	github.com/neo4j/neo4j-go-driver/v5 v5.28.1
 	github.com/praetorian-inc/janus-framework v0.0.0-20250918211123-5f90adc9184b
-	github.com/praetorian-inc/konstellation v0.0.0-20251205230404-ed78bd75cfb8
+	github.com/praetorian-inc/konstellation v0.0.0-20260212072608-f4c8dd9702ef
 	github.com/praetorian-inc/tabularium v1.0.132-pre-0-jwh-cloud-relations
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1

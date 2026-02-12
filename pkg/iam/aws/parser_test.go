@@ -195,7 +195,12 @@ func Test_AssumeRole(t *testing.T) {
 	assert.NoError(t, err)
 
 	fr := ps.FullResults()
-	assert.Len(t, fr, 5)
+	// After the AssumeRole trust policy fix, only valid edges are created:
+	// - glue.amazonaws.com can assume acme-glue-role (trust policy allows service principal)
+	// - acme-glue-role CANNOT assume other roles because:
+	//   1. Other roles (acme-sa-role, AcmeBuild) don't have trust policies in GAAD allowing acme-glue-role
+	//   2. AssumeRole requires BOTH identity policy AND trust policy to allow
+	assert.Len(t, fr, 1)
 }
 
 var lambdaCreate = `
@@ -272,7 +277,10 @@ func Test_CreateMapsToService(t *testing.T) {
 	assert.NoError(t, err)
 
 	fr := ps.FullResults()
-	assert.Len(t, fr, 1)
+	// Expected results:
+	// 1. lambda.amazonaws.com can assume LambdaCreationRole (trust policy allows)
+	// 2. LambdaCreationRole can call lambda:CreateFunction on the Lambda function
+	assert.Len(t, fr, 2)
 
 }
 
@@ -312,7 +320,8 @@ func Test_PrivilegeEscalation(t *testing.T) {
   }
 }`
 
-	// Define the low-priv role
+	// Define the low-priv role with sts:AssumeRole permission
+	// This role can escalate privileges by assuming the admin role
 	lowPrivRoleStr := `
 {
   "Path": "/",
@@ -333,7 +342,21 @@ func Test_PrivilegeEscalation(t *testing.T) {
     ]
   },
   "InstanceProfileList": [],
-  "RolePolicyList": [],
+  "RolePolicyList": [
+    {
+      "PolicyName": "AssumeAdminPolicy",
+      "PolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": "sts:AssumeRole",
+            "Resource": "arn:aws:iam::123456789012:role/admin"
+          }
+        ]
+      }
+    }
+  ],
   "AttachedManagedPolicies": [],
   "Tags": [],
   "RoleLastUsed": {}

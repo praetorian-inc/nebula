@@ -23,6 +23,9 @@ func isPrivEscAction(action string) bool {
 }
 
 var privEscActions = []string{
+	"bedrock-agentcore:CreateCodeInterpreter",
+	"bedrock-agentcore:InvokeCodeInterpreter",
+	"bedrock-agentcore:StartCodeInterpreterSession",
 	"cloudformation:CreateChangeSet",
 	"cloudformation:CreateStack",
 	"cloudformation:ExecuteChangeSet",

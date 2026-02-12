@@ -46,6 +46,7 @@ var AzureFindSecrets = chain.NewModule(
 ).WithParams(
 	cfg.NewParam[string]("module-name", "name of the module for dynamic file naming"),
 	cfg.NewParam[string]("category", "category of Azure ARG templates to use"),
+	cfg.NewParam[string]("scan-mode", "Scan mode: critical (default) or all").WithDefault("critical"),
 ).WithConfigs(
 	cfg.WithArg("module-name", "find-secrets"),
 	cfg.WithArg("category", "secrets"),

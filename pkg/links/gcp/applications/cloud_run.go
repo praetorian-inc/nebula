@@ -5,17 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	jtypes "github.com/praetorian-inc/janus-framework/pkg/types"
+	gcperrors "github.com/praetorian-inc/nebula/pkg/gcp/errors"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/base"
+	"github.com/praetorian-inc/nebula/pkg/links/gcp/common"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
-	"github.com/praetorian-inc/nebula/pkg/utils"
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 	"google.golang.org/api/compute/v1"
+	"google.golang.org/api/iam/v1"
 	"google.golang.org/api/run/v2"
 )
 
@@ -72,7 +75,7 @@ func (g *GcpCloudRunServiceInfoLink) Process(serviceName string) error {
 	name := fmt.Sprintf("projects/%s/locations/%s/services/%s", g.ProjectId, g.Region, serviceName)
 	service, err := g.runService.Projects.Locations.Services.Get(name).Do()
 	if err != nil {
-		return utils.HandleGcpError(err, "failed to get Cloud Run service")
+		return common.HandleGcpError(err, "failed to get Cloud Run service")
 	}
 	gcpCloudRunService, err := tab.NewGCPResource(
 		service.Name,                            // resource name
@@ -92,6 +95,7 @@ type GcpCloudRunServiceListLink struct {
 	*base.GcpBaseLink
 	runService    *run.Service
 	regionService *compute.Service
+	iamService    *iam.Service
 }
 
 // creates a link to list all Cloud Run services in a project
@@ -114,6 +118,10 @@ func (g *GcpCloudRunServiceListLink) Initialize() error {
 	if err != nil {
 		return fmt.Errorf("failed to create compute service: %w", err)
 	}
+	g.iamService, err = iam.NewService(context.Background(), g.ClientOptions...)
+	if err != nil {
+		return fmt.Errorf("failed to create iam service: %w", err)
+	}
 	return nil
 }
 
@@ -125,7 +133,7 @@ func (g *GcpCloudRunServiceListLink) Process(resource tab.GCPResource) error {
 	regionsCall := g.regionService.Regions.List(projectId)
 	regionsResp, err := regionsCall.Do()
 	if err != nil {
-		return utils.HandleGcpError(err, "failed to list regions in project")
+		return common.HandleGcpError(err, "failed to list regions in project")
 	}
 	sem := make(chan struct{}, 10)
 	var wg sync.WaitGroup
@@ -140,11 +148,25 @@ func (g *GcpCloudRunServiceListLink) Process(resource tab.GCPResource) error {
 			servicesResp, err := servicesCall.Do()
 			if err == nil && servicesResp != nil {
 				for _, service := range servicesResp.Services {
+					properties := linkPostProcessCloudRunService(service)
+
+					// Check IAM policy for anonymous access
+					policy, policyErr := g.runService.Projects.Locations.Services.GetIamPolicy(service.Name).Do()
+					if policyErr == nil && policy != nil {
+						anonymousInfo := checkCloudRunAnonymousAccess(policy)
+						if anonymousInfo.TotalPublicBindings > 0 {
+							properties["anonymousAccessInfo"] = anonymousInfo
+							properties["riskLevel"] = calculateRiskLevel(anonymousInfo)
+						}
+					} else {
+						slog.Debug("Failed to get IAM policy for Cloud Run service", "service", service.Name, "error", policyErr)
+					}
+
 					gcpCloudRunService, err := tab.NewGCPResource(
-						service.Name,                            // resource name
-						projectId,                               // accountRef (project ID)
-						tab.GCPResourceCloudRunService,          // resource type
-						linkPostProcessCloudRunService(service), // properties
+						service.Name,                   // resource name
+						projectId,                      // accountRef (project ID)
+						tab.GCPResourceCloudRunService, // resource type
+						properties,                     // properties (with anonymous access info)
 					)
 					if err != nil {
 						slog.Error("Failed to create GCP Cloud Run service resource", "error", err, "service", service.Name)
@@ -154,7 +176,11 @@ func (g *GcpCloudRunServiceListLink) Process(resource tab.GCPResource) error {
 					g.Send(gcpCloudRunService)
 				}
 			} else if err != nil {
-				slog.Error("Failed to list Cloud Run services in region", "error", err, "region", regionId)
+				if gcperrors.IsServiceDisabled(err) {
+					slog.Debug("Cloud Run API disabled for project", "project", projectId, "region", regionId)
+				} else {
+					slog.Error("Failed to list Cloud Run services in region", "error", err, "region", regionId)
+				}
 			}
 		}(region.Name)
 	}
@@ -192,7 +218,7 @@ func (g *GcpCloudRunSecretsLink) Process(input tab.GCPResource) error {
 	}
 	svc, err := g.runService.Projects.Locations.Services.Get(input.Name).Do()
 	if err != nil {
-		return utils.HandleGcpError(err, "failed to get cloud run service for secrets extraction")
+		return common.HandleGcpError(err, "failed to get cloud run service for secrets extraction")
 	}
 	if svc.Template != nil {
 		for _, container := range svc.Template.Containers {
@@ -243,6 +269,106 @@ func (g *GcpCloudRunSecretsLink) Process(input tab.GCPResource) error {
 // ------------------------------------------------------------------------------------------------
 // helper functions
 
+// AnonymousAccessInfo represents anonymous access configuration for a resource
+type AnonymousAccessInfo struct {
+	HasAllUsers                bool     `json:"hasAllUsers"`
+	HasAllAuthenticatedUsers   bool     `json:"hasAllAuthenticatedUsers"`
+	AllUsersRoles              []string `json:"allUsersRoles"`
+	AllAuthenticatedUsersRoles []string `json:"allAuthenticatedUsersRoles"`
+	TotalPublicBindings        int      `json:"totalPublicBindings"`
+	AccessMethods              []string `json:"accessMethods"`
+}
+
+// checkCloudRunAnonymousAccess checks if a Cloud Run service has anonymous access via IAM
+func checkCloudRunAnonymousAccess(policy *run.GoogleIamV1Policy) AnonymousAccessInfo {
+	info := AnonymousAccessInfo{
+		AllUsersRoles:              []string{},
+		AllAuthenticatedUsersRoles: []string{},
+		AccessMethods:              []string{},
+	}
+
+	if policy == nil || len(policy.Bindings) == 0 {
+		return info
+	}
+
+	for _, binding := range policy.Bindings {
+		for _, member := range binding.Members {
+			if member == "allUsers" {
+				info.HasAllUsers = true
+				info.AllUsersRoles = append(info.AllUsersRoles, binding.Role)
+				info.TotalPublicBindings++
+			} else if member == "allAuthenticatedUsers" {
+				info.HasAllAuthenticatedUsers = true
+				info.AllAuthenticatedUsersRoles = append(info.AllAuthenticatedUsersRoles, binding.Role)
+				info.TotalPublicBindings++
+			}
+		}
+	}
+
+	if info.TotalPublicBindings > 0 {
+		info.AccessMethods = append(info.AccessMethods, "IAM")
+	}
+
+	return info
+}
+
+// calculateRiskLevel determines risk level based on anonymous access info
+func calculateRiskLevel(info AnonymousAccessInfo) string {
+	if info.HasAllUsers {
+		return "critical"
+	} else if info.HasAllAuthenticatedUsers {
+		return "high"
+	}
+	return "low"
+}
+
+// isGen2CloudFunction checks if a Cloud Run service is actually a Gen 2 Cloud Function
+// Gen 2 functions are deployed as Cloud Run services but have cloudfunctions.net URLs
+// or the goog-managed-by: cloudfunctions label
+func isGen2CloudFunction(service *run.GoogleCloudRunV2Service) bool {
+	// Check for cloudfunctions.net URL (match host, not arbitrary substring)
+	for _, urlStr := range service.Urls {
+		if u, err := url.Parse(urlStr); err == nil {
+			// Check if host ends with .cloudfunctions.net
+			if strings.HasSuffix(u.Host, ".cloudfunctions.net") {
+				return true
+			}
+		}
+	}
+
+	// Check for goog-managed-by label
+	if service.Labels != nil {
+		if service.Labels["goog-managed-by"] == "cloudfunctions" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// extractGen2FunctionName extracts the function name from a Gen 2 Cloud Function's cloudfunctions.net URL
+func extractGen2FunctionName(service *run.GoogleCloudRunV2Service) string {
+	for _, urlStr := range service.Urls {
+		if u, err := url.Parse(urlStr); err == nil {
+			if strings.HasSuffix(u.Host, ".cloudfunctions.net") {
+				// URL format: https://REGION-PROJECT.cloudfunctions.net/FUNCTION_NAME
+				// Path is /FUNCTION_NAME, trim leading and trailing slashes
+				path := strings.Trim(u.Path, "/")
+				// Query params are already handled by url.Parse
+				if path != "" {
+					return path
+				}
+			}
+		}
+	}
+	// Fallback to service name (last segment)
+	parts := strings.Split(service.Name, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return ""
+}
+
 func linkPostProcessCloudRunService(service *run.GoogleCloudRunV2Service) map[string]any {
 	properties := map[string]any{
 		"name":      service.Name,
@@ -251,6 +377,13 @@ func linkPostProcessCloudRunService(service *run.GoogleCloudRunV2Service) map[st
 	}
 	properties["uid"] = service.Annotations["cloud.googleapis.com/uid"]
 	properties["publicURLs"] = service.Urls
+
+	// Detect if this is a Gen 2 Cloud Function
+	if isGen2CloudFunction(service) {
+		properties["isGen2CloudFunction"] = true
+		properties["functionName"] = extractGen2FunctionName(service)
+	}
+
 	if service.Template != nil {
 		properties["serviceAccountName"] = service.Template.ServiceAccount
 		if len(service.Template.Containers) > 0 {

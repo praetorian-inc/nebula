@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"strconv"
 	"strings"
 
@@ -16,10 +15,11 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	jtypes "github.com/praetorian-inc/janus-framework/pkg/types"
 	"github.com/praetorian-inc/nebula/pkg/links/gcp/base"
+	"github.com/praetorian-inc/nebula/pkg/links/gcp/common"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
-	"github.com/praetorian-inc/nebula/pkg/utils"
 	tab "github.com/praetorian-inc/tabularium/pkg/model/model"
 	"google.golang.org/api/cloudfunctions/v1"
+	"google.golang.org/api/storage/v1"
 )
 
 // FILE INFO:
@@ -75,7 +75,7 @@ func (g *GcpFunctionInfoLink) Process(functionName string) error {
 	functionPath := fmt.Sprintf("projects/%s/locations/%s/functions/%s", g.ProjectId, g.Region, functionName)
 	function, err := g.functionsService.Projects.Locations.Functions.Get(functionPath).Do()
 	if err != nil {
-		return utils.HandleGcpError(err, "failed to get function")
+		return common.HandleGcpError(err, "failed to get function")
 	}
 	gcpFunction, err := tab.NewGCPResource(
 		function.Name,                     // resource name
@@ -124,11 +124,25 @@ func (g *GcpFunctionListLink) Process(resource tab.GCPResource) error {
 	err := listReq.Pages(context.Background(), func(page *cloudfunctions.ListFunctionsResponse) error {
 		for _, function := range page.Functions {
 			slog.Debug("Found function", "function", function.Name)
+			properties := linkPostProcessFunction(function)
+
+			// Check IAM policy for anonymous access
+			policy, policyErr := g.functionsService.Projects.Locations.Functions.GetIamPolicy(function.Name).Do()
+			if policyErr == nil && policy != nil {
+				anonymousInfo := checkFunctionAnonymousAccess(policy)
+				if anonymousInfo.TotalPublicBindings > 0 {
+					properties["anonymousAccessInfo"] = anonymousInfo
+					properties["riskLevel"] = calculateRiskLevel(anonymousInfo)
+				}
+			} else {
+				slog.Debug("Failed to get IAM policy for function", "function", function.Name, "error", policyErr)
+			}
+
 			gcpFunction, err := tab.NewGCPResource(
-				function.Name,                     // resource name
-				resource.Name,                     // accountRef (project ID)
-				tab.GCPResourceFunction,           // resource type
-				linkPostProcessFunction(function), // properties
+				function.Name,           // resource name
+				resource.Name,           // accountRef (project ID)
+				tab.GCPResourceFunction, // resource type
+				properties,              // properties (with anonymous access info)
 			)
 			if err != nil {
 				slog.Error("Failed to create GCP function resource", "error", err, "function", function.Name)
@@ -139,12 +153,13 @@ func (g *GcpFunctionListLink) Process(resource tab.GCPResource) error {
 		}
 		return nil
 	})
-	return utils.HandleGcpError(err, "failed to list functions in location")
+	return common.HandleGcpError(err, "failed to list functions in location")
 }
 
 type GcpFunctionSecretsLink struct {
 	*base.GcpBaseLink
 	functionsService *cloudfunctions.Service
+	storageService   *storage.Service
 }
 
 // creates a link to scan cloud function for secrets
@@ -163,6 +178,10 @@ func (g *GcpFunctionSecretsLink) Initialize() error {
 	if err != nil {
 		return fmt.Errorf("failed to create cloud functions service: %w", err)
 	}
+	g.storageService, err = storage.NewService(context.Background(), g.ClientOptions...)
+	if err != nil {
+		return fmt.Errorf("failed to create storage service: %w", err)
+	}
 	return nil
 }
 
@@ -172,7 +191,7 @@ func (g *GcpFunctionSecretsLink) Process(input tab.GCPResource) error {
 	}
 	fn, err := g.functionsService.Projects.Locations.Functions.Get(input.Name).Do()
 	if err != nil {
-		return utils.HandleGcpError(err, "failed to get cloud function for secrets extraction")
+		return common.HandleGcpError(err, "failed to get cloud function for secrets extraction")
 	}
 	if len(fn.EnvironmentVariables) > 0 {
 		if content, err := json.Marshal(fn.EnvironmentVariables); err == nil {
@@ -188,23 +207,34 @@ func (g *GcpFunctionSecretsLink) Process(input tab.GCPResource) error {
 			})
 		}
 	}
-	if fn.SourceArchiveUrl != "" {
-		if err := g.scanFunctionSourceCode(fn.SourceArchiveUrl, input); err != nil {
+	// Check both SourceArchiveUrl and SourceUploadUrl
+	sourceURL := fn.SourceArchiveUrl
+	if sourceURL == "" {
+		sourceURL = fn.SourceUploadUrl
+	}
+	if sourceURL != "" {
+		if err := g.scanFunctionSourceCode(sourceURL, input); err != nil {
 			slog.Error("Failed to scan function source code", "error", err, "function", input.Name)
 		}
 	}
 	return nil
 }
 
-func (g *GcpFunctionSecretsLink) scanFunctionSourceCode(sourceArchiveUrl string, input tab.GCPResource) error {
-	resp, err := http.Get(sourceArchiveUrl)
+func (g *GcpFunctionSecretsLink) scanFunctionSourceCode(sourceURL string, input tab.GCPResource) error {
+	// Parse GCS URL: https://storage.googleapis.com/BUCKET/OBJECT
+	bucket, object, err := parseGCSURL(sourceURL)
+	if err != nil {
+		return fmt.Errorf("failed to parse GCS URL: %w", err)
+	}
+
+	// Use authenticated GCS download
+	getReq := g.storageService.Objects.Get(bucket, object)
+	resp, err := getReq.Download()
 	if err != nil {
 		return fmt.Errorf("failed to download source archive: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to download source archive: status %d", resp.StatusCode)
-	}
+
 	archiveData, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read archive data: %w", err)
@@ -274,6 +304,62 @@ func (g *GcpFunctionSecretsLink) isSkippableFile(filename string) bool {
 
 // ------------------------------------------------------------------------------------------------
 // helper functions
+
+// checkFunctionAnonymousAccess checks if a Cloud Function has anonymous access via IAM
+func checkFunctionAnonymousAccess(policy *cloudfunctions.Policy) AnonymousAccessInfo {
+	info := AnonymousAccessInfo{
+		AllUsersRoles:              []string{},
+		AllAuthenticatedUsersRoles: []string{},
+		AccessMethods:              []string{},
+	}
+
+	if policy == nil || len(policy.Bindings) == 0 {
+		return info
+	}
+
+	for _, binding := range policy.Bindings {
+		for _, member := range binding.Members {
+			if member == "allUsers" {
+				info.HasAllUsers = true
+				info.AllUsersRoles = append(info.AllUsersRoles, binding.Role)
+				info.TotalPublicBindings++
+			} else if member == "allAuthenticatedUsers" {
+				info.HasAllAuthenticatedUsers = true
+				info.AllAuthenticatedUsersRoles = append(info.AllAuthenticatedUsersRoles, binding.Role)
+				info.TotalPublicBindings++
+			}
+		}
+	}
+
+	if info.TotalPublicBindings > 0 {
+		info.AccessMethods = append(info.AccessMethods, "IAM")
+	}
+
+	return info
+}
+
+// parseGCSURL parses a GCS URL and extracts bucket and object names
+// Handles both https://storage.googleapis.com/BUCKET/OBJECT and gs://BUCKET/OBJECT formats
+func parseGCSURL(url string) (bucket, object string, err error) {
+	const httpsPrefix = "https://storage.googleapis.com/"
+	const gsPrefix = "gs://"
+
+	var path string
+	switch {
+	case strings.HasPrefix(url, httpsPrefix):
+		path = strings.TrimPrefix(url, httpsPrefix)
+	case strings.HasPrefix(url, gsPrefix):
+		path = strings.TrimPrefix(url, gsPrefix)
+	default:
+		return "", "", fmt.Errorf("not a GCS URL (expected https://storage.googleapis.com/ or gs://): %s", url)
+	}
+
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid GCS URL format: %s", url)
+	}
+	return parts[0], parts[1], nil
+}
 
 func linkPostProcessFunction(function *cloudfunctions.CloudFunction) map[string]any {
 	properties := map[string]any{

@@ -3,7 +3,7 @@ name: Publicly Accessible Azure Data Factory Instances
 description: Identifies Azure Data Factory instances with public network access enabled. Note that all access to ADF APIs, pipelines, and resources requires authentication via Azure AD or service principals, as anonymous access is not supported.
 severity: Low
 category: ["Public Access", "arg-scan"]
-reportability: Manual Triage 
+reportability: Manual Triage
 triageNotes: |-
   Important Context:
   Azure Data Factory instances do not support anonymous or unauthenticated access for any APIs, pipelines, or resources. All access requires proper authentication through Azure AD, service principals, or managed identities, regardless of public network access settings.
@@ -41,7 +41,6 @@ triageNotes: |-
   - Implement private endpoints for secure connectivity to Data Factory resources
   - Configure IP firewall rules if public access is necessary
   - Review and validate Azure RBAC assignments for Data Factory access
-  
 references:
   - https://learn.microsoft.com/en-us/azure/data-factory/create-self-hosted-integration-runtime
   - https://learn.microsoft.com/en-us/azure/data-factory/data-movement-security-considerations

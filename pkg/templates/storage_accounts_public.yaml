@@ -1,7 +1,7 @@
 id: storage_accounts_public_access
 name: Publicly Accessible Storage Accounts
 description: Detects storage accounts with public network access enabled, default allow action, and blob public access not explicitly disabled (null or true). Manual triage of IP rules are necessary.
-severity: Medium
+severity: High
 category: ["Public Access", "arg-scan"]
 reportability: Automatic
 triageNotes: |

@@ -2,7 +2,7 @@ id: virtual_machines_public_access
 name: Virtual Machines with Public IP
 category: ["Public Access", "arg-scan"]
 description: Detects virtual machines with public IPs and open network security group rules
-severity: Medium
+severity: High
 reportability: Automatic
 triageNotes: |
   Manual review required to assess exposure risk:

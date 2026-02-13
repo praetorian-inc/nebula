@@ -1,71 +1,63 @@
 package lambda
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
-// TestFunctionURLInfo_Structure tests the FunctionURLInfo struct holds alias information
-func TestFunctionURLInfo_Structure(t *testing.T) {
+// TestFunctionURLInfo_JSONRoundTrip tests JSON serialization with struct tags
+func TestFunctionURLInfo_JSONRoundTrip(t *testing.T) {
 	tests := []struct {
-		name     string
-		info     FunctionURLInfo
-		expected FunctionURLInfo
+		name         string
+		info         FunctionURLInfo
+		expectedJSON string
 	}{
 		{
-			name: "base function URL (no qualifier)",
+			name: "base function URL omits empty Qualifier",
 			info: FunctionURLInfo{
 				FunctionName: "my-function",
 				Qualifier:    "",
 				FunctionURL:  "https://abc123.lambda-url.us-east-1.on.aws/",
 				AuthType:     "NONE",
 			},
-			expected: FunctionURLInfo{
-				FunctionName: "my-function",
-				Qualifier:    "",
-				FunctionURL:  "https://abc123.lambda-url.us-east-1.on.aws/",
-				AuthType:     "NONE",
-			},
+			expectedJSON: `{"FunctionName":"my-function","FunctionUrl":"https://abc123.lambda-url.us-east-1.on.aws/","AuthType":"NONE"}`,
 		},
 		{
-			name: "alias function URL",
+			name: "alias function URL includes Qualifier",
 			info: FunctionURLInfo{
 				FunctionName: "my-function",
 				Qualifier:    "prod",
 				FunctionURL:  "https://def456.lambda-url.us-east-1.on.aws/",
 				AuthType:     "NONE",
 			},
-			expected: FunctionURLInfo{
-				FunctionName: "my-function",
-				Qualifier:    "prod",
-				FunctionURL:  "https://def456.lambda-url.us-east-1.on.aws/",
-				AuthType:     "NONE",
-			},
+			expectedJSON: `{"FunctionName":"my-function","Qualifier":"prod","FunctionUrl":"https://def456.lambda-url.us-east-1.on.aws/","AuthType":"NONE"}`,
 		},
 		{
-			name: "alias with IAM auth",
+			name: "AWS_IAM auth type",
 			info: FunctionURLInfo{
 				FunctionName: "secure-function",
 				Qualifier:    "staging",
 				FunctionURL:  "https://ghi789.lambda-url.us-west-2.on.aws/",
 				AuthType:     "AWS_IAM",
 			},
-			expected: FunctionURLInfo{
-				FunctionName: "secure-function",
-				Qualifier:    "staging",
-				FunctionURL:  "https://ghi789.lambda-url.us-west-2.on.aws/",
-				AuthType:     "AWS_IAM",
-			},
+			expectedJSON: `{"FunctionName":"secure-function","Qualifier":"staging","FunctionUrl":"https://ghi789.lambda-url.us-west-2.on.aws/","AuthType":"AWS_IAM"}`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected.FunctionName, tt.info.FunctionName)
-			assert.Equal(t, tt.expected.Qualifier, tt.info.Qualifier)
-			assert.Equal(t, tt.expected.FunctionURL, tt.info.FunctionURL)
-			assert.Equal(t, tt.expected.AuthType, tt.info.AuthType)
+			// Test marshaling
+			jsonBytes, err := json.Marshal(tt.info)
+			assert.NoError(t, err)
+			assert.JSONEq(t, tt.expectedJSON, string(jsonBytes))
+
+			// Test unmarshaling round-trip
+			var unmarshaled FunctionURLInfo
+			err = json.Unmarshal(jsonBytes, &unmarshaled)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.info, unmarshaled)
 		})
 	}
 }
@@ -149,6 +141,53 @@ func TestFunctionURLInfo_QualifiedName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, tt.info.QualifiedName())
+		})
+	}
+}
+
+// TestParseQualifierFromArn tests ARN qualifier extraction
+func TestParseQualifierFromArn(t *testing.T) {
+	tests := []struct {
+		name     string
+		arn      string
+		expected string
+	}{
+		{
+			name:     "base function ARN (7 parts) returns empty",
+			arn:      "arn:aws:lambda:us-east-1:123456789012:function:my-function",
+			expected: "",
+		},
+		{
+			name:     "alias ARN (8 parts) returns alias name",
+			arn:      "arn:aws:lambda:us-east-1:123456789012:function:my-function:prod",
+			expected: "prod",
+		},
+		{
+			name:     "$LATEST ARN returns $LATEST",
+			arn:      "arn:aws:lambda:us-east-1:123456789012:function:my-function:$LATEST",
+			expected: "$LATEST",
+		},
+		{
+			name:     "numeric version ARN returns version number",
+			arn:      "arn:aws:lambda:us-east-1:123456789012:function:my-function:42",
+			expected: "42",
+		},
+		{
+			name:     "malformed ARN (too few parts) returns empty",
+			arn:      "arn:aws:lambda:us-east-1",
+			expected: "",
+		},
+		{
+			name:     "empty string returns empty",
+			arn:      "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := parseQualifierFromArn(tt.arn)
+			assert.Equal(t, tt.expected, actual)
 		})
 	}
 }

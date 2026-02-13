@@ -21,7 +21,10 @@ type FunctionURLInfo struct {
 	AuthType     string `json:"AuthType"` // "NONE" or "AWS_IAM"
 }
 
-// IsAlias returns true if this Function URL is for an alias (not base function or $LATEST)
+// IsAlias returns true if this Function URL is for an alias (not base function or $LATEST).
+// Note: This method treats numeric version qualifiers (e.g., "1", "42") as aliases.
+// In practice, Lambda Function URLs can only be created for $LATEST or aliases,
+// not numeric versions, so this distinction is moot for ListFunctionUrlConfigs results.
 func (f FunctionURLInfo) IsAlias() bool {
 	return f.Qualifier != "" && f.Qualifier != "$LATEST"
 }

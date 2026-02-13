@@ -62,32 +62,36 @@ func (l *AWSLambdaFunctionURL) getAllFunctionURLs(resource *types.EnrichedResour
 
 	lambdaClient := lambda.NewFromConfig(config)
 
-	// Use ListFunctionUrlConfigs - returns all URLs (base + aliases) in one call
+	// Use ListFunctionUrlConfigs with pagination - API returns max 50 items per page
 	// Works with view-only permissions unlike GetFunctionUrlConfig with qualifiers
 	input := &lambda.ListFunctionUrlConfigsInput{
 		FunctionName: aws.String(resource.Identifier),
 	}
 
-	output, err := lambdaClient.ListFunctionUrlConfigs(l.Context(), input)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list function URL configs: %w", err)
-	}
-
+	// Use paginator to handle pagination automatically (API max 50 items per page)
 	var allURLs []FunctionURLInfo
-	for _, urlConfig := range output.FunctionUrlConfigs {
-		if urlConfig.FunctionUrl == nil || urlConfig.FunctionArn == nil {
-			continue
+	paginator := lambda.NewListFunctionUrlConfigsPaginator(lambdaClient, input)
+	for paginator.HasMorePages() {
+		output, err := paginator.NextPage(l.Context())
+		if err != nil {
+			return nil, fmt.Errorf("failed to list function URL configs: %w", err)
 		}
 
-		// Parse qualifier (alias) from ARN: arn:aws:lambda:region:account:function:name[:qualifier]
-		qualifier := parseQualifierFromArn(*urlConfig.FunctionArn)
+		for _, urlConfig := range output.FunctionUrlConfigs {
+			if urlConfig.FunctionUrl == nil || urlConfig.FunctionArn == nil {
+				continue
+			}
 
-		allURLs = append(allURLs, FunctionURLInfo{
-			FunctionName: resource.Identifier,
-			Qualifier:    qualifier,
-			FunctionURL:  *urlConfig.FunctionUrl,
-			AuthType:     string(urlConfig.AuthType),
-		})
+			// Parse qualifier (alias) from ARN: arn:aws:lambda:region:account:function:name[:qualifier]
+			qualifier := parseQualifierFromArn(*urlConfig.FunctionArn)
+
+			allURLs = append(allURLs, FunctionURLInfo{
+				FunctionName: resource.Identifier,
+				Qualifier:    qualifier,
+				FunctionURL:  *urlConfig.FunctionUrl,
+				AuthType:     string(urlConfig.AuthType),
+			})
+		}
 	}
 
 	return allURLs, nil
@@ -132,9 +136,13 @@ func (l *AWSLambdaFunctionURL) addFunctionURLsToProperties(resource *types.Enric
 	}
 
 	// Add the function URLs to properties
-	// Keep backward compatibility: if there's only one base function URL, also set FunctionUrl
-	if len(functionURLs) > 0 && functionURLs[0].Qualifier == "" {
-		propsMap["FunctionUrl"] = functionURLs[0].FunctionURL
+	// Keep backward compatibility: set FunctionUrl from the base function URL (if any)
+	// Scan full slice since AWS API doesn't guarantee ordering
+	for _, fu := range functionURLs {
+		if fu.Qualifier == "" {
+			propsMap["FunctionUrl"] = fu.FunctionURL
+			break
+		}
 	}
 
 	// Add complete list of all Function URLs (base + aliases)

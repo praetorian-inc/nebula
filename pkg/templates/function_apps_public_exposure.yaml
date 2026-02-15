@@ -1,0 +1,78 @@
+id: function_apps_public_exposure
+name: Function Apps Publicly Exposed
+description: Detects Azure Function Apps without private endpoints and with public network access enabled. Function Apps are typically backend services that should not be directly exposed to the internet. This template identifies Function Apps that have only public access with no private endpoint fallback, increasing the attack surface for reconnaissance, brute force, and exploitation attempts.
+severity: Medium
+category: ["Public Access", "arg-scan"]
+reportability: Manual Triage
+triageNotes: |
+  Important Context:
+  This scan identifies Azure Function Apps that have public network access enabled AND no private endpoint connections.
+
+  Understanding Function App Network Access:
+  - Function Apps are typically backend services, not public-facing web applications
+  - Unlike Web Apps, Function Apps usually should have restricted access
+  - Public network access without private endpoints means the Function App is ONLY accessible via public internet
+  - Private endpoints provide secure access from within a VNet
+
+  Key Differences from General App Service Public Access:
+  - This template specifically targets Function Apps (kind contains 'functionapp')
+  - Only flags Function Apps that have NO private endpoint connections at all
+  - More restrictive than general App Service public access detection
+  - Function Apps typically have different security requirements than public Web Apps
+
+  Security Implications:
+  - Direct internet exposure of backend functions
+  - Increased vulnerability to automated scanning and exploitation
+  - Bypass of intended access controls
+  - Backend functions may contain business logic not intended for public access
+  - API endpoints may lack proper authentication mechanisms
+
+  Triage Guidance:
+  1. Verify if the Function App is intended for public access (e.g., webhooks, public APIs)
+  2. Check if the Function App has function-level authentication (API keys, Azure AD)
+  3. Review the function app's code to understand sensitivity of exposed endpoints
+  4. Test accessibility from external networks to validate exposure
+  5. Determine if private endpoint access would be more appropriate
+  6. Check if IP restrictions or other network controls are configured
+
+  Common Scenarios:
+  - Development/testing Function Apps may not have private endpoints configured
+  - Webhook receivers and public APIs may legitimately need public access
+  - Internal backend services misconfigured for public access
+  - Function Apps integrated with Logic Apps or other services may require specific access patterns
+  - Consumption plan Function Apps may have different networking limitations
+
+  Remediation Considerations:
+  - Deploy private endpoints for internal-only Function Apps
+  - Set publicNetworkAccess to 'Disabled' if private endpoint is the only intended access path
+  - Implement function-level authentication (function keys, Azure AD authentication)
+  - Configure IP restrictions to limit access to known networks
+  - Consider using Azure API Management as a gateway for Function Apps
+  - Review and strengthen application-level authentication and authorization
+  - Evaluate if the Function App should be on a Premium or Dedicated plan for better networking features
+references:
+  - https://learn.microsoft.com/en-us/azure/azure-functions/functions-networking-options
+  - https://learn.microsoft.com/en-us/azure/azure-functions/functions-create-private-site-access
+  - https://learn.microsoft.com/en-us/azure/azure-functions/security-concepts
+  - https://learn.microsoft.com/en-us/azure/app-service/networking-features
+  - https://learn.microsoft.com/en-us/azure/templates/microsoft.web/sites
+  - https://github.com/projectdiscovery/nuclei-templates/blob/main/cloud/azure/functions/azure-functionapp-public-exposure.yaml
+query: |
+  resources
+  | where type =~ 'microsoft.web/sites'
+  | where kind contains 'functionapp'
+  | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'Enabled'))
+  | extend hasPrivateEndpoint = isnotnull(properties.privateEndpointConnections) and
+      array_length(properties.privateEndpointConnections) > 0
+  | where publicNetworkAccess != 'disabled'
+  | where hasPrivateEndpoint == false
+  | project
+      id,
+      name,
+      type,
+      kind,
+      location,
+      resourceGroup,
+      publicNetworkAccess,
+      hasPrivateEndpoint,
+      subscriptionId

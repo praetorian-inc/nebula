@@ -85,6 +85,18 @@ func getResourcePatternsFromAction(action Action) []*regexp.Regexp {
 
 // serviceResourceMaps contains the mappings for each AWS service
 var serviceResourceMaps = map[string]ServiceResourceMap{
+	"bedrock-agentcore": {
+		ResourcePatterns: map[string]*regexp.Regexp{
+			"service": regexp.MustCompile(`^bedrock-agentcore.amazonaws.com$`),
+		},
+		ActionResourceMap: map[string][]string{
+			"createcodeinterpreter":        {"service"},
+			"startcodeinterpretersession":  {"service"},
+			"invokecodeinterpreter":        {"service"},
+			"getcodeinterpreter":           {"service"},
+			"listcodeinterpreters":         {"service"},
+		},
+	},
 	"iam": {
 		ResourcePatterns: map[string]*regexp.Regexp{
 			"user":               regexp.MustCompile(`^arn:aws:iam::\d{12}:user/.*`),

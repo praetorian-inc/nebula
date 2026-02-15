@@ -72,9 +72,20 @@ func (e *EventGridParentEnricher) Enrich(ctx context.Context, resource *model.Az
 			vulnerableCount++
 			// Create detailed finding for each vulnerable subscription
 			subcommand, flagName := getAzureCLINames(parentType)
+
+			// Build CLI command - add --domain-topic-name for domain topic subscriptions
+			cliCommand := fmt.Sprintf("az eventgrid %s event-subscription show --name %s --%s %s",
+				subcommand, sub.name, flagName, resource.Name)
+
+			// For domain topic subscriptions, add the topic name flag
+			if sub.domainTopicName != "" {
+				cliCommand += fmt.Sprintf(" --domain-topic-name %s", sub.domainTopicName)
+			}
+
+			cliCommand += fmt.Sprintf(" --resource-group %s", resource.ResourceGroup)
+
 			commands = append(commands, Command{
-				Command: fmt.Sprintf("az eventgrid %s event-subscription show --name %s --%s %s --resource-group %s",
-					subcommand, sub.name, flagName, resource.Name, resource.ResourceGroup),
+				Command: cliCommand,
 				Description:               fmt.Sprintf("🚨 VULNERABLE: Webhook subscription '%s' lacks Azure AD authentication", sub.name),
 				ExpectedOutputDescription: "Webhook should have azureActiveDirectoryTenantId configured",
 				ActualOutput: fmt.Sprintf("Subscription: %s\nDestination Type: WebHook\nAzure AD Auth: ❌ NOT CONFIGURED\nEndpoint: %s\n\n"+
@@ -113,10 +124,11 @@ func (e *EventGridParentEnricher) Enrich(ctx context.Context, resource *model.Az
 }
 
 type subscriptionInfo struct {
-	name           string
-	isWebhook      bool
-	hasAzureADAuth bool
-	endpointURL    string
+	name            string
+	isWebhook       bool
+	hasAzureADAuth  bool
+	endpointURL     string
+	domainTopicName string // For domain topic subscriptions, tracks which topic this subscription belongs to
 }
 
 func (e *EventGridParentEnricher) enumerateSubscriptions(ctx context.Context, resource *model.AzureResource, parentType string) ([]subscriptionInfo, error) {
@@ -215,6 +227,8 @@ func (e *EventGridParentEnricher) enumerateSubscriptions(ctx context.Context, re
 
 					for _, sub := range topicSubPage.Value {
 						info := e.extractSubscriptionInfo(sub.Name, sub.Properties)
+						// Track which domain topic this subscription belongs to
+						info.domainTopicName = *topic.Name
 						subscriptions = append(subscriptions, info)
 					}
 				}

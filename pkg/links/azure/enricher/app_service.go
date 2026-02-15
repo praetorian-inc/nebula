@@ -18,7 +18,8 @@ type AppServiceEnricher struct{}
 func (a *AppServiceEnricher) CanEnrich(templateID string) bool {
 	return templateID == "app_services_public_access" ||
 		templateID == "app_service_remote_debugging_enabled" ||
-		templateID == "function_app_http_anonymous_access"
+		templateID == "function_app_http_anonymous_access" ||
+		templateID == "app_service_auth_disabled"
 }
 
 func (a *AppServiceEnricher) Enrich(ctx context.Context, resource *model.AzureResource) []Command {
@@ -33,6 +34,8 @@ func (a *AppServiceEnricher) Enrich(ctx context.Context, resource *model.AzureRe
 		return a.checkPublicAccess(ctx, resource)
 	case "function_app_http_anonymous_access":
 		return a.checkFunctionAppAnonymousAccess(ctx, resource)
+	case "app_service_auth_disabled":
+		return a.checkAuthenticationDisabled(ctx, resource)
 	default:
 		return []Command{}
 	}
@@ -414,6 +417,89 @@ func (a *AppServiceEnricher) checkFunctionAppAnonymousAccess(ctx context.Context
 			ExpectedOutputDescription: "All HTTP triggers should have authLevel set to 'function' or 'admin', not 'anonymous'",
 			ActualOutput:              outputBuilder,
 			ExitCode:                  1,
+		},
+	}
+}
+
+// checkAuthenticationDisabled checks if App Service Authentication (Easy Auth) is disabled
+func (a *AppServiceEnricher) checkAuthenticationDisabled(ctx context.Context, resource *model.AzureResource) []Command {
+	appServiceName := resource.Name
+	subscriptionID := resource.AccountRef
+	resourceGroupName := resource.ResourceGroup
+
+	if appServiceName == "" || subscriptionID == "" || resourceGroupName == "" {
+		return []Command{{
+			Command:      "",
+			Description:  "Check App Service authentication configuration",
+			ActualOutput: "Error: App Service name, subscription ID, or resource group is missing",
+			ExitCode:     1,
+		}}
+	}
+
+	// Get Azure credentials
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	if err != nil {
+		return []Command{{
+			Command:      "",
+			Description:  "Check App Service authentication configuration",
+			ActualOutput: fmt.Sprintf("Error getting Azure credentials: %s", err.Error()),
+			ExitCode:     1,
+		}}
+	}
+
+	// Create Web Apps client
+	webAppsClient, err := armappservice.NewWebAppsClient(subscriptionID, cred, nil)
+	if err != nil {
+		return []Command{{
+			Command:      "",
+			Description:  "Check App Service authentication configuration",
+			ActualOutput: fmt.Sprintf("Error creating WebApps client: %s", err.Error()),
+			ExitCode:     1,
+		}}
+	}
+
+	// Get authentication settings V2
+	authSettings, err := webAppsClient.GetAuthSettingsV2(ctx, resourceGroupName, appServiceName, nil)
+	if err != nil {
+		return []Command{{
+			Command:      fmt.Sprintf("az webapp auth show --resource-group %s --name %s", resourceGroupName, appServiceName),
+			Description:  "Check App Service authentication configuration",
+			ActualOutput: fmt.Sprintf("Error getting authentication settings: %s", err.Error()),
+			ExitCode:     1,
+		}}
+	}
+
+	// Check if authentication is enabled
+	authEnabled := false
+	if authSettings.Properties != nil && authSettings.Properties.Platform != nil && authSettings.Properties.Platform.Enabled != nil {
+		authEnabled = *authSettings.Properties.Platform.Enabled
+	}
+
+	// If authentication is enabled, this resource should not be flagged
+	if authEnabled {
+		return []Command{{
+			Command:      fmt.Sprintf("az webapp auth show --resource-group %s --name %s", resourceGroupName, appServiceName),
+			Description:  "Verify App Service authentication is enabled",
+			ActualOutput: "✓ App Service Authentication (Easy Auth) is ENABLED (secure configuration)",
+			ExitCode:     0,
+		}}
+	}
+
+	// Authentication is disabled - this is a potential vulnerability
+	return []Command{
+		{
+			Command:                   fmt.Sprintf("az webapp auth show --resource-group %s --name %s", resourceGroupName, appServiceName),
+			Description:               "Check App Service authentication configuration",
+			ExpectedOutputDescription: "Authentication should be enabled for applications requiring identity verification",
+			ActualOutput:              "✗ POTENTIAL ISSUE: App Service Authentication (Easy Auth) is DISABLED\n\nThis means:\n- No platform-level authentication is enforced\n- Requests reach application code without identity verification\n- Azure AD or other identity provider controls are not applied at platform level\n\nConsiderations:\n- Verify if application implements its own authentication (application-level auth)\n- Check if app is behind API Management or Application Gateway with authentication\n- Determine if this is a public-facing application or internal service\n- Review network access restrictions (private endpoints, IP allowlists)\n- Assess if authentication is required based on application purpose\n\nIf authentication is required, enable Easy Auth with Azure AD or another identity provider.",
+			ExitCode:                  1,
+		},
+		{
+			Command:                   fmt.Sprintf("az webapp auth update --resource-group %s --name %s --enabled true --action LoginWithAzureActiveDirectory", resourceGroupName, appServiceName),
+			Description:               "Remediation: Enable App Service Authentication with Azure AD",
+			ExpectedOutputDescription: "Authentication will be enabled with Azure AD as the provider",
+			ActualOutput:              "Run this command to enable Easy Auth (requires configuring Azure AD app registration)",
+			ExitCode:                  0,
 		},
 	}
 }

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws/arn"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/praetorian-inc/nebula/pkg/types"
 )
 
@@ -80,6 +80,9 @@ func (ga *GaadAnalyzer) AnalyzePrincipalPermissions() (*PermissionsSummary, erro
 
 	// Wait for all workers to finish
 	evalWg.Wait()
+
+	// Post-processing: add synthetic edges for "create-then-use" attack patterns
+	applyCreateThenUseEdges(summary)
 
 	return summary, nil
 }

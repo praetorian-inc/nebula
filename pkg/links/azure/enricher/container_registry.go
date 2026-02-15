@@ -21,7 +21,7 @@ type TokenResponse struct {
 }
 
 func (c *ContainerRegistryEnricher) CanEnrich(templateID string) bool {
-	return templateID == "container_registries_public_access"
+	return templateID == "container_registries_public_access" || templateID == "acr_anonymous_pull_access"
 }
 
 // getAnonymousToken attempts to get an anonymous OAuth2 token for the given scope

@@ -58,7 +58,7 @@ func (e *EventGridEnricher) Enrich(ctx context.Context, resource *model.AzureRes
 		return commands
 	}
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err := client.Do(req)
 
 	postCommand := Command{

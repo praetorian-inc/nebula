@@ -1,23 +1,46 @@
-./nebula
-nebula.log
-nebula-output/*
-.devcontainer
-.vscode
-.DS_Store
-.go-ignore
+# Compiled binaries
 nebula
-np-debug.json
+./nebula
 bin/*
-bin
-test/links/*.json
-.vscode/launch.json
-.go-version
-out.json
-.idea/modules.xml
-.idea/nebula.iml
-.idea/vcs.xml
-.idea/workspace.xml
+
+# Test artifacts and logs
+arg-scan.log
+arg-scan-test.log
+deployment.log
+export.txt
+*.log
 debug.log*
 *.json
 nebula-darwin-arm64
 *.test
+
+# Debug outputs
+np-debug.json
+out.json
+
+# Test results (keep local only)
+test-infrastructure/e2e-test-results.md
+test-infrastructure/arg-rule-creator-validation.md
+test-infrastructure/ARG-LIMITATION-FINDINGS.md
+test-infrastructure/HYBRID-APPROACH-SUCCESS.md
+test-infrastructure/E2E-TEST-STATUS.md
+test-infrastructure/test-outputs.json
+test-infrastructure/cleanup.sh
+test-infrastructure/webhook-server.py
+test-infrastructure/function-code/
+
+# Nebula output (scanner results - sensitive!)
+nebula-output/
+
+# MCP temp files
+.playwright-mcp/
+
+# macOS
+.DS_Store
+
+# IDE and temp files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

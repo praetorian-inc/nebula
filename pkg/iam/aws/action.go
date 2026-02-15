@@ -23,6 +23,9 @@ func isPrivEscAction(action string) bool {
 }
 
 var privEscActions = []string{
+	"bedrock-agentcore:CreateCodeInterpreter",
+	"bedrock-agentcore:InvokeCodeInterpreter",
+	"bedrock-agentcore:StartCodeInterpreterSession",
 	"cloudformation:CreateChangeSet",
 	"cloudformation:CreateStack",
 	"cloudformation:ExecuteChangeSet",
@@ -35,6 +38,7 @@ var privEscActions = []string{
 	"codebuild:UpdateProject",
 	"codestar:AssociateTeamMember",
 	"codestar:CreateProject",
+	"ec2:CreateLaunchTemplate",
 	"ec2:RunInstances",
 	"ecs:RunTask",
 	"glue:CreateDevEndpoint",
@@ -55,6 +59,8 @@ var privEscActions = []string{
 	"iam:SetDefaultPolicyVersion",
 	"iam:UpdateAssumeRolePolicy",
 	"iam:UpdateLoginProfile",
+	"autoscaling:CreateAutoScalingGroup",
+	"autoscaling:CreateLaunchConfiguration",
 	"lambda:CreateEventSourceMapping",
 	"lambda:CreateFunction",
 	"lambda:InvokeFunction",

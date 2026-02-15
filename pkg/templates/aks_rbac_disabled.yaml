@@ -1,0 +1,174 @@
+id: aks_rbac_disabled
+name: AKS RBAC Disabled
+description: Detects Azure Kubernetes Service (AKS) clusters with Role-Based Access Control (RBAC) disabled. Without RBAC, the cluster grants cluster-wide permissions by default, allowing any authenticated user to perform administrative actions including deploying malicious workloads, accessing all secrets, and potentially escaping to the underlying nodes.
+severity: High
+category: ["Access Control", "arg-scan"]
+reportability: Automatic
+triageNotes: |
+  Security Risk:
+  AKS clusters with RBAC disabled operate in a highly permissive mode where all authenticated users
+  have cluster-admin equivalent permissions. This configuration eliminates the principle of least
+  privilege and makes the cluster extremely vulnerable to privilege escalation attacks.
+
+  Attack Vector:
+  - Any user with Kubernetes API access gains cluster-admin permissions
+  - Ability to deploy malicious workloads across all namespaces
+  - Access to all secrets, config maps, and sensitive data
+  - Capability to modify or delete critical cluster resources
+  - Container escape to underlying node with privileged access
+  - Lateral movement across all cluster workloads
+  - Data exfiltration from all applications and services
+
+  Understanding enableRBAC Property:
+  - When true: RBAC is enabled, role-based permissions enforced (secure)
+  - When false or null: RBAC is DISABLED, cluster-wide permissions granted (vulnerable)
+  - Property location: properties.enableRBAC
+  - Default: Should always be true for production clusters
+  - Cannot be changed after cluster creation (requires cluster recreation)
+
+  Why This Is Critical:
+  - RBAC is the foundational security control for Kubernetes access management
+  - Without RBAC, there is no way to enforce least-privilege access
+  - All users become de facto cluster administrators
+  - No namespace isolation or resource-level access controls
+  - Violates security best practices and compliance requirements
+
+  Detection Method:
+  This detection uses Azure Resource Graph to query AKS configuration:
+  - ARG Query: Identifies AKS clusters with enableRBAC=false or null
+  - Native ARG: No enricher required, property available in ARG
+  - Checks: properties.enableRBAC property value
+  - Requires: Reader permission (Microsoft.ContainerService/managedClusters/read)
+
+  Common Scenarios:
+  - Legacy AKS clusters created before RBAC was default-enabled
+  - Test/development clusters deployed with simplified configurations
+  - Misconfiguration during cluster creation via CLI/templates
+  - Proof-of-concept environments that became production
+  - Migration from older Kubernetes versions without RBAC update
+
+  Legitimate Use Cases:
+  - None for production environments (RBAC should ALWAYS be enabled)
+  - Temporary testing environments (< 24 hours, isolated networks only)
+  - Learning/training environments (completely isolated, no sensitive data)
+
+  Triage Guidance:
+  1. Verify cluster environment (production = CRITICAL, dev/test = HIGH priority)
+  2. Check cluster network exposure (public endpoint, NSG rules, firewall)
+  3. Review current user permissions and access patterns
+  4. Assess data sensitivity of workloads running in the cluster
+  5. Determine if cluster is used for production workloads
+  6. Check compliance requirements (PCI-DSS, HIPAA, SOC 2, ISO 27001)
+  7. Review Azure Activity Log for unauthorized access attempts
+  8. Identify all users/service principals with cluster access
+
+  Remediation Steps:
+  **IMPORTANT:** The enableRBAC property CANNOT be changed after cluster creation.
+  The only remediation is to recreate the cluster with RBAC enabled.
+
+  1. Plan cluster migration:
+     - Document current workloads, configurations, and persistent volumes
+     - Plan maintenance window for cluster recreation
+     - Prepare RBAC policies (RoleBindings, ClusterRoleBindings)
+     - Backup all critical data and configurations
+
+  2. Create new AKS cluster with RBAC enabled:
+     ```bash
+     # Via Azure CLI (RBAC is enabled by default)
+     az aks create \
+       --resource-group <rg> \
+       --name <new-cluster-name> \
+       --enable-rbac \
+       --enable-aad \
+       --aad-admin-group-object-ids <admin-group-id> \
+       --kubernetes-version <version>
+     ```
+
+  3. Configure RBAC policies:
+     ```bash
+     # Create namespace admin role binding
+     kubectl create rolebinding namespace-admin \
+       --clusterrole=admin \
+       --user=<user-email> \
+       --namespace=<namespace>
+
+     # Create cluster-wide view role binding
+     kubectl create clusterrolebinding cluster-viewer \
+       --clusterrole=view \
+       --user=<user-email>
+     ```
+
+  4. Migrate workloads to new cluster:
+     - Export and re-deploy applications
+     - Migrate persistent volumes
+     - Update DNS and ingress configurations
+     - Test all workloads in new cluster
+
+  5. Implement additional security controls:
+     - Enable Azure AD integration for identity management
+     - Configure Azure Policy for AKS to enforce security standards
+     - Enable Azure Defender for Kubernetes for threat detection
+     - Implement Pod Security Policies or Azure Policy for Kubernetes
+     - Configure network policies for pod-to-pod communication
+     - Enable audit logging and integrate with SIEM
+
+  6. Decommission old cluster:
+     ```bash
+     # Delete old cluster after successful migration
+     az aks delete --resource-group <rg> --name <old-cluster-name> --yes
+     ```
+
+  Azure CLI Commands:
+  ```bash
+  # Check RBAC status
+  az aks show --resource-group <rg> --name <cluster-name> \
+    --query 'enableRbac'
+
+  # List all AKS clusters with RBAC disabled
+  az graph query -q "resources | where type =~ 'microsoft.containerservice/managedclusters' | where properties.enableRBAC == false or isnull(properties.enableRBAC) | project name, resourceGroup, location"
+
+  # Get cluster credentials (requires appropriate permissions)
+  az aks get-credentials --resource-group <rg> --name <cluster-name>
+
+  # Check current user's effective permissions
+  kubectl auth can-i --list
+  ```
+
+  Compliance Impact:
+  - Violates CIS Kubernetes Benchmark (RBAC requirement)
+  - Fails PCI-DSS requirements for access control
+  - Violates HIPAA, SOC 2, ISO 27001 access control requirements
+  - Non-compliant with NIST 800-53 access control families
+  - Fails Azure Security Benchmark recommendations
+  - Increases risk of data breaches and unauthorized access
+
+  Additional Considerations:
+  - Enabling RBAC requires cluster recreation (disruptive operation)
+  - Plan RBAC roles carefully before migration (avoid over-permissive roles)
+  - Use Azure AD groups for RBAC bindings (easier management)
+  - Implement least-privilege principle for all service accounts
+  - Regularly audit RBAC permissions (kubectl auth reconcile)
+  - Consider using Azure AD Pod Identity for workload identity management
+  - Enable audit logging to track all API server access
+references:
+  - https://learn.microsoft.com/en-us/azure/aks/concepts-identity
+  - https://learn.microsoft.com/en-us/azure/aks/azure-ad-rbac
+  - https://learn.microsoft.com/en-us/azure/aks/operator-best-practices-identity
+  - https://kubernetes.io/docs/reference/access-authn-authz/rbac/
+  - https://github.com/projectdiscovery/nuclei-templates/blob/main/cloud/azure/aks/azure-aks-rbac-unconfigured.yaml
+query: |
+  resources
+  | where type =~ 'microsoft.containerservice/managedclusters'
+  | extend enableRBAC = coalesce(tobool(properties.enableRBAC), false)
+  | where enableRBAC == false
+  | project
+      id,
+      name,
+      type,
+      location,
+      resourceGroup,
+      subscriptionId,
+      enableRBAC,
+      kubernetesVersion = properties.kubernetesVersion,
+      fqdn = properties.fqdn,
+      provisioningState = properties.provisioningState

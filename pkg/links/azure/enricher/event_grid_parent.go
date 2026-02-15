@@ -17,6 +17,20 @@ func (e *EventGridParentEnricher) CanEnrich(templateID string) bool {
 	return templateID == "event_grid_parent_resources"
 }
 
+// getAzureCLINames maps internal parent types to Azure CLI subcommand and flag names
+func getAzureCLINames(parentType string) (subcommand string, flagName string) {
+	switch parentType {
+	case "systemtopics":
+		return "system-topic", "system-topic-name"
+	case "topics":
+		return "topic", "topic-name"
+	case "domains":
+		return "domain", "domain-name"
+	default:
+		return parentType, strings.TrimSuffix(parentType, "s") + "-name"
+	}
+}
+
 func (e *EventGridParentEnricher) Enrich(ctx context.Context, resource *model.AzureResource) []Command {
 	commands := []Command{}
 
@@ -57,9 +71,10 @@ func (e *EventGridParentEnricher) Enrich(ctx context.Context, resource *model.Az
 		if sub.isWebhook && !sub.hasAzureADAuth {
 			vulnerableCount++
 			// Create detailed finding for each vulnerable subscription
+			subcommand, flagName := getAzureCLINames(parentType)
 			commands = append(commands, Command{
-				Command: fmt.Sprintf("az eventgrid %s event-subscription show --name %s --%s-name %s --resource-group %s",
-					parentType, sub.name, strings.TrimSuffix(parentType, "s"), resource.Name, resource.ResourceGroup),
+				Command: fmt.Sprintf("az eventgrid %s event-subscription show --name %s --%s %s --resource-group %s",
+					subcommand, sub.name, flagName, resource.Name, resource.ResourceGroup),
 				Description:               fmt.Sprintf("🚨 VULNERABLE: Webhook subscription '%s' lacks Azure AD authentication", sub.name),
 				ExpectedOutputDescription: "Webhook should have azureActiveDirectoryTenantId configured",
 				ActualOutput: fmt.Sprintf("Subscription: %s\nDestination Type: WebHook\nAzure AD Auth: ❌ NOT CONFIGURED\nEndpoint: %s\n\n"+
@@ -157,6 +172,7 @@ func (e *EventGridParentEnricher) enumerateSubscriptions(ctx context.Context, re
 		}
 
 	case "domains":
+		// List domain-level subscriptions
 		client := clientFactory.NewDomainEventSubscriptionsClient()
 		pager := client.NewListPager(resource.ResourceGroup, resource.Name, nil)
 
@@ -169,6 +185,39 @@ func (e *EventGridParentEnricher) enumerateSubscriptions(ctx context.Context, re
 			for _, sub := range page.Value {
 				info := e.extractSubscriptionInfo(sub.Name, sub.Properties)
 				subscriptions = append(subscriptions, info)
+			}
+		}
+
+		// Also enumerate domain topics and their subscriptions
+		topicsClient := clientFactory.NewDomainTopicsClient()
+		topicsPager := topicsClient.NewListByDomainPager(resource.ResourceGroup, resource.Name, nil)
+
+		for topicsPager.More() {
+			topicsPage, err := topicsPager.NextPage(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to list domain topics: %w", err)
+			}
+
+			// For each domain topic, list its subscriptions
+			for _, topic := range topicsPage.Value {
+				if topic.Name == nil {
+					continue
+				}
+
+				topicSubClient := clientFactory.NewDomainTopicEventSubscriptionsClient()
+				topicSubPager := topicSubClient.NewListPager(resource.ResourceGroup, resource.Name, *topic.Name, nil)
+
+				for topicSubPager.More() {
+					topicSubPage, err := topicSubPager.NextPage(ctx)
+					if err != nil {
+						return nil, fmt.Errorf("failed to list domain topic subscriptions for topic %s: %w", *topic.Name, err)
+					}
+
+					for _, sub := range topicSubPage.Value {
+						info := e.extractSubscriptionInfo(sub.Name, sub.Properties)
+						subscriptions = append(subscriptions, info)
+					}
+				}
 			}
 		}
 

@@ -1,11 +1,21 @@
+# Compiled binaries
+nebula
+./nebula
+bin/*
+
 # Test artifacts and logs
 arg-scan.log
 arg-scan-test.log
 deployment.log
 export.txt
 *.log
+debug.log*
 
-# Test results (keep these local only)
+# Debug outputs
+np-debug.json
+out.json
+
+# Test results (keep local only)
 test-infrastructure/e2e-test-results.md
 test-infrastructure/arg-rule-creator-validation.md
 test-infrastructure/ARG-LIMITATION-FINDINGS.md
@@ -21,6 +31,9 @@ nebula-output/
 
 # MCP temp files
 .playwright-mcp/
+
+# macOS
+.DS_Store
 
 # IDE and temp files
 .vscode/

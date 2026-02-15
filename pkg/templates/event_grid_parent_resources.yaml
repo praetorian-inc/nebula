@@ -1,0 +1,31 @@
+id: event_grid_parent_resources
+name: Event Grid Parent Resources (System Topics, Topics, Domains)
+description: Finds Event Grid parent resources to enumerate child subscriptions for webhook authentication detection
+severity: Info
+category: ["arg-scan"]
+reportability: Automatic
+triageNotes: |
+  This template finds Event Grid parent resources (System Topics, Topics, Domains).
+  The enricher will enumerate child event subscriptions and detect those with
+  webhook destinations lacking Azure AD authentication.
+
+  This is a hybrid detection approach that works around ARG's limitation of not
+  indexing child Event Grid subscriptions.
+
+references:
+  - https://learn.microsoft.com/en-us/azure/event-grid/security-authentication
+  - https://learn.microsoft.com/en-us/azure/event-grid/secure-webhook-delivery
+
+query: |
+  resources
+  | where type =~ 'Microsoft.EventGrid/systemTopics'
+      or type =~ 'Microsoft.EventGrid/topics'
+      or type =~ 'Microsoft.EventGrid/domains'
+  | project
+      id,
+      name,
+      type,
+      location,
+      resourceGroup,
+      subscriptionId,
+      properties

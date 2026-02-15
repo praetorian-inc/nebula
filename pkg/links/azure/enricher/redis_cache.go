@@ -42,7 +42,7 @@ func (r *RedisCacheEnricher) Enrich(ctx context.Context, resource *model.AzureRe
 	sslPort := "6380"
 	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	
+
 	dialer := &net.Dialer{}
 	conn, err := dialer.DialContext(ctxTimeout, "tcp", net.JoinHostPort(hostname, sslPort))
 
@@ -68,7 +68,7 @@ func (r *RedisCacheEnricher) Enrich(ctx context.Context, resource *model.AzureRe
 		nonSslPort := "6379"
 		ctxTimeout2, cancel2 := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel2()
-		
+
 		dialer2 := &net.Dialer{}
 		conn2, err2 := dialer2.DialContext(ctxTimeout2, "tcp", net.JoinHostPort(hostname, nonSslPort))
 

@@ -75,6 +75,7 @@ require (
 	github.com/praetorian-inc/konstellation v0.0.0-20260215233552-be5e8dfdbdae
 	github.com/praetorian-inc/tabularium v1.0.132-pre-0-jwh-cloud-relations
 	github.com/spf13/cobra v1.9.1
+	golang.org/x/time v0.12.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/oauth2 v0.33.0
 	google.golang.org/api v0.257.0

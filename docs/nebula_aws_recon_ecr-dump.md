@@ -17,9 +17,12 @@ nebula aws recon ecr-dump [flags]
       --continue_piping                If true, pipes output to next link. If false, saves to datastore file. (default true)
       --datastore string               NoseyParker datastore file (default "datastore.np")
       --disable-cache                  Disable API response caching
+      --enable-debug-metrics           Enable debug metrics for rate limiting analysis (disabled in production)
       --extract                        enable extraction to filesystem (default true)
+      --global-rate-limit int          Per-region rate limit in requests per second (AWS SDK level) (default 5)
   -h, --help                           help for ecr-dump
       --indent int                     the number of spaces to use for the JSON indentation
+      --max-concurrent-services int    Maximum number of AWS services to process concurrently (default 100)
       --module-name string             name of the module for dynamic file naming
       --opsec_level string             Operational security level for AWS operations (default "none")
       --outfile string                 the default file to write the JSON to (can be changed at runtime) (default "out.json")

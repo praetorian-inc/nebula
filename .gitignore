@@ -10,6 +10,9 @@ deployment.log
 export.txt
 *.log
 debug.log*
+*.json
+nebula-darwin-arm64
+*.test
 
 # Debug outputs
 np-debug.json

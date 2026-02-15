@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -143,14 +142,10 @@ func GetAWSCfg(region string, profile string, opts []*types.Option, opsecLevel s
 		options = append(options, config.WithSharedConfigProfile(profile))
 	}
 
-	for _, opt := range opts {
-		if opt.Name == "profile-dir" && opt.Value != "" {
-			configLocation := path.Join(opt.Value, "config")
-			credLocation := path.Join(opt.Value, "credentials")
-			options = append(options, config.WithSharedConfigFiles([]string{configLocation}))
-			options = append(options, config.WithSharedCredentialsFiles([]string{credLocation}))
-		}
-	}
+	// Note: profile-dir handling is done in GetConfig via optFns, not here.
+	// The optFns properly add both config and credentials files when profile-dir is set.
+	// Do NOT process profile-dir from opts here - it causes bugs when the value is empty
+	// (path.Join("", "credentials") returns "credentials" which overrides default paths).
 
 	options = append(options, optFns...)
 

@@ -2,12 +2,14 @@ package ec2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	smithy "github.com/aws/smithy-go"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/base"
@@ -45,8 +47,8 @@ func (a *AWSEC2IMDSCheck) Process(resource *types.EnrichedResourceDescription) e
 
 	output, err := ec2Client.DescribeInstances(context.TODO(), input)
 	if err != nil {
-		errMsg := err.Error()
-		if strings.Contains(errMsg, "InvalidInstanceID") {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && strings.HasPrefix(apiErr.ErrorCode(), "InvalidInstanceID") {
 			slog.Warn("Instance not found", "instance_id", resource.Identifier)
 			return nil
 		}

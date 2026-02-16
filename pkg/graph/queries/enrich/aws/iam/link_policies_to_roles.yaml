@@ -1,0 +1,11 @@
+name: Link Policies to Roles
+description: Enriches the graph by creating relationships between IAM Roles and their attached IAM Policies (both managed and inline).
+impactedServices:
+  - IAM
+severity: Informational
+order: 40
+cypher: |
+  MATCH (role:AWS_IAM_Role), (policy:AWS_IAM_ManagedPolicy)
+  WHERE role.attachedManagedPolicies CONTAINS policy.arn
+  MERGE (policy)-[r:ATTACHED_TO]->(role)
+  RETURN role.name, policy.name

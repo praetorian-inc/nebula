@@ -1,0 +1,69 @@
+name: Privesc Method 28 - PassRole with Policy Modification
+description: Creates CAN_PRIVESC when a principal can modify a role's policies AND use it via a service (PassRole + service execution)
+impactedServices:
+  - IAM
+  - EC2
+  - Lambda
+  - ECS
+  - DataPipeline
+  - Glue
+  - CloudFormation
+severity: High
+order: 126
+cypher: |
+  // Find principals that can modify a role's policies (PutRolePolicy or AttachRolePolicy)
+  MATCH (principal)-[modify]->(targetRole:AWS_IAM_Role)
+  WHERE principal.admin IS NULL
+    AND principal.arn <> targetRole.arn
+    AND type(modify) IN ['IAM_PUTROLEPOLICY', 'IAM_ATTACHROLEPOLICY']
+    // Principal cannot directly assume the role
+    AND NOT EXISTS {
+      MATCH (principal)-[r:STS_ASSUMEROLE]->(targetRole)
+    }
+    // Principal can PassRole to this role
+    AND EXISTS { MATCH (principal)-[:IAM_PASSROLE]->(targetRole) }
+    // Role trusts a service AND principal can execute that service
+    AND (
+      ('ec2.amazonaws.com' IN targetRole.trustedServices
+        AND targetRole.instanceProfileList IS NOT NULL
+        AND targetRole.instanceProfileList <> '[]'
+        AND EXISTS { MATCH (principal)-[:EC2_RUNINSTANCES]->() })
+      OR ('lambda.amazonaws.com' IN targetRole.trustedServices
+        AND EXISTS { MATCH (principal)-[:LAMBDA_CREATEFUNCTION]->() }
+        AND (EXISTS { MATCH (principal)-[:LAMBDA_INVOKEFUNCTION]->() }
+             OR EXISTS { MATCH (principal)-[:LAMBDA_CREATEEVENTSOURCEMAPPING]->() }))
+      OR ('ecs-tasks.amazonaws.com' IN targetRole.trustedServices
+        AND EXISTS { MATCH (principal)-[:ECS_RUNTASK]->() })
+      OR ('datapipeline.amazonaws.com' IN targetRole.trustedServices
+        AND (EXISTS { MATCH (principal)-[:DATAPIPELINE_CREATEPIPELINE]->() }
+             OR EXISTS { MATCH (principal)-[:DATAPIPELINE_PUTPIPELINEDEFINITION]->() }))
+      OR ('glue.amazonaws.com' IN targetRole.trustedServices
+        AND (EXISTS { MATCH (principal)-[:GLUE_CREATEDEVENDPOINT]->() }
+             OR EXISTS { MATCH (principal)-[:GLUE_UPDATEDEVENDPOINT]->() }))
+      OR ('cloudformation.amazonaws.com' IN targetRole.trustedServices
+        AND (EXISTS { MATCH (principal)-[:CLOUDFORMATION_CREATESTACK]->() }
+             OR EXISTS { MATCH (principal)-[:CLOUDFORMATION_UPDATESTACK]->() }
+             OR (EXISTS { MATCH (principal)-[:CLOUDFORMATION_CREATECHANGESET]->() }
+                 AND EXISTS { MATCH (principal)-[:CLOUDFORMATION_EXECUTECHANGESET]->() })))
+    )
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-28-PassRole-ModifyPolicy",
+    privesc.requires = CASE
+      WHEN type(modify) = 'iam:PutRolePolicy' THEN ["iam:PutRolePolicy", "iam:PassRole"]
+      ELSE ["iam:AttachRolePolicy", "iam:PassRole"]
+    END,
+    privesc.service = "IAM",
+    privesc.targetType = "Role",
+    privesc.attackPath = "Modify role policy + PassRole to service"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-28-PassRole-ModifyPolicy"
+      THEN privesc.method + ",Method-28-PassRole-ModifyPolicy"
+      ELSE privesc.method
+    END
+
+  // Mark target as can be made admin since principal can modify its policies
+  SET targetRole.canBeMadeAdmin = true

@@ -1,0 +1,33 @@
+name: Privesc Method 1 - CreatePolicyVersion
+description: Creates CAN_PRIVESC relationship when a principal can modify a policy attached to itself
+impactedServices:
+  - IAM
+severity: High
+order: 100
+cypher: |
+  MATCH (principal)-[:IAM_CREATEPOLICYVERSION]->(policy:AWS_IAM_ManagedPolicy)
+    WHERE principal.admin IS NULL
+  AND policy.arn IN principal.attachedManagedPolicies
+
+  // Create the privesc relationship from principal to itself (self-escalation via policy)
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(principal)
+  ON CREATE SET
+    privesc.method = "Method-01-CreatePolicyVersion",
+    privesc.requires = ["iam:CreatePolicyVersion"],
+    privesc.service = "IAM",
+    privesc.targetType = "Self",
+    privesc.targetPolicy = policy.arn
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-01-CreatePolicyVersion"
+      THEN privesc.method + ",Method-01-CreatePolicyVersion"
+      ELSE privesc.method
+    END,
+    privesc.targetPolicy = CASE
+      WHEN privesc.targetPolicy IS NULL THEN policy.arn
+      WHEN NOT privesc.targetPolicy CONTAINS policy.arn THEN privesc.targetPolicy + "," + policy.arn
+      ELSE privesc.targetPolicy
+    END
+
+  // Mark as self-escalation capable
+  SET principal.canSelfEscalate = true

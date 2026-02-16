@@ -1,0 +1,32 @@
+name: Privesc Method 9 - AttachRolePolicy
+description: Creates CAN_PRIVESC relationship when a principal can attach policies to roles they can access
+impactedServices:
+  - IAM
+severity: High
+order: 106
+cypher: |
+  MATCH (principal)-[:IAM_ATTACHROLEPOLICY]->(role:AWS_IAM_Role)
+  WHERE principal.admin IS NULL
+    AND (principal.arn = role.arn
+        OR EXISTS {
+          MATCH (principal)-[:STS_ASSUMEROLE]->(role)
+        })
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(role)
+  ON CREATE SET
+    privesc.method = "Method-09-AttachRolePolicy",
+    privesc.requires = ["iam:AttachRolePolicy"],
+    privesc.service = "IAM",
+    privesc.targetType = CASE WHEN principal.arn = role.arn THEN "Self" ELSE "Role" END
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-09-AttachRolePolicy"
+      THEN privesc.method + ",Method-09-AttachRolePolicy"
+      ELSE privesc.method
+    END
+
+  // Mark based on whether self or other
+  SET principal.canSelfEscalate = CASE WHEN principal.arn = role.arn THEN true ELSE principal.canSelfEscalate END,
+      role.canBeMadeAdmin = CASE WHEN principal.arn <> role.arn THEN true ELSE role.canBeMadeAdmin END
+      

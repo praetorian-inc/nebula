@@ -1,0 +1,46 @@
+name: Privilege Escalation Paths
+description: Identifies principals that can escalate to admin privileges through CAN_PRIVESC relationships (1-3 hops)
+impactedServices:
+  - IAM
+  - STS
+  - Lambda
+  - EC2
+  - Glue
+  - CloudFormation
+  - SSM
+  - ECS
+  - DataPipeline
+severity: High
+cypher: |
+  // Find minimum hops for each principal to reach an admin target
+  MATCH path = (principal)-[:CAN_PRIVESC*1..3]->(target)
+  WHERE principal.admin IS NULL
+    AND (
+      target.admin = true
+      OR target.canBeMadeAdmin = true
+      OR (target.canSelfEscalate = true AND nodes(path)[-1] = nodes(path)[-2])
+    )
+
+  WITH principal, min(length(path)) AS minHops
+
+  MATCH path = (principal)-[:CAN_PRIVESC*1..3]->(target)
+  WHERE principal.admin IS NULL
+    AND (
+      target.admin = true
+      OR target.canBeMadeAdmin = true
+      OR (target.canSelfEscalate = true AND nodes(path)[-1] = nodes(path)[-2])
+    )
+    AND length(path) = minHops
+
+  WITH principal.arn AS vulnerable,
+      [n IN nodes(path)[1..-1] | n.arn] AS intermediateTargets,
+      target.arn AS finalTarget,
+      length(path) AS hops,
+      [rel IN relationships(path) | rel.method] AS methods
+
+  RETURN vulnerable,
+        intermediateTargets,
+        collect(DISTINCT finalTarget) AS finalTargets,
+        hops,
+        methods
+  ORDER BY vulnerable, methods

@@ -1,0 +1,340 @@
+id: custom_owner_role_subscription_scope
+name: Custom Owner-Equivalent Roles at Subscription Level
+description: Detects custom Azure RBAC roles with Owner-equivalent permissions (*/write, */delete, *) assignable at subscription scope. These roles bypass role governance monitoring focused on built-in Owner role assignments and grant broad resource manipulation capabilities across the entire subscription, enabling hidden privilege escalation and subscription takeover.
+severity: High
+category: ["Access Control", "arg-scan"]
+reportability: Manual Triage
+triageNotes: |
+  Security Risk:
+  Custom roles with Owner-equivalent permissions at subscription scope represent a significant
+  governance and security risk. Unlike built-in roles that are well-documented and monitored,
+  custom roles can hide dangerous permissions behind innocuous names, bypassing security
+  controls focused on tracking built-in Owner/Contributor assignments.
+
+  Understanding Owner-Equivalent Permissions:
+  - **Full Wildcard (*)**: Grants all control plane operations across all resource providers
+  - **Cross-Provider Write (*/write)**: Grants write operations across all resource providers
+  - **Cross-Provider Delete (*/delete)**: Grants delete operations across all resource providers
+  - **Cross-Provider Action (*/action)**: Grants custom action operations across all providers
+
+  These wildcard patterns grant permissions equivalent or nearly equivalent to the built-in
+  Owner role, but avoid detection by security monitoring focused on built-in role assignments.
+
+  Attack Path:
+  1. Attacker compromises identity with custom Owner-equivalent role
+  2. Role name like "DevOps Automation" or "Backup Operator" doesn't trigger monitoring alerts
+  3. Attacker has full subscription control via wildcard permissions
+  4. Can create resources, modify configurations, access secrets, exfiltrate data
+  5. Can assign additional privileged roles to other identities for persistence
+
+  Why This Matters:
+  - **Governance Bypass**: Security teams monitor built-in Owner assignments but may miss custom roles
+  - **Permission Obfuscation**: Wildcard permissions hide the true scope of granted access
+  - **Blast Radius**: Subscription-level scope means compromise affects all resources
+  - **Privilege Escalation**: Attackers can leverage these roles for full subscription takeover
+  - **Compliance Violations**: Violates least-privilege principles and role segregation policies
+  - **Audit Evasion**: Custom role names don't appear in standard "Owner role" audit queries
+
+  Common Legitimate Use Cases:
+  1. **DevOps Automation Roles**: CI/CD pipelines deploying infrastructure
+     - Justification: Need broad permissions to deploy varied resources
+     - Mitigation: Scope to specific resource groups, use service principals with managed identity
+     - Alternative: Use resource-group scoped roles, Azure DevOps service connections
+
+  2. **Infrastructure-as-Code Roles**: Terraform, Bicep, ARM deployment automation
+     - Justification: Need to create diverse resource types across subscription
+     - Mitigation: Use custom roles with explicit actions instead of wildcards
+     - Alternative: Break into multiple scoped roles per environment
+
+  3. **Backup and Disaster Recovery**: Comprehensive backup solutions
+     - Justification: Need read/write access to backup all resource types
+     - Mitigation: Use explicit actions for known resource types, avoid cross-provider wildcards
+     - Alternative: Azure Backup native service with minimal custom permissions
+
+  4. **Multi-Tenant Management**: Service provider managing customer subscriptions
+     - Justification: Need flexibility to manage diverse customer workloads
+     - Mitigation: Use Azure Lighthouse with granular delegated permissions
+     - Alternative: Break into environment-specific roles (prod, dev, test)
+
+  5. **Security and Compliance Scanning**: Tools that inventory all resources
+     - Justification: Need read access across all resource types
+     - Mitigation: Reader role should suffice (read-only), wildcards unnecessary
+     - Alternative: Use built-in Reader role, avoid custom roles
+
+  Triage Guidance:
+  1. **Review Role Name and Description**:
+     - Does the name accurately reflect Owner-equivalent permissions?
+     - Or does the name suggest limited scope (e.g., "Read-Only Auditor" with * action)?
+     - Check `properties.description` for stated purpose
+
+  2. **Examine Assignable Scopes**:
+     - Is role assignable at subscription root scope (`/subscriptions/{id}`)?
+     - Or at management group level (even broader than subscription)?
+     - Narrower scopes (resource groups) are lower risk
+
+  3. **Analyze Wildcard Actions**:
+     ```bash
+     # Get role definition details
+     az role definition list --custom-role-only true --query "[?roleName=='<role-name>'].{name:roleName, actions:permissions[0].actions, notActions:permissions[0].notActions, scopes:assignableScopes}" -o json
+     ```
+     - Full wildcard `*`: Owner-equivalent (highest risk)
+     - `*/write` + `*/delete`: Near-Owner capabilities (high risk)
+     - `*/write` alone: Can modify resources but not delete (medium-high risk)
+     - Check `notActions` for excluded operations (do they provide meaningful restrictions?)
+
+  4. **Review NotActions Exclusions**:
+     - Does the role have NotActions that carve out sensitive operations?
+     - Common safe exclusions: `Microsoft.Authorization/*/write`, `Microsoft.Authorization/*/delete`
+     - Remember: NotActions do NOT prevent the action if granted by another role
+     - NotActions provide weak security boundary (additive permission model)
+
+  5. **Check Role Assignments**:
+     ```bash
+     # Find who has this role assigned
+     ROLE_NAME="<role-name>"
+     ROLE_ID=$(az role definition list --custom-role-only true --query "[?roleName=='$ROLE_NAME'].name | [0]" -o tsv)
+     az role assignment list --role "$ROLE_ID" --all --query "[].{principal:principalName, principalType:principalType, scope:scope}" -o table
+     ```
+     - How many principals have this role?
+     - What principal types: Users, Service Principals, Managed Identities, Groups?
+     - Are assignments at subscription scope or narrower scopes?
+
+  6. **Assess Environment and Scope**:
+     - Production subscription: **CRITICAL PRIORITY**
+     - Dev/test subscription: **MEDIUM PRIORITY**
+     - Sandbox subscription: **LOW PRIORITY**
+     - Management group scope: **HIGHEST RISK** (affects multiple subscriptions)
+
+  7. **Check Creation and Modification History**:
+     ```bash
+     # Get role creation metadata
+     az role definition list --custom-role-only true --query "[?roleName=='<role-name>'].{created:createdOn, createdBy:createdBy, updated:updatedOn, updatedBy:updatedBy}" -o json
+     ```
+     - When was role created? Recent or long-standing?
+     - Who created it? Authorized admin or suspicious account?
+     - Recent modifications? What changed?
+
+  8. **Compare with Built-In Roles**:
+     - Could the built-in Owner or Contributor role be used instead?
+     - If custom role is required, could it use explicit actions instead of wildcards?
+     - Check if wildcard scope is truly necessary or overly broad
+
+  9. **Review Business Justification**:
+     - Is there documented approval for this custom role?
+     - Is it listed in security exceptions or approved automation roles?
+     - Has it been reviewed in the last 90 days?
+     - Are there compensating controls (e.g., PIM, Azure Policy conditions)?
+
+  10. **Identify Alternatives**:
+      - Can workload use Azure services instead of broad automation?
+      - Can role be scoped to resource groups instead of subscription?
+      - Can explicit actions replace wildcards?
+      - Can built-in roles like Contributor (with NotActions) suffice?
+
+  Remediation Steps:
+
+  **Option 1: Replace with Built-In Role**
+  If the custom role duplicates built-in functionality:
+  ```bash
+  # List role assignments for custom role
+  ROLE_NAME="<role-name>"
+  ROLE_ID=$(az role definition list --custom-role-only true --query "[?roleName=='$ROLE_NAME'].name | [0]" -o tsv)
+
+  # Reassign principals to built-in role
+  az role assignment create \
+    --assignee <principal-id> \
+    --role "Contributor" \
+    --scope "/subscriptions/<subscription-id>"
+
+  # Remove custom role assignment
+  az role assignment delete \
+    --assignee <principal-id> \
+    --role "$ROLE_ID" \
+    --scope "/subscriptions/<subscription-id>"
+
+  # Delete custom role definition (after all assignments removed)
+  az role definition delete --name "$ROLE_ID"
+  ```
+
+  **Option 2: Refactor to Explicit Actions**
+  Replace wildcards with explicit action lists:
+  ```bash
+  # Export current role definition
+  az role definition list --custom-role-only true --name "<role-name>" > custom-role.json
+
+  # Edit custom-role.json to replace wildcards with explicit actions
+  # Example: Replace "*" with specific actions needed:
+  # ["Microsoft.Resources/deployments/*", "Microsoft.Compute/virtualMachines/*", ...]
+
+  # Update role definition
+  az role definition update --role-definition custom-role.json
+  ```
+
+  **Option 3: Scope Reduction**
+  Narrow assignable scopes to resource groups:
+  ```bash
+  # Update role assignable scopes
+  az role definition update \
+    --role-definition '{
+      "Name": "<role-name>",
+      "AssignableScopes": [
+        "/subscriptions/<subscription-id>/resourceGroups/<rg-name-1>",
+        "/subscriptions/<subscription-id>/resourceGroups/<rg-name-2>"
+      ]
+    }'
+
+  # Reassign role at narrower scope
+  az role assignment create \
+    --assignee <principal-id> \
+    --role "<role-name>" \
+    --resource-group <rg-name>
+
+  # Remove subscription-level assignment
+  az role assignment delete \
+    --assignee <principal-id> \
+    --role "<role-name>" \
+    --scope "/subscriptions/<subscription-id>"
+  ```
+
+  **Option 4: Implement Compensating Controls**
+  If broad role is required, add defense-in-depth:
+
+  1. **Enable Azure Privileged Identity Management (PIM)**:
+     ```bash
+     # PIM requires Azure AD Premium P2
+     # Configure role as eligible in PIM (just-in-time activation)
+     # Requires manual approval or MFA for activation
+     # Limits persistent assignments
+     ```
+
+  2. **Add Azure Policy Conditions**:
+     ```bash
+     # Create policy to restrict role assignment conditions
+     # Example: Restrict based on resource tags, locations, or types
+     az policy definition create --name "restrict-custom-owner-role" \
+       --rules <policy-rules.json> \
+       --params <policy-params.json>
+     ```
+
+  3. **Enable Activity Log Monitoring**:
+     ```bash
+     # Create alert for custom role assignments
+     az monitor activity-log alert create \
+       --name "custom-owner-role-assigned" \
+       --condition category=Administrative and operationName=Microsoft.Authorization/roleAssignments/write \
+       --action-group <action-group-id> \
+       --scope /subscriptions/<subscription-id>
+     ```
+
+  4. **Implement Role Assignment Reviews**:
+     - Schedule quarterly access reviews for custom role assignments
+     - Use Azure AD Access Reviews (requires Azure AD Premium P2)
+     - Validate business justification remains current
+
+  5. **Restrict Role Modification**:
+     ```bash
+     # Use deny assignments to prevent role definition modification
+     # Requires custom implementation (deny assignments are generally Azure-managed)
+     # Alternative: Remove roleDefinitions/write from all non-admin roles
+     ```
+
+  Azure CLI Commands:
+  ```bash
+  # List all custom roles with wildcard actions at subscription scope
+  az role definition list --custom-role-only true --subscription <subscription-id> \
+    --query "[?contains(assignableScopes[0], '/subscriptions/')].{name:roleName, actions:permissions[0].actions, scopes:assignableScopes}" -o table
+
+  # Get detailed role definition
+  az role definition list --name "<role-name>" --output json
+
+  # Find all assignments of a specific custom role
+  ROLE_ID=$(az role definition list --custom-role-only true --query "[?roleName=='<role-name>'].name | [0]" -o tsv)
+  az role assignment list --role "$ROLE_ID" --all --include-inherited --output table
+
+  # Check role creation and modification history
+  az role definition list --custom-role-only true --query "[?roleName=='<role-name>'].{created:createdOn, createdBy:createdBy, updated:updatedOn, updatedBy:updatedBy}" -o json
+  ```
+
+  Compliance Impact:
+  - Violates principle of least privilege (CIS Azure Benchmark, NIST 800-53, ISO 27001)
+  - Increases risk of privilege escalation and unauthorized access (SOC 2, HIPAA requirements)
+  - May violate organization's role-based access control policies
+  - Fails cloud security best practices (CSA CCM, Azure Security Benchmark)
+  - Increases audit findings and compliance risk for PCI-DSS, GDPR, FedRAMP
+
+  Additional Considerations:
+  - **Wildcard Expansion**: Wildcard permissions automatically expand to new actions when Azure adds new services
+  - **Permission Creep**: Custom roles tend to accumulate permissions over time without review
+  - **Monitoring Gaps**: Security tools focused on built-in roles miss custom role activity
+  - **Role Proliferation**: Organizations often create multiple similar custom roles instead of standardizing
+  - **NotActions Limitations**: NotActions don't provide hard security boundaries in additive permission model
+  - **Cross-Provider Impact**: */write and */delete affect ALL Azure resource providers, not just expected ones
+  - **Subscription Takeover**: Owner-equivalent roles enable full subscription control from single identity compromise
+
+  References for Security Teams:
+  - Review Azure Security Benchmark guidance on custom roles and least privilege
+  - Implement role governance policies (approval workflows, quarterly reviews)
+  - Security awareness training on wildcard permission risks
+  - Incident response playbooks for privileged role compromise scenarios
+  - Consider Azure Policy to prevent creation of overly permissive custom roles
+
+references:
+  - https://learn.microsoft.com/en-us/azure/role-based-access-control/custom-roles
+  - https://learn.microsoft.com/en-us/azure/role-based-access-control/role-definitions
+  - https://learn.microsoft.com/en-us/azure/role-based-access-control/resource-provider-operations
+  - https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles
+  - https://arxiv.org/html/2506.10755v1
+query: |
+  AuthorizationResources
+  | where type =~ 'microsoft.authorization/roledefinitions'
+  | where properties.type == 'CustomRole'
+  | mv-expand permission = properties.permissions
+  | mv-expand action = permission.actions
+  | extend actionStr = tostring(action)
+  | extend
+      hasFullWildcard = (actionStr =~ '*'),
+      hasCrossProviderWrite = (actionStr =~ '*/write'),
+      hasCrossProviderDelete = (actionStr =~ '*/delete'),
+      hasCrossProviderAction = (actionStr =~ '*/action')
+  | where hasFullWildcard or hasCrossProviderWrite or hasCrossProviderDelete or hasCrossProviderAction
+  | extend
+      assignableScopes = properties.assignableScopes,
+      firstScope = tostring(properties.assignableScopes[0])
+  | extend
+      isResourceGroupScope = iff(firstScope contains '/resourceGroups/', true, false),
+      isRootScope = iff(firstScope == '/', true, false)
+  | where isResourceGroupScope == false or isRootScope == true
+  | extend
+      roleName = tostring(properties.roleName),
+      roleDescription = tostring(properties.description),
+      scopesStr = tostring(assignableScopes)
+  | summarize
+      wildcardActions = make_set(actionStr),
+      hasFullWildcard = max(iff(hasFullWildcard, 1, 0)),
+      hasCrossProviderWrite = max(iff(hasCrossProviderWrite, 1, 0)),
+      hasCrossProviderDelete = max(iff(hasCrossProviderDelete, 1, 0)),
+      hasCrossProviderAction = max(iff(hasCrossProviderAction, 1, 0)),
+      assignableScopesStr = any(scopesStr),
+      roleNameStr = any(roleName),
+      roleDescStr = any(roleDescription)
+      by id, name, type, subscriptionId
+  | project
+      id,
+      name,
+      type,
+      roleName = roleNameStr,
+      roleDescription = roleDescStr,
+      assignableScopes = assignableScopesStr,
+      subscriptionId,
+      wildcardActions,
+      hasFullWildcard = tobool(hasFullWildcard),
+      hasCrossProviderWrite = tobool(hasCrossProviderWrite),
+      hasCrossProviderDelete = tobool(hasCrossProviderDelete),
+      hasCrossProviderAction = tobool(hasCrossProviderAction),
+      ownerEquivalentRisk = case(
+          hasFullWildcard == 1, 'Critical - Full wildcard (*)',
+          (hasCrossProviderWrite == 1 and hasCrossProviderDelete == 1), 'High - Write and Delete cross-provider',
+          hasCrossProviderWrite == 1, 'High - Write cross-provider',
+          hasCrossProviderDelete == 1, 'High - Delete cross-provider',
+          'Medium - Cross-provider actions'
+      )

@@ -60,14 +60,12 @@ func TestNewARGTemplateLoaderLink(t *testing.T) {
 
 			results := 0
 			for v, ok := chain.RecvAs[ARGTemplateQueryInput](c); ok; v, ok = chain.RecvAs[ARGTemplateQueryInput](c) {
-				if tt.category != "" && !slices.Contains(v.Template.Category, tt.category) {
-					continue // Only count/assert those matching the filter
-				}
 				results++
 				assert.NotNil(t, v.Template)
 				assert.Equal(t, tt.sub, v.Subscription)
 				if tt.category != "" {
-					assert.Contains(t, v.Template.Category, tt.category)
+					assert.Contains(t, v.Template.Category, tt.category,
+						"Link should only emit templates matching the category filter")
 				}
 			}
 			assert.NoError(t, c.Error())

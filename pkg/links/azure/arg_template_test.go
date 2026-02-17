@@ -8,6 +8,7 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/pkg/templates"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewARGTemplateLoaderLink(t *testing.T) {
@@ -34,7 +35,8 @@ func TestNewARGTemplateLoaderLink(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Dynamically determine expected results
-			loader, _ := templates.NewTemplateLoader(templates.LoadEmbedded)
+			loader, err := templates.NewTemplateLoader(templates.LoadEmbedded)
+			require.NoError(t, err, "Template loader should initialize")
 			if tt.directory != "" {
 				_ = loader.LoadUserTemplates(tt.directory)
 			}

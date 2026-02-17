@@ -36,6 +36,7 @@ query: |
     | extend networkProfile = properties.networkProfile
     | extend networkPolicy = networkProfile.networkPolicy
     | extend kubernetesVersion = properties.kubernetesVersion
+    // nodeCount reflects only the first agent pool, not total nodes across all pools
     | extend nodeCount = properties.agentPoolProfiles[0].count
     | where enableRbac == false
     | project

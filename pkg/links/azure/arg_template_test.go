@@ -27,7 +27,7 @@ func TestNewARGTemplateLoaderLink(t *testing.T) {
 			name:      "With category filter",
 			sub:       "sub1",
 			directory: "",
-			category:  "Public Access",
+			category:  "arg-scan",
 		},
 	}
 
@@ -49,6 +49,7 @@ func TestNewARGTemplateLoaderLink(t *testing.T) {
 			link := NewARGTemplateLoaderLink(
 				cfg.WithArg("template-dir", tt.directory),
 				cfg.WithArg("category", tt.category),
+				cfg.WithArg("subscription", tt.sub),
 			)
 
 			c := chain.NewChain(link)

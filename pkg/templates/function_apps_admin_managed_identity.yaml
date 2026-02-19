@@ -120,9 +120,9 @@ query: |
       | extend roleAssignmentPrincipalId = tostring(properties.principalId)
       | extend roleDefinitionId = tolower(tostring(properties.roleDefinitionId))
       | extend roleAssignmentScope = tostring(properties.scope)
-      | where roleDefinitionId contains '/providers/microsoft.authorization/roledefinitions/8e3af657-a8ff-443c-a75c-2fe8c4bcb635'
-          or roleDefinitionId contains '/providers/microsoft.authorization/roledefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c'
-          or roleDefinitionId contains '/providers/microsoft.authorization/roledefinitions/18d7d88d-d35e-4fb5-a5c3-7773c20a72d9'
+      | where roleDefinitionId contains '/providers/microsoft.authorization/roledefinitions/8e3af657-a8ff-443c-a75c-2fe8c4bcb635' // Owner
+          or roleDefinitionId contains '/providers/microsoft.authorization/roledefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c' // Contributor
+          or roleDefinitionId contains '/providers/microsoft.authorization/roledefinitions/18d7d88d-d35e-4fb5-a5c3-7773c20a72d9' // User Access Administrator
   ) on $left.principalId == $right.roleAssignmentPrincipalId
   | project
       id,

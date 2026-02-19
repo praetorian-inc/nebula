@@ -99,6 +99,7 @@ func TestAKSRBACDisabledTemplateTriageNotes(t *testing.T) {
 	notes := aksRBACTemplate.TriageNotes
 	assert.Contains(t, notes, "RBAC", "Triage notes should explain RBAC")
 	assert.Contains(t, notes, "risk", "Should explain security risks")
+	assert.Contains(t, notes, "cannot be changed after cluster creation", "Should document that enableRBAC is immutable post-creation")
 }
 
 // TestTemplateCountIncreased verifies new template increases total count

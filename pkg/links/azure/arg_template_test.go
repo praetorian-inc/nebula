@@ -8,6 +8,7 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/pkg/templates"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewARGTemplateLoaderLink(t *testing.T) {
@@ -27,14 +28,15 @@ func TestNewARGTemplateLoaderLink(t *testing.T) {
 			name:      "With category filter",
 			sub:       "sub1",
 			directory: "",
-			category:  "Public Access",
+			category:  "arg-scan",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Dynamically determine expected results
-			loader, _ := templates.NewTemplateLoader(templates.LoadEmbedded)
+			loader, err := templates.NewTemplateLoader(templates.LoadEmbedded)
+			require.NoError(t, err, "Template loader should initialize")
 			if tt.directory != "" {
 				_ = loader.LoadUserTemplates(tt.directory)
 			}
@@ -49,6 +51,7 @@ func TestNewARGTemplateLoaderLink(t *testing.T) {
 			link := NewARGTemplateLoaderLink(
 				cfg.WithArg("template-dir", tt.directory),
 				cfg.WithArg("category", tt.category),
+				cfg.WithArg("subscription", tt.sub),
 			)
 
 			c := chain.NewChain(link)
@@ -57,14 +60,12 @@ func TestNewARGTemplateLoaderLink(t *testing.T) {
 
 			results := 0
 			for v, ok := chain.RecvAs[ARGTemplateQueryInput](c); ok; v, ok = chain.RecvAs[ARGTemplateQueryInput](c) {
-				if tt.category != "" && !slices.Contains(v.Template.Category, tt.category) {
-					continue // Only count/assert those matching the filter
-				}
 				results++
 				assert.NotNil(t, v.Template)
 				assert.Equal(t, tt.sub, v.Subscription)
 				if tt.category != "" {
-					assert.Contains(t, v.Template.Category, tt.category)
+					assert.Contains(t, v.Template.Category, tt.category,
+						"Link should only emit templates matching the category filter")
 				}
 			}
 			assert.NoError(t, c.Error())

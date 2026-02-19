@@ -219,8 +219,8 @@ query: |
   | where type =~ 'microsoft.network/networksecuritygroups'
   | extend nsgName = name, nsgId = id
   | mv-expand rule = properties.securityRules
-  | where rule.properties.direction == 'Inbound'
-  | where rule.properties.access == 'Allow'
+  | where rule.properties.direction =~ 'Inbound'
+  | where rule.properties.access =~ 'Allow'
   | extend ruleName = tostring(rule.name)
   | extend sourcePrefix = tostring(rule.properties.sourceAddressPrefix)
   | extend sourcePrefixes = tostring(rule.properties.sourceAddressPrefixes)

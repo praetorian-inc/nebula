@@ -30,7 +30,7 @@ triageNotes: |
   remediation is to create a new AKS cluster with RBAC enabled, migrate workloads to it, and
   decommission the old cluster.
 references:
-  - https://learn.microsoft.com/en-us/azure/aks/manage-azure-rbac
+  - https://learn.microsoft.com/en-us/azure/aks/concepts-identity#kubernetes-rbac
   - https://learn.microsoft.com/en-us/azure/aks/operator-best-practices-identity#use-kubernetes-role-based-access-control-kubernetes-rbac
 query: |
     resources

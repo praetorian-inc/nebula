@@ -24,6 +24,11 @@ triageNotes: |
   - Verify cluster usage - if actively used, plan migration to RBAC-enabled cluster
   - Review audit logs for unauthorized access patterns
   - Consider cluster version - older Kubernetes versions may require RBAC enablement strategy
+
+  Remediation Note:
+  **IMPORTANT:** The `enableRBAC` property cannot be changed after cluster creation. The only
+  remediation is to create a new AKS cluster with RBAC enabled, migrate workloads to it, and
+  decommission the old cluster.
 references:
   - https://learn.microsoft.com/en-us/azure/aks/manage-azure-rbac
   - https://learn.microsoft.com/en-us/azure/aks/operator-best-practices-identity#use-kubernetes-role-based-access-control-kubernetes-rbac

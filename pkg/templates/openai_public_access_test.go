@@ -54,8 +54,8 @@ func TestOpenAIPublicAccess_QueryStructure(t *testing.T) {
 	// Verify OpenAI kind filter
 	assert.Contains(t, query, "kind =~ 'OpenAI'")
 
-	// Verify Pattern C: null-safe array length via coalesce
-	assert.Contains(t, query, "coalesce(array_length(properties.privateEndpointConnections), 0)")
+	// Verify null-safe private endpoint check
+	assert.Contains(t, query, "isnotnull(properties.privateEndpointConnections)")
 
 	// Verify public network access uses coalesce with safe default
 	assert.True(t,

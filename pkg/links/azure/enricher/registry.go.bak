@@ -37,51 +37,20 @@ func NewEnrichmentRegistry() *EnrichmentRegistry {
 			&RedisCacheEnricher{},
 			&SQLServerEnricher{},
 			&DatabaseAllowAzureServicesEnricher{},
-			&MySQLFlexibleServerEnricher{},
-			&PostgreSQLFlexibleServerEnricher{},
+
 			// Web & Application Services
 			&VirtualMachineEnricher{},
 			&AppServiceEnricher{},
 			&ContainerRegistryEnricher{},
 			&AKSClusterEnricher{},
-			&FunctionAppEnricher{},
 
 			// Messaging & Event Services
 			&EventHubEnricher{},
 			&ServiceBusEnricher{},
 			&EventGridEnricher{},
-			&EventGridParentEnricher{},
-
-			// Tier 3: IoT & Event Services
-			&IoTHubEnricher{},
-			&EventGridTopicsEnricher{},
-			&NotificationHubsEnricher{},
-			// Search Services
-			&SearchServiceEnricher{},
 
 			// Security Services
 			&KeyVaultEnricher{},
-
-			// Cognitive & AI Services
-			&CognitiveServicesEnricher{},
-
-			// API Management
-			&APIManagementEnricher{},
-
-			// Tier 4A: Configuration & Container Services
-			&AppConfigurationEnricher{},
-			&DataExplorerEnricher{},
-			&ContainerInstancesEnricher{},
-			&DatabricksEnricher{},
-
-			// Tier 4B: Analytics & ML Services
-			&SynapseEnricher{},
-			&MLWorkspaceEnricher{},
-
-			// Tier 4C: Apps & Networking Services
-			&ContainerAppsEnricher{},
-			&LogicAppsEnricher{},
-			&ApplicationGatewayEnricher{},
 		},
 	}
 }

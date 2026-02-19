@@ -18,7 +18,8 @@ import (
 type APIManagementEnricher struct{}
 
 func (a *APIManagementEnricher) CanEnrich(templateID string) bool {
-	return templateID == "apim_cross_tenant_signup_bypass"
+	return templateID == "apim_cross_tenant_signup_bypass" ||
+	       templateID == "api_management_public_access"
 }
 
 // signupPayload represents the test payload for the signup API
@@ -61,17 +62,33 @@ func (a *APIManagementEnricher) Enrich(ctx context.Context, resource *model.Azur
 		return commands
 	}
 
-	// Try to get the developer portal URL from properties, or construct it
-	var developerPortalURL string
-	if portalURL, ok := resource.Properties["developerPortalUrl"].(string); ok && portalURL != "" {
-		developerPortalURL = portalURL
-	} else {
-		// Construct default developer portal URL
-		developerPortalURL = fmt.Sprintf("https://%s.developer.azure-api.net", apimName)
+	// Extract resource group from ID
+	resourceGroup := ""
+	if resourceID, ok := resource.Properties["id"].(string); ok {
+		parts := strings.Split(resourceID, "/")
+		for i, part := range parts {
+			if strings.ToLower(part) == "resourcegroups" && i+1 < len(parts) {
+				resourceGroup = parts[i+1]
+				break
+			}
+		}
 	}
 
-	// Ensure URL doesn't have trailing slash
-	developerPortalURL = strings.TrimSuffix(developerPortalURL, "/")
+	// Extract gateway URL from properties with fallback
+	var gatewayURL string
+	if gwURL, ok := resource.Properties["gatewayUrl"].(string); ok && gwURL != "" {
+		gatewayURL = gwURL
+	} else {
+		// Fallback: construct gateway URL
+		gatewayURL = fmt.Sprintf("https://%s.azure-api.net", apimName)
+	}
+	gatewayURL = strings.TrimSuffix(gatewayURL, "/")
+
+	// Extract developer portal URL from properties (no fallback - may not exist)
+	var developerPortalURL string
+	if portalURL, ok := resource.Properties["developerPortalUrl"].(string); ok && portalURL != "" {
+		developerPortalURL = strings.TrimSuffix(portalURL, "/")
+	}
 
 	// Create HTTP client with timeout
 	client := &http.Client{
@@ -84,19 +101,68 @@ func (a *APIManagementEnricher) Enrich(ctx context.Context, resource *model.Azur
 		},
 	}
 
-	// Test 1: Check if Developer Portal is accessible
-	portalAccessCommand := a.testPortalAccess(client, developerPortalURL)
-	commands = append(commands, portalAccessCommand)
+	// Test 1: Check if gateway endpoint is accessible
+	gatewayAccessCommand := a.testGatewayAccess(client, gatewayURL)
+	commands = append(commands, gatewayAccessCommand)
 
-	// Test 2: Check if /signup page is accessible (GET)
-	signupPageCommand := a.testSignupPageAccess(client, developerPortalURL)
-	commands = append(commands, signupPageCommand)
+	// Tests 2-4: Developer portal tests (only if developer portal exists)
+	if developerPortalURL != "" {
+		// Test 2: Check if Developer Portal is accessible
+		portalAccessCommand := a.testPortalAccess(client, developerPortalURL)
+		commands = append(commands, portalAccessCommand)
 
-	// Test 3: Test the signup API endpoint directly (POST) - the actual vulnerability test
-	signupAPICommand := a.testSignupAPI(client, developerPortalURL)
-	commands = append(commands, signupAPICommand)
+		// Test 3: Check if /signup page is accessible (GET)
+		signupPageCommand := a.testSignupPageAccess(client, developerPortalURL)
+		commands = append(commands, signupPageCommand)
+
+		// Test 4: Test the signup API endpoint directly (POST) - the actual vulnerability test
+		signupAPICommand := a.testSignupAPI(client, developerPortalURL)
+		commands = append(commands, signupAPICommand)
+	} else {
+		// Developer portal URL not found - likely Consumption tier
+		commands = append(commands, Command{
+			Command:      "",
+			Description:  "Developer portal URL not found in resource properties",
+			ActualOutput: "Developer portal URL not found in resource properties - likely Consumption tier (no developer portal). Signup vulnerability tests skipped.",
+			ExitCode:     0,
+		})
+	}
+
+	// Add Azure CLI command for manual inspection
+	if resourceGroup != "" {
+		azCommand := Command{
+			Command:                   fmt.Sprintf("az apim show --name %s --resource-group %s", apimName, resourceGroup),
+			Description:               "Get full APIM configuration via Azure CLI",
+			ExpectedOutputDescription: "Shows complete APIM configuration including SKU tier",
+		}
+		commands = append(commands, azCommand)
+	}
 
 	return commands
+}
+
+// testGatewayAccess tests if the APIM gateway endpoint is accessible
+func (a *APIManagementEnricher) testGatewayAccess(client *http.Client, gatewayURL string) Command {
+	cmd := Command{
+		Command:                   fmt.Sprintf("curl -i '%s' --max-time 15", gatewayURL),
+		Description:               "Test if APIM gateway endpoint is accessible",
+		ExpectedOutputDescription: "401 = authentication required | 200 = gateway accessible | 403 = blocked",
+	}
+
+	resp, err := client.Get(gatewayURL)
+	if err != nil {
+		cmd.Error = err.Error()
+		cmd.ActualOutput = fmt.Sprintf("Request failed: %s", err.Error())
+		cmd.ExitCode = -1
+		return cmd
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1000))
+	cmd.ActualOutput = fmt.Sprintf("Status: %d, Body preview: %s", resp.StatusCode, truncateString(string(body), 500))
+	cmd.ExitCode = resp.StatusCode
+
+	return cmd
 }
 
 // testPortalAccess tests if the Developer Portal is accessible

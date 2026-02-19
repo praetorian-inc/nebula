@@ -124,11 +124,17 @@ references:
 query: |
   resources
   | where type =~ 'microsoft.web/sites'
+  // Scope to Function Apps only; enricher handles anonymous auth detection
   | where kind contains 'functionapp'
+  | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'Enabled'))
+  | extend httpsOnly = coalesce(tobool(properties.httpsOnly), false)
   | project
       id,
       name,
       type,
+      kind,
       location,
       resourceGroup,
+      publicNetworkAccess,
+      httpsOnly,
       subscriptionId

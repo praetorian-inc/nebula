@@ -1,0 +1,13 @@
+name: Resource to Role
+description: Enriches the graph by creating relationships between resources and their assumed roles.
+impactedServices:
+  - IAM
+severity: Informational
+order: 40
+cypher: |
+  MATCH (res:Resource) 
+  WHERE NOT res.Role IS NULL 
+  WITH res
+  MATCH (p:Principal) WHERE p.arn = res.Role
+  MERGE (res)-[r:STS_ASSUMEROLE]->(p)
+  RETURN res,r,p

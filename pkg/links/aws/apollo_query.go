@@ -7,9 +7,9 @@ import (
 
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
-	"github.com/praetorian-inc/konstellation/pkg/graph"
-	"github.com/praetorian-inc/konstellation/pkg/graph/adapters"
-	"github.com/praetorian-inc/konstellation/pkg/graph/queries"
+	"github.com/praetorian-inc/nebula/pkg/graph"
+	"github.com/praetorian-inc/nebula/pkg/graph/adapters"
+	"github.com/praetorian-inc/nebula/pkg/graph/queries"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	"github.com/praetorian-inc/tabularium/pkg/model/model"
 )

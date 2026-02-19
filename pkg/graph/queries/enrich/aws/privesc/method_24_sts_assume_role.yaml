@@ -1,0 +1,26 @@
+name: Privesc Method 24 - AssumeRole
+description: Creates CAN_PRIVESC relationship when a principal can directly assume other roles
+impactedServices:
+  - STS
+  - IAM
+severity: High
+order: 112
+cypher: |
+  MATCH (principal)-[assume:STS_ASSUMEROLE]->(targetRole:AWS_IAM_Role)
+  WHERE principal.admin IS NULL
+  AND (principal:AWS_IAM_Role OR principal:AWS_IAM_User OR principal:AWS_IAM_Group)
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-24-AssumeRole",
+    privesc.requires = ["sts:AssumeRole"],
+    privesc.service = "STS",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-24-AssumeRole"
+      THEN privesc.method + ",Method-24-AssumeRole"
+      ELSE privesc.method
+    END
+

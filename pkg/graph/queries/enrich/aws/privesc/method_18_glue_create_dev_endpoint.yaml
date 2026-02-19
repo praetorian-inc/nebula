@@ -1,0 +1,27 @@
+name: Privesc Method 18 - Glue CreateDevEndpoint
+description: Creates CAN_PRIVESC relationship when a principal can pass roles to Glue dev endpoints
+impactedServices:
+  - IAM
+  - Glue
+severity: High
+order: 117
+cypher: |
+  MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
+  WHERE principal.admin IS NULL
+    AND 'glue.amazonaws.com' IN targetRole.trustedServices
+    AND EXISTS((principal)-[:GLUE_CREATEDEVENDPOINT]->())
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-18-Glue-CreateDevEndpoint",
+    privesc.requires = ["iam:PassRole", "glue:CreateDevEndpoint"],
+    privesc.service = "Glue",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-18-Glue-CreateDevEndpoint"
+      THEN privesc.method + ",Method-18-Glue-CreateDevEndpoint"
+      ELSE privesc.method
+    END
+

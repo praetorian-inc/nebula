@@ -1,0 +1,28 @@
+name: Privesc Method 22 - CloudFormation ChangeSet
+description: Creates CAN_PRIVESC relationship when a principal can pass roles to CloudFormation changesets
+impactedServices:
+  - IAM
+  - CloudFormation
+severity: High
+order: 121
+cypher: |
+  MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
+  WHERE principal.admin IS NULL
+    AND 'cloudformation.amazonaws.com' IN targetRole.trustedServices
+    AND EXISTS((principal)-[:CLOUDFORMATION_CREATECHANGESET]->())
+    AND EXISTS((principal)-[:CLOUDFORMATION_EXECUTECHANGESET]->())
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-22-CloudFormation-ChangeSet",
+    privesc.requires = ["iam:PassRole", "cloudformation:CreateChangeSet", "cloudformation:ExecuteChangeSet"],
+    privesc.service = "CloudFormation",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-22-CloudFormation-ChangeSet"
+      THEN privesc.method + ",Method-22-CloudFormation-ChangeSet"
+      ELSE privesc.method
+    END
+

@@ -134,10 +134,16 @@ query: |
   resources
   | where type =~ 'microsoft.web/sites'
   | where kind !contains 'functionapp'
+  // Enricher calls config/authsettingsV2 to check platform.enabled
+  | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'Enabled'))
+  | extend httpsOnly = coalesce(tobool(properties.httpsOnly), false)
   | project
       id,
       name,
       type,
+      kind,
       location,
       resourceGroup,
+      publicNetworkAccess,
+      httpsOnly,
       subscriptionId

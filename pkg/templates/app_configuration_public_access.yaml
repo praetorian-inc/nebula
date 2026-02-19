@@ -36,9 +36,9 @@ references:
 query: |
   resources
   | where type =~ 'Microsoft.AppConfiguration/configurationStores'
-  | extend publicNetworkAccess = coalesce(properties.publicNetworkAccess, 'Enabled')
-  | extend sku = properties.sku.name
-  | where publicNetworkAccess != 'Disabled'
+  | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'enabled'))
+  | extend sku = sku.name
+  | where publicNetworkAccess != 'disabled'
   | project
       id,
       name,

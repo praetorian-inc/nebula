@@ -39,12 +39,12 @@ references:
 query: |
   resources
   | where type =~ 'Microsoft.MachineLearningServices/workspaces'
-  | extend publicNetworkAccess = coalesce(properties.publicNetworkAccess, 'Enabled')
+  | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'enabled'))
   | extend sku = sku.name
   | extend discoveryUrl = properties.discoveryUrl
   | extend notebookFqdn = properties.notebookInfo.fqdn
   | extend isPrivateLinkEnabled = properties.notebookInfo.isPrivateLinkEnabled
-  | where publicNetworkAccess != 'Disabled'
+  | where publicNetworkAccess != 'disabled'
   | project
       id,
       name,

@@ -35,14 +35,14 @@ references:
 query: |
   resources
   | where type =~ 'Microsoft.Devices/IotHubs'
-  | extend publicNetworkAccess = coalesce(properties.publicNetworkAccess, 'Enabled')
-  | extend defaultAction = coalesce(properties.networkRuleSet.defaultAction, 'Allow')
-  | extend sku = properties.sku.name
+  | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'enabled'))
+  | extend defaultAction = tolower(coalesce(properties.networkRuleSet.defaultAction, 'allow'))
+  | extend sku = sku.name
   | extend endpoint = properties.eventHubEndpoints.events.endpoint
   | extend hostname = properties.hostName
   | extend zoneRedundant = properties.zoneRedundant
-  | where publicNetworkAccess != 'Disabled'
-  | where defaultAction == 'Allow' or
+  | where publicNetworkAccess != 'disabled'
+  | where defaultAction == 'allow' or
       isnull(properties.networkRuleSet.ipRules) or
       properties.networkRuleSet.ipRules has '0.0.0.0' or
       properties.networkRuleSet.ipRules has '0.0.0.0/0' or

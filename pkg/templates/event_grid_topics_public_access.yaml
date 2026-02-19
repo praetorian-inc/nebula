@@ -34,11 +34,11 @@ references:
 query: |
   resources
   | where type =~ 'Microsoft.EventGrid/topics'
-  | extend publicNetworkAccess = coalesce(properties.publicNetworkAccess, 'Enabled')
-  | extend sku = properties.sku.name
+  | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'enabled'))
+  | extend sku = sku.name
   | extend endpoint = properties.endpoint
   | extend location_prop = properties.location
-  | where publicNetworkAccess != 'Disabled'
+  | where publicNetworkAccess != 'disabled'
   | project
       id,
       name,

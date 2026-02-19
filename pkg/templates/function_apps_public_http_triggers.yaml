@@ -42,6 +42,7 @@ query: |
   resources
   | where type =~ 'Microsoft.Web/sites'
   | where kind contains 'functionapp'
+  | where kind !contains 'workflowapp'
   | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'enabled'))
   | where publicNetworkAccess != 'disabled'
   | extend hasIpRestrictions = (isnotnull(properties.siteConfig.ipSecurityRestrictions) and array_length(properties.siteConfig.ipSecurityRestrictions) > 0)

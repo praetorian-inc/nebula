@@ -39,11 +39,11 @@ references:
 query: |
   resources
   | where type =~ 'Microsoft.Synapse/workspaces'
-  | extend publicNetworkAccess = coalesce(properties.publicNetworkAccess, 'Enabled')
+  | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'enabled'))
   | extend managedVirtualNetwork = properties.managedVirtualNetwork
   | extend sqlAdminLogin = properties.sqlAdministratorLogin
   | extend connectivityEndpoints = properties.connectivityEndpoints
-  | where publicNetworkAccess != 'Disabled'
+  | where publicNetworkAccess != 'disabled'
   | project
       id,
       name,

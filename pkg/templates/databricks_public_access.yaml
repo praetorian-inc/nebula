@@ -39,10 +39,10 @@ references:
 query: |
   resources
   | where type =~ 'Microsoft.Databricks/workspaces'
-  | extend publicNetworkAccess = coalesce(properties.publicNetworkAccess, 'Enabled')
+  | extend publicNetworkAccess = tolower(coalesce(properties.publicNetworkAccess, 'enabled'))
   | extend sku = sku.name
   | extend workspaceUrl = properties.workspaceUrl
-  | where publicNetworkAccess != 'Disabled'
+  | where publicNetworkAccess != 'disabled'
   | project
       id,
       name,

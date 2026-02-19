@@ -40,7 +40,7 @@ query: |
   resources
   | where type =~ 'Microsoft.Kusto/clusters'
   | extend publicNetworkAccess = coalesce(properties.publicNetworkAccess, 'Enabled')
-  | extend sku = properties.sku.name
+  | extend sku = sku.name
   | extend state = properties.state
   | extend uri = properties.uri
   | where publicNetworkAccess != 'Disabled'

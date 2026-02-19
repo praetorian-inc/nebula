@@ -272,6 +272,10 @@ references:
   - https://posts.specterops.io/azure-privilege-escalation-via-azure-api-permissions-abuse-74aee1006f48
   - https://github.com/projectdiscovery/nuclei-templates/blob/main/cloud/azure/virtualmachines/azure-vm-managed-identity-unassigned.yaml
 query: |
+  // Note: Role filtering (Owner, Contributor, User Access Administrator) is intentionally
+  // NOT performed in this ARG query. That responsibility is delegated to the enricher,
+  // which queries the Azure Authorization API for role assignments per identity principalId.
+  // This query returns ALL VMs with any managed identity; the enricher determines privilege level.
   resources
   | where type =~ 'microsoft.compute/virtualmachines'
   | where isnotnull(identity)

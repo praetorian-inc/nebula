@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -130,96 +131,385 @@ func (a *AppServiceEnricher) checkRemoteDebugging(ctx context.Context, resource 
 	}
 }
 
-// checkPublicAccess performs HTTP testing for publicly accessible App Services
+// checkPublicAccess performs enrichment for publicly accessible App Services.
+// For function apps (kind contains "functionapp"), it uses the Management API to enumerate
+// HTTP triggers with auth levels, check IP restrictions, and check EasyAuth — providing
+// actionable triage data beyond simple curl probes.
 func (a *AppServiceEnricher) checkPublicAccess(ctx context.Context, resource *model.AzureResource) []Command {
-	commands := []Command{}
-
-	// Extract App Service name
 	appServiceName := resource.Name
+	subscriptionID := resource.AccountRef
+	resourceGroupName := resource.ResourceGroup
+
 	if appServiceName == "" {
-		commands = append(commands, Command{
-			Command:      "",
-			Description:  "Missing App Service name",
+		return []Command{{
+			Description:  "Enrich publicly accessible App Service",
 			ActualOutput: "Error: App Service name is empty",
-		})
-		return commands
+			ExitCode:     1,
+		}}
 	}
 
-	// Construct App Service URL
-	appServiceURL := fmt.Sprintf("https://%s.azurewebsites.net", appServiceName)
-
-	// Create HTTP client with timeout
-	client := &http.Client{
+	// Create HTTP client — do not follow redirects so we can detect auth gates
+	httpClient := &http.Client{
 		Timeout: 10 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// Don't follow more than 5 redirects
-			if len(via) >= 5 {
-				return http.ErrUseLastResponse
-			}
-			return nil
+			return http.ErrUseLastResponse
 		},
 	}
 
-	// Test 1: HTTP GET to main page
-	resp, err := client.Get(appServiceURL)
+	var commands []Command
 
-	httpGetCommand := Command{
-		Command:                   fmt.Sprintf("curl -i -L '%s' --max-time 10", appServiceURL),
-		Description:               "Test HTTP GET to App Service default page",
-		ExpectedOutputDescription: "200 = accessible | 401/403 = authentication required | 404 = not found but accessible | 503 = app stopped/error",
+	// Step 1: HTTP probe to main page (applies to all app services)
+	mainCmd := a.probeMainPage(httpClient, appServiceName)
+	commands = append(commands, mainCmd)
+
+	// Step 2: SCM/Kudu probe
+	scmCmd := a.probeSCMSite(httpClient, appServiceName)
+	commands = append(commands, scmCmd)
+
+	// Step 3: For function apps, enumerate triggers via Management API
+	kind, _ := resource.Properties["kind"].(string)
+	isFunctionApp := strings.Contains(strings.ToLower(kind), "functionapp")
+
+	if isFunctionApp && subscriptionID != "" && resourceGroupName != "" {
+		mgmtCmds := a.enrichFunctionApp(ctx, subscriptionID, resourceGroupName, appServiceName)
+		commands = append(commands, mgmtCmds...)
 	}
-
-	if err != nil {
-		httpGetCommand.Error = err.Error()
-		httpGetCommand.ActualOutput = fmt.Sprintf("Request failed: %s", err.Error())
-		httpGetCommand.ExitCode = -1
-	} else {
-		defer resp.Body.Close()
-		// Read full response body (limit to first 2000 characters for App Service responses)
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2000))
-		if readErr != nil {
-			httpGetCommand.ActualOutput = fmt.Sprintf("Body read error: %s", readErr.Error())
-		} else {
-			httpGetCommand.ActualOutput = fmt.Sprintf("Body: %s", string(body))
-		}
-		httpGetCommand.ExitCode = resp.StatusCode
-	}
-
-	commands = append(commands, httpGetCommand)
-
-	// Test 2: Check for SCM/Kudu site (if accessible)
-	scmURL := fmt.Sprintf("https://%s.scm.azurewebsites.net", appServiceName)
-
-	scmResp, scmErr := client.Get(scmURL)
-
-	scmCommand := Command{
-		Command:                   fmt.Sprintf("curl -i '%s' --max-time 10", scmURL),
-		Description:               "Test access to SCM/Kudu management site",
-		ExpectedOutputDescription: "200 = SCM accessible (high risk) | 401/403 = authentication required | timeout = blocked",
-	}
-
-	if scmErr != nil {
-		scmCommand.Error = scmErr.Error()
-		scmCommand.ActualOutput = fmt.Sprintf("Request failed: %s", scmErr.Error())
-		scmCommand.ExitCode = -1
-	} else {
-		defer scmResp.Body.Close()
-		// Read SCM response body
-		body, readErr := io.ReadAll(io.LimitReader(scmResp.Body, 1000))
-		if readErr != nil {
-			scmCommand.ActualOutput = fmt.Sprintf("Body read error: %s", readErr.Error())
-		} else {
-			scmCommand.ActualOutput = fmt.Sprintf("Body: %s", string(body))
-		}
-		scmCommand.ExitCode = scmResp.StatusCode
-	}
-
-	commands = append(commands, scmCommand)
 
 	return commands
 }
 
-// checkFunctionAppAnonymousAccess detects HTTP-triggered functions with anonymous authentication
+// probeMainPage sends an HTTP GET to the App Service default page and returns a clean
+// status summary instead of the raw HTML body (which breaks markdown rendering).
+func (a *AppServiceEnricher) probeMainPage(client *http.Client, appName string) Command {
+	appURL := fmt.Sprintf("https://%s.azurewebsites.net", appName)
+
+	cmd := Command{
+		Command:                   fmt.Sprintf("curl -i --max-redirects 0 '%s' --max-time 10", appURL),
+		Description:               "Test HTTP GET to App Service default page",
+		ExpectedOutputDescription: "200 = accessible | 3xx = redirect (auth) | 401/403 = auth required or stopped | timeout = blocked",
+	}
+
+	resp, err := client.Get(appURL)
+	if err != nil {
+		cmd.Error = err.Error()
+		cmd.ActualOutput = fmt.Sprintf("Request failed: %s", err.Error())
+		cmd.ExitCode = -1
+		return cmd
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4000))
+	bodyStr := string(body)
+
+	// Extract a meaningful summary instead of dumping raw HTML
+	title := extractHTMLTitle(bodyStr)
+
+	var verdict string
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		verdict = "ACCESSIBLE"
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		location := resp.Header.Get("Location")
+		verdict = fmt.Sprintf("REDIRECT to %s (likely auth gate)", location)
+	case resp.StatusCode == 401:
+		verdict = "AUTH REQUIRED (401)"
+	case resp.StatusCode == 403:
+		if strings.Contains(bodyStr, "stopped") || strings.Contains(bodyStr, "Unavailable") {
+			verdict = "APP STOPPED (403 - Web App Unavailable)"
+		} else {
+			verdict = "FORBIDDEN (403)"
+		}
+	default:
+		verdict = fmt.Sprintf("HTTP %d", resp.StatusCode)
+	}
+
+	if title != "" {
+		cmd.ActualOutput = fmt.Sprintf("Status: %d, %s\nPage title: %s", resp.StatusCode, verdict, title)
+	} else {
+		cmd.ActualOutput = fmt.Sprintf("Status: %d, %s\nBody preview: %s", resp.StatusCode, verdict, truncateString(bodyStr, 200))
+	}
+
+	// Semantic exit code: 1 = finding (accessible), 0 = ok (blocked/stopped)
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		cmd.ExitCode = 1
+	case resp.StatusCode == 403 && (strings.Contains(bodyStr, "stopped") || strings.Contains(bodyStr, "Unavailable")):
+		cmd.ExitCode = 0
+	case resp.StatusCode == 401 || resp.StatusCode == 403:
+		cmd.ExitCode = 1 // reachable, just auth-gated
+	default:
+		cmd.ExitCode = 0
+	}
+
+	return cmd
+}
+
+// probeSCMSite tests the SCM/Kudu management endpoint.
+func (a *AppServiceEnricher) probeSCMSite(client *http.Client, appName string) Command {
+	scmURL := fmt.Sprintf("https://%s.scm.azurewebsites.net", appName)
+
+	cmd := Command{
+		Command:                   fmt.Sprintf("curl -i --max-redirects 0 '%s' --max-time 10", scmURL),
+		Description:               "Test access to SCM/Kudu management site (high risk if accessible)",
+		ExpectedOutputDescription: "200 = SCM accessible (HIGH RISK) | 3xx = redirect (auth) | 401/403 = auth required | timeout = blocked",
+	}
+
+	resp, err := client.Get(scmURL)
+	if err != nil {
+		cmd.Error = err.Error()
+		cmd.ActualOutput = fmt.Sprintf("Request failed: %s", err.Error())
+		cmd.ExitCode = -1
+		return cmd
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1000))
+
+	var exitCode int
+	var verdict string
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		exitCode = 1
+		verdict = "SCM ACCESSIBLE (HIGH RISK)"
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		exitCode = 0
+		verdict = "Redirect (auth required)"
+	case resp.StatusCode == 401 || resp.StatusCode == 403:
+		exitCode = 0
+		verdict = "Auth required"
+	default:
+		exitCode = 0
+		verdict = fmt.Sprintf("HTTP %d", resp.StatusCode)
+	}
+
+	cmd.ActualOutput = fmt.Sprintf("Status: %d, %s\nBody preview: %s", resp.StatusCode, verdict, truncateString(string(body), 200))
+	cmd.ExitCode = exitCode
+
+	return cmd
+}
+
+// enrichFunctionApp uses the Management API to enumerate HTTP triggers, check IP restrictions,
+// and check EasyAuth for a function app. Returns additional enrichment commands.
+func (a *AppServiceEnricher) enrichFunctionApp(ctx context.Context, subscriptionID, resourceGroupName, appName string) []Command {
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	if err != nil {
+		return []Command{{
+			Description:  "Enumerate Function App triggers via Management API",
+			ActualOutput: fmt.Sprintf("Error getting Azure credentials: %s", err.Error()),
+			ExitCode:     -1,
+		}}
+	}
+
+	webAppsClient, err := armappservice.NewWebAppsClient(subscriptionID, cred, nil)
+	if err != nil {
+		return []Command{{
+			Description:  "Enumerate Function App triggers via Management API",
+			ActualOutput: fmt.Sprintf("Error creating WebApps client: %s", err.Error()),
+			ExitCode:     -1,
+		}}
+	}
+
+	var commands []Command
+
+	// Check IP restrictions (ARG doesn't index this)
+	ipCmd := a.checkIPRestrictions(ctx, webAppsClient, resourceGroupName, appName)
+	commands = append(commands, ipCmd)
+
+	// Enumerate HTTP triggers
+	cliEquiv := fmt.Sprintf("az functionapp function list --resource-group %s --name %s", resourceGroupName, appName)
+	triggers, totalFunctions, err := ListHTTPTriggers(ctx, webAppsClient, resourceGroupName, appName, "")
+	if err != nil {
+		commands = append(commands, Command{
+			Command:      cliEquiv,
+			Description:  "Enumerate Function App HTTP triggers via Management API",
+			ActualOutput: fmt.Sprintf("Error: %s", err.Error()),
+			ExitCode:     -1,
+		})
+		return commands
+	}
+
+	// Build trigger summary with auth level counts
+	anonymousCount := 0
+	functionKeyCount := 0
+	adminKeyCount := 0
+	for _, t := range triggers {
+		switch strings.ToLower(t.AuthLevel) {
+		case "anonymous":
+			anonymousCount++
+		case "function":
+			functionKeyCount++
+		case "admin":
+			adminKeyCount++
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Function App: %s | Total functions: %d | HTTP triggers: %d\n", appName, totalFunctions, len(triggers)))
+	sb.WriteString(fmt.Sprintf("Auth levels — Anonymous: %d | Function key: %d | Admin key: %d\n\n", anonymousCount, functionKeyCount, adminKeyCount))
+
+	for _, t := range triggers {
+		status := "enabled"
+		if t.IsDisabled {
+			status = "DISABLED"
+		}
+		methods := "ANY"
+		if len(t.Methods) > 0 {
+			methods = strings.Join(t.Methods, ", ")
+		}
+		sb.WriteString(fmt.Sprintf("  %-30s | auth=%-10s | route=%-25s | methods=%-10s | %s\n", t.FunctionName, t.AuthLevel, t.Route, methods, status))
+		if t.InvokeURL != "" {
+			sb.WriteString(fmt.Sprintf("  %-30s   invoke: %s\n", "", t.InvokeURL))
+		}
+	}
+
+	if anonymousCount > 0 {
+		sb.WriteString(fmt.Sprintf("\nFINDING: %d anonymous HTTP trigger(s) — no function key or auth token required", anonymousCount))
+	} else if len(triggers) == 0 && totalFunctions > 0 {
+		sb.WriteString("No HTTP triggers found — all functions use non-HTTP triggers (queue, timer, etc.)")
+	} else if len(triggers) == 0 && totalFunctions == 0 {
+		sb.WriteString("No functions deployed in this Function App")
+	} else {
+		sb.WriteString("All HTTP triggers require authentication (function key or admin key)")
+	}
+
+	exitCode := 0
+	if anonymousCount > 0 {
+		exitCode = 1
+	}
+
+	commands = append(commands, Command{
+		Command:                   cliEquiv,
+		Description:               "Enumerate Function App HTTP triggers via Management API",
+		ExpectedOutputDescription: "Lists all HTTP triggers with auth levels, invoke URLs, and methods",
+		ActualOutput:              sb.String(),
+		ExitCode:                  exitCode,
+	})
+
+	// Check EasyAuth as compensating control
+	easyAuthCmd := a.checkEasyAuth(ctx, webAppsClient, resourceGroupName, appName)
+	commands = append(commands, easyAuthCmd)
+
+	return commands
+}
+
+// checkIPRestrictions queries IP security restrictions via Management API.
+// ARG does not index siteConfig.ipSecurityRestrictions (always null).
+func (a *AppServiceEnricher) checkIPRestrictions(ctx context.Context, client *armappservice.WebAppsClient, resourceGroupName, appName string) Command {
+	cmd := Command{
+		Command:                   fmt.Sprintf("az webapp config access-restriction show --resource-group %s --name %s", resourceGroupName, appName),
+		Description:               "Check IP security restrictions via Management API (not available in ARG)",
+		ExpectedOutputDescription: "IP restrictions present = lower severity | No restrictions = fully open to internet",
+	}
+
+	siteConfig, err := client.GetConfiguration(ctx, resourceGroupName, appName, nil)
+	if err != nil {
+		cmd.Error = err.Error()
+		cmd.ActualOutput = fmt.Sprintf("Error getting site configuration: %s", err.Error())
+		cmd.ExitCode = -1
+		return cmd
+	}
+
+	if siteConfig.Properties == nil || siteConfig.Properties.IPSecurityRestrictions == nil {
+		cmd.ActualOutput = "No IP restrictions configured — App Service is fully open to all internet traffic."
+		cmd.ExitCode = 1
+		return cmd
+	}
+
+	restrictions := siteConfig.Properties.IPSecurityRestrictions
+
+	// Filter out the default "Allow all" rule (priority 2147483647)
+	var meaningful []*armappservice.IPSecurityRestriction
+	for _, r := range restrictions {
+		if r.Priority != nil && *r.Priority == 2147483647 {
+			continue
+		}
+		meaningful = append(meaningful, r)
+	}
+
+	if len(meaningful) == 0 {
+		cmd.ActualOutput = "No IP restrictions configured — App Service is fully open to all internet traffic."
+		cmd.ExitCode = 1
+		return cmd
+	}
+
+	var rsb strings.Builder
+	rsb.WriteString(fmt.Sprintf("IP restrictions found: %d rule(s)\n", len(meaningful)))
+	for _, r := range meaningful {
+		name := ""
+		if r.Name != nil {
+			name = *r.Name
+		}
+		action := ""
+		if r.Action != nil {
+			action = *r.Action
+		}
+		ipAddress := ""
+		if r.IPAddress != nil {
+			ipAddress = *r.IPAddress
+		}
+		priority := int32(0)
+		if r.Priority != nil {
+			priority = *r.Priority
+		}
+		rsb.WriteString(fmt.Sprintf("  [%d] %s: %s %s\n", priority, name, action, ipAddress))
+	}
+	rsb.WriteString("\nIP restrictions are present — network-level filtering is in place.")
+
+	cmd.ActualOutput = rsb.String()
+	cmd.ExitCode = 0
+	return cmd
+}
+
+// checkEasyAuth queries EasyAuth / Entra ID platform authentication status.
+func (a *AppServiceEnricher) checkEasyAuth(ctx context.Context, client *armappservice.WebAppsClient, resourceGroupName, appName string) Command {
+	cmd := Command{
+		Command:                   fmt.Sprintf("az webapp auth show --resource-group %s --name %s", resourceGroupName, appName),
+		Description:               "Check EasyAuth / Entra ID platform authentication",
+		ExpectedOutputDescription: "Enabled = compensating control | Disabled = anonymous triggers are truly unauthenticated",
+	}
+
+	status := CheckEasyAuth(ctx, client, resourceGroupName, appName)
+	if status.Err != nil {
+		cmd.Error = status.Err.Error()
+		cmd.ActualOutput = fmt.Sprintf("Error checking EasyAuth: %s", status.Err.Error())
+		cmd.ExitCode = -1
+		return cmd
+	}
+
+	if status.Enabled {
+		cmd.ActualOutput = "EasyAuth is ENABLED — platform enforces authentication before requests reach function code. Anonymous trigger auth levels are overridden by EasyAuth."
+		cmd.ExitCode = 0
+	} else {
+		cmd.ActualOutput = "EasyAuth is DISABLED — no platform-level authentication. Anonymous triggers are truly accessible without any authentication."
+		cmd.ExitCode = 1
+	}
+
+	return cmd
+}
+
+// extractHTMLTitle extracts the <title> content from an HTML response body.
+// Returns empty string if no title is found.
+func extractHTMLTitle(body string) string {
+	lower := strings.ToLower(body)
+	start := strings.Index(lower, "<title")
+	if start == -1 {
+		return ""
+	}
+	// Find the closing > of the opening tag
+	tagEnd := strings.Index(body[start:], ">")
+	if tagEnd == -1 {
+		return ""
+	}
+	contentStart := start + tagEnd + 1
+	end := strings.Index(lower[contentStart:], "</title")
+	if end == -1 {
+		return ""
+	}
+	return strings.TrimSpace(body[contentStart : contentStart+end])
+}
+
+// checkFunctionAppAnonymousAccess detects HTTP-triggered functions with anonymous authentication.
+// Uses the shared ListHTTPTriggers helper (fix #3: deduplication with FunctionAppEnricher).
 func (a *AppServiceEnricher) checkFunctionAppAnonymousAccess(ctx context.Context, resource *model.AzureResource) []Command {
 	functionAppName := resource.Name
 	subscriptionID := resource.AccountRef
@@ -227,198 +517,93 @@ func (a *AppServiceEnricher) checkFunctionAppAnonymousAccess(ctx context.Context
 
 	if functionAppName == "" || subscriptionID == "" || resourceGroupName == "" {
 		return []Command{{
-			Command:      "",
 			Description:  "Check Function App for anonymous HTTP triggers",
 			ActualOutput: "Error: Function App name, subscription ID, or resource group is missing",
 			ExitCode:     1,
 		}}
 	}
 
-	// Get Azure credentials
 	cred, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
 		return []Command{{
-			Command:      "",
 			Description:  "Check Function App for anonymous HTTP triggers",
 			ActualOutput: fmt.Sprintf("Error getting Azure credentials: %s", err.Error()),
 			ExitCode:     1,
 		}}
 	}
 
-	// Create Web Apps client
 	webAppsClient, err := armappservice.NewWebAppsClient(subscriptionID, cred, nil)
 	if err != nil {
 		return []Command{{
-			Command:      "",
 			Description:  "Check Function App for anonymous HTTP triggers",
 			ActualOutput: fmt.Sprintf("Error creating WebApps client: %s", err.Error()),
 			ExitCode:     1,
 		}}
 	}
 
-	// List functions in the Function App
-	functionsPager := webAppsClient.NewListFunctionsPager(resourceGroupName, functionAppName, nil)
+	cliEquiv := fmt.Sprintf("az functionapp function list --resource-group %s --name %s", resourceGroupName, functionAppName)
 
-	var allFunctions []*armappservice.FunctionEnvelope
-	for functionsPager.More() {
-		page, err := functionsPager.NextPage(ctx)
-		if err != nil {
-			return []Command{{
-				Command:      fmt.Sprintf("az functionapp function list --resource-group %s --name %s", resourceGroupName, functionAppName),
-				Description:  "List functions in Function App",
-				ActualOutput: fmt.Sprintf("Error listing functions: %s", err.Error()),
-				ExitCode:     1,
-			}}
-		}
-		allFunctions = append(allFunctions, page.Value...)
-	}
-
-	// No functions deployed
-	if len(allFunctions) == 0 {
+	triggers, totalFunctions, err := ListHTTPTriggers(ctx, webAppsClient, resourceGroupName, functionAppName, "")
+	if err != nil {
 		return []Command{{
-			Command:      fmt.Sprintf("az functionapp function list --resource-group %s --name %s", resourceGroupName, functionAppName),
+			Command:      cliEquiv,
 			Description:  "List functions in Function App",
-			ActualOutput: "✓ No functions deployed in this Function App",
-			ExitCode:     0,
+			ActualOutput: fmt.Sprintf("Error listing functions: %s", err.Error()),
+			ExitCode:     1,
 		}}
 	}
 
-	// Parse functions to find HTTP triggers with anonymous access
-	type AnonymousFunction struct {
-		Name       string
-		InvokeURL  string
-		Methods    []string
-		IsDisabled bool
-	}
-
-	var anonymousFunctions []AnonymousFunction
-	var totalHTTPFunctions int
-
-	for _, function := range allFunctions {
-		if function.Properties == nil || function.Properties.Config == nil {
-			continue
-		}
-
-		// Parse function configuration to find HTTP triggers
-		// Config is interface{} containing a map with "bindings" key
-		configMap, ok := function.Properties.Config.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		bindingsRaw, exists := configMap["bindings"]
-		if !exists {
-			continue
-		}
-
-		// bindings is an array of binding configurations
-		bindings, ok := bindingsRaw.([]interface{})
-		if !ok {
-			continue
-		}
-
-		for _, binding := range bindings {
-			bindingMap, ok := binding.(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			// Check if this is an HTTP trigger
-			bindingType, _ := bindingMap["type"].(string)
-			if bindingType != "httpTrigger" {
-				continue
-			}
-
-			totalHTTPFunctions++
-
-			// Check authentication level
-			authLevel, _ := bindingMap["authLevel"].(string)
-			if authLevel == "anonymous" {
-				// Extract HTTP methods
-				var methods []string
-				if methodsRaw, exists := bindingMap["methods"]; exists {
-					if methodsArr, ok := methodsRaw.([]interface{}); ok {
-						for _, m := range methodsArr {
-							if method, ok := m.(string); ok {
-								methods = append(methods, method)
-							}
-						}
-					}
-				}
-
-				// Get function name and invoke URL
-				functionName := ""
-				invokeURL := ""
-				isDisabled := false
-
-				if function.Name != nil {
-					functionName = *function.Name
-				}
-				if function.Properties.InvokeURLTemplate != nil {
-					invokeURL = *function.Properties.InvokeURLTemplate
-				}
-				if function.Properties.IsDisabled != nil {
-					isDisabled = *function.Properties.IsDisabled
-				}
-
-				anonymousFunctions = append(anonymousFunctions, AnonymousFunction{
-					Name:       functionName,
-					InvokeURL:  invokeURL,
-					Methods:    methods,
-					IsDisabled: isDisabled,
-				})
-			}
-		}
-	}
-
-	// If no anonymous functions found, return success
-	if len(anonymousFunctions) == 0 {
+	if totalFunctions == 0 {
 		return []Command{{
-			Command:      fmt.Sprintf("az functionapp function list --resource-group %s --name %s", resourceGroupName, functionAppName),
-			Description:  "Check HTTP-triggered functions for anonymous access",
-			ActualOutput: fmt.Sprintf("✓ No anonymous HTTP triggers found (%d HTTP function(s) checked, all require authentication)", totalHTTPFunctions),
+			Command:      cliEquiv,
+			Description:  "List functions in Function App",
+			ActualOutput: "No functions deployed in this Function App",
 			ExitCode:     0,
 		}}
 	}
 
-	// Anonymous functions found - build detailed output
-	var outputBuilder string
-	outputBuilder = fmt.Sprintf("✗ VULNERABLE: Found %d HTTP-triggered function(s) with anonymous access:\n\n", len(anonymousFunctions))
+	// Filter to anonymous triggers (case-insensitive)
+	var anonymousTriggers []HTTPTriggerInfo
+	for _, t := range triggers {
+		if strings.EqualFold(t.AuthLevel, "anonymous") {
+			anonymousTriggers = append(anonymousTriggers, t)
+		}
+	}
 
-	for i, fn := range anonymousFunctions {
-		outputBuilder += fmt.Sprintf("%d. Function: %s\n", i+1, fn.Name)
-		outputBuilder += fmt.Sprintf("   URL: %s\n", fn.InvokeURL)
+	if len(anonymousTriggers) == 0 {
+		return []Command{{
+			Command:      cliEquiv,
+			Description:  "Check HTTP-triggered functions for anonymous access",
+			ActualOutput: fmt.Sprintf("No anonymous HTTP triggers found (%d HTTP function(s) checked, all require authentication)", len(triggers)),
+			ExitCode:     0,
+		}}
+	}
+
+	// Build detailed output for anonymous triggers
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Found %d HTTP-triggered function(s) with anonymous access:\n\n", len(anonymousTriggers)))
+
+	for i, fn := range anonymousTriggers {
+		sb.WriteString(fmt.Sprintf("%d. Function: %s\n", i+1, fn.FunctionName))
+		sb.WriteString(fmt.Sprintf("   URL: %s\n", fn.InvokeURL))
 		if len(fn.Methods) > 0 {
-			outputBuilder += fmt.Sprintf("   Methods: %v\n", fn.Methods)
+			sb.WriteString(fmt.Sprintf("   Methods: %v\n", fn.Methods))
 		}
 		if fn.IsDisabled {
-			outputBuilder += "   Status: DISABLED (but still vulnerable if re-enabled)\n"
+			sb.WriteString("   Status: DISABLED (but still vulnerable if re-enabled)\n")
 		} else {
-			outputBuilder += "   Status: ENABLED and ACCESSIBLE without authentication\n"
+			sb.WriteString("   Status: ENABLED and ACCESSIBLE without authentication\n")
 		}
-		outputBuilder += "\n"
+		sb.WriteString("\n")
 	}
 
-	outputBuilder += "Security Impact:\n"
-	outputBuilder += "- These functions can be invoked by anyone without authentication\n"
-	outputBuilder += "- Function URLs are publicly accessible from the internet\n"
-	outputBuilder += "- No function keys or authentication tokens required\n\n"
-
-	outputBuilder += "Remediation:\n"
-	outputBuilder += "1. Change authLevel from 'anonymous' to 'function' or 'admin' in function.json\n"
-	outputBuilder += "2. Redeploy the Function App after configuration changes\n"
-	outputBuilder += "3. For legitimate public functions, implement application-level authentication\n"
-	outputBuilder += "4. Consider using IP restrictions or private endpoints for sensitive functions\n"
-
-	return []Command{
-		{
-			Command:                   fmt.Sprintf("az rest --method GET --uri \"https://management.azure.com/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s/functions?api-version=2023-12-01\" --query \"value[].{name:properties.name, authLevel:properties.config.bindings[?type=='httpTrigger'].authLevel | [0], invokeUrl:properties.invoke_url_template}\"", subscriptionID, resourceGroupName, functionAppName),
-			Description:               "List HTTP-triggered functions with authentication levels",
-			ExpectedOutputDescription: "All HTTP triggers should have authLevel set to 'function' or 'admin', not 'anonymous'",
-			ActualOutput:              outputBuilder,
-			ExitCode:                  1,
-		},
-	}
+	return []Command{{
+		Command:                   cliEquiv,
+		Description:               "List HTTP-triggered functions with authentication levels",
+		ExpectedOutputDescription: "All HTTP triggers should have authLevel set to 'function' or 'admin', not 'anonymous'",
+		ActualOutput:              sb.String(),
+		ExitCode:                  1,
+	}}
 }
 
 // checkAuthenticationDisabled checks if App Service Authentication (Easy Auth) is disabled

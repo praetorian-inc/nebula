@@ -36,6 +36,7 @@ func (a *AwsApolloControlFlow) SupportedResourceTypes() []model.CloudResourceTyp
 		model.AWSGroup,
 		model.AWSLambdaFunction,
 		model.AWSEC2Instance,
+		model.CloudResourceType("AWS::EC2::LaunchTemplate"),
 		model.AWSCloudFormationStack,
 		model.CloudResourceType("AWS::CodeBuild::Project"),
 		model.CloudResourceType("AWS::SageMaker::NotebookInstance"),

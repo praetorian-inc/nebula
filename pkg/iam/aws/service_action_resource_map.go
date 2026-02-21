@@ -368,8 +368,10 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 			"container-inst": regexp.MustCompile(`^arn:aws:ecs:[a-z0-9-]+:\d{12}:container-instance/.*$`),
 		},
 		ActionResourceMap: map[string][]string{
-			"runtask":                {"cluster", "task-def", "service"},
+			"describetasks":          {"cluster", "task", "service"},
+			"executecommand":         {"cluster", "task", "service"},
 			"registertaskdefinition": {"service"},
+			"runtask":                {"cluster", "task-def", "service"},
 			"starttask":              {"cluster", "task-def", "service"},
 			"updateservice":          {"service"},
 		},

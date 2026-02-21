@@ -42,6 +42,8 @@ var privEscActions = []string{
 	"ec2:CreateLaunchTemplate",
 	"ec2:RunInstances",
 	"ec2-instance-connect:SendSSHPublicKey",
+	"ecs:DescribeTasks",
+	"ecs:ExecuteCommand",
 	"ecs:RunTask",
 	"glue:CreateDevEndpoint",
 	"glue:UpdateDevEndpoint",

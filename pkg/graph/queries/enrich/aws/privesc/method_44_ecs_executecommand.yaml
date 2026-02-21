@@ -1,0 +1,28 @@
+name: Privesc Method 44 - ECS ExecuteCommand
+description: Creates CAN_PRIVESC relationship when a principal can execute commands in ECS tasks and describe tasks
+impactedServices:
+  - ECS
+severity: High
+order: 141
+cypher: |
+  MATCH (principal)-[:ECS_EXECUTECOMMAND]->()
+  WHERE principal.admin IS NULL
+    AND EXISTS((principal)-[:ECS_DESCRIBETASKS]->())
+
+  // Find roles trusted by ECS tasks service - these are potential escalation targets
+  MATCH (targetRole:AWS_IAM_Role)
+  WHERE 'ecs-tasks.amazonaws.com' IN targetRole.trustedServices
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-44-ECS-ExecuteCommand",
+    privesc.requires = ["ecs:ExecuteCommand", "ecs:DescribeTasks"],
+    privesc.service = "ECS",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-44-ECS-ExecuteCommand"
+      THEN privesc.method + ",Method-44-ECS-ExecuteCommand"
+      ELSE privesc.method
+    END

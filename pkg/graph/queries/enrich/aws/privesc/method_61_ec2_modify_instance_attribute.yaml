@@ -1,0 +1,36 @@
+name: Privesc Method 61 - EC2 ModifyInstanceAttribute StopStart
+description: Creates CAN_PRIVESC relationship when a principal can modify EC2 instance userData and stop/start the instance to execute injected scripts with the instance role
+impactedServices:
+  - EC2
+severity: High
+order: 158
+cypher: |
+  MATCH (principal)-[:EC2_MODIFYINSTANCEATTRIBUTE]->(instance:AWS_EC2_Instance)
+  WHERE principal.admin IS NULL
+    AND instance.IamInstanceProfile IS NOT NULL
+    AND EXISTS((principal)-[:EC2_STOPINSTANCES]->(instance))
+    AND EXISTS((principal)-[:EC2_STARTINSTANCES]->(instance))
+
+  // Match the actual IAM role using instanceProfileList
+  MATCH (instanceRole:AWS_IAM_Role)
+    WHERE instanceRole.instanceProfileList CONTAINS instance.IamInstanceProfile
+
+  // Create the privesc relationship to the instance's role
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(instanceRole)
+  ON CREATE SET
+    privesc.method = "Method-61-EC2-ModifyInstanceAttribute-StopStart",
+    privesc.requires = ["ec2:ModifyInstanceAttribute", "ec2:StopInstances", "ec2:StartInstances"],
+    privesc.service = "EC2",
+    privesc.targetType = "Role",
+    privesc.instanceId = instance.instanceId
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-61-EC2-ModifyInstanceAttribute-StopStart"
+      THEN privesc.method + ",Method-61-EC2-ModifyInstanceAttribute-StopStart"
+      ELSE privesc.method
+    END,
+    privesc.instanceId = CASE
+      WHEN privesc.instanceId IS NULL THEN instance.instanceId
+      WHEN NOT privesc.instanceId CONTAINS instance.instanceId THEN privesc.instanceId + "," + instance.instanceId
+      ELSE privesc.instanceId
+    END

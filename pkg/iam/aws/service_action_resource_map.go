@@ -262,8 +262,11 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 			"launch-template": regexp.MustCompile(`^arn:aws:ec2:[a-z-0-9]+:\d{12}:launch-template/.*`),
 		},
 		ActionResourceMap: map[string][]string{
-			"runinstances":         {"service"},
-			"createlaunchtemplate": {"service"},
+			"createlaunchtemplate":    {"service"},
+			"modifyinstanceattribute": {"instance"},
+			"runinstances":            {"service"},
+			"startinstances":          {"instance"},
+			"stopinstances":           {"instance"},
 		},
 	},
 	"cloudformation": {

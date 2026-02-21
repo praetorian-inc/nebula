@@ -302,7 +302,7 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 		},
 		ActionResourceMap: map[string][]string{
 			"addlayerversionpermission":          {"layer"},
-			"addpermission":                      {"function"},
+			"addpermission":                      {"function", "service"},
 			"createalias":                        {"function"},
 			"createcodesigningconfig":            {"function"},
 			"createeventsourcemapping":           {"function", "eventconfig"},

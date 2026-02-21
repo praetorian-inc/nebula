@@ -1,0 +1,27 @@
+name: Privesc Method 50 - ECS PassRole StartTask
+description: Creates CAN_PRIVESC relationship when a principal can register a task definition with a privileged role and start it on a specific EC2 container instance
+impactedServices:
+  - IAM
+  - ECS
+severity: High
+order: 147
+cypher: |
+  MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
+  WHERE principal.admin IS NULL
+    AND EXISTS((principal)-[:ECS_REGISTERTASKDEFINITION]->())
+    AND EXISTS((principal)-[:ECS_STARTTASK]->())
+    AND 'ecs-tasks.amazonaws.com' IN targetRole.trustedServices
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-50-ECS-PassRole-StartTask",
+    privesc.requires = ["iam:PassRole", "ecs:RegisterTaskDefinition", "ecs:StartTask"],
+    privesc.service = "ECS",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-50-ECS-PassRole-StartTask"
+      THEN privesc.method + ",Method-50-ECS-PassRole-StartTask"
+      ELSE privesc.method
+    END

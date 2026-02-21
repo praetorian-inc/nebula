@@ -49,6 +49,7 @@ var privEscActions = []string{
 	"ecs:ExecuteCommand",
 	"ecs:RegisterTaskDefinition",
 	"ecs:RunTask",
+	"ecs:StartTask",
 	"glue:CreateDevEndpoint",
 	"glue:UpdateDevEndpoint",
 	"iam:AddUserToGroup",

@@ -396,10 +396,13 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 	"glue": {
 		ResourcePatterns: map[string]*regexp.Regexp{
 			"devEndpoint": regexp.MustCompile(`^arn:aws:glue:[a-z0-9-]+:\d{12}:devEndpoint/.*$`),
+			"job":         regexp.MustCompile(`^arn:aws:glue:[a-z0-9-]+:\d{12}:job/.+$`),
 			"service":     regexp.MustCompile(`^glue.amazonaws.com$`),
 		},
 		ActionResourceMap: map[string][]string{
 			"createdevendpoint": {"service"},
+			"createjob":         {"service"},
+			"startjobrun":       {"job"},
 			"updatedevendpoint": {"devEndpoint"},
 		},
 	},

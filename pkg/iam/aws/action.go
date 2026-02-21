@@ -30,6 +30,8 @@ var privEscActions = []string{
 	"bedrock-agentcore:StartCodeInterpreterSession",
 	"cloudformation:CreateChangeSet",
 	"cloudformation:CreateStack",
+	"cloudformation:CreateStackInstances",
+	"cloudformation:CreateStackSet",
 	"cloudformation:ExecuteChangeSet",
 	"cloudformation:SetStackPolicy",
 	"cloudformation:UpdateStack",

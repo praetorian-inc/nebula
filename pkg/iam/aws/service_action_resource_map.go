@@ -244,6 +244,14 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 			"uploadsigningcertificate":                {"user"},
 		},
 	},
+	"ec2-instance-connect": {
+		ResourcePatterns: map[string]*regexp.Regexp{
+			"instance": regexp.MustCompile(`^arn:aws:ec2:[a-z0-9-]+:\d{12}:instance/.*$`),
+		},
+		ActionResourceMap: map[string][]string{
+			"sendsshpublickey": {"instance"},
+		},
+	},
 	"ec2": {
 		ResourcePatterns: map[string]*regexp.Regexp{
 			"service":         regexp.MustCompile(`^ec2.amazonaws.com$`),

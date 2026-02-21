@@ -25,7 +25,7 @@ var createThenUsePairs = []createThenUsePair{
 	},
 	{
 		createAction:    "glue:CreateJob",
-		useActions:      []string{"glue:StartJobRun"},
+		useActions:      []string{"glue:StartJobRun", "glue:CreateTrigger"},
 		serviceResource: "glue.amazonaws.com",
 	},
 }

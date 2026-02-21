@@ -402,6 +402,7 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 		ActionResourceMap: map[string][]string{
 			"createdevendpoint": {"service"},
 			"createjob":         {"service"},
+			"createtrigger":     {"service"},
 			"startjobrun":       {"job"},
 			"updatedevendpoint": {"devEndpoint"},
 		},

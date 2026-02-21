@@ -44,6 +44,7 @@ var privEscActions = []string{
 	"codestar:CreateProject",
 	"ec2:CreateLaunchTemplate",
 	"ec2:ModifyInstanceAttribute",
+	"ec2:RequestSpotInstances",
 	"ec2:RunInstances",
 	"ec2:StartInstances",
 	"ec2:StopInstances",

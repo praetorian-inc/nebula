@@ -264,6 +264,7 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 		ActionResourceMap: map[string][]string{
 			"createlaunchtemplate":    {"service"},
 			"modifyinstanceattribute": {"instance"},
+			"requestspotinstances":    {"service"},
 			"runinstances":            {"service"},
 			"startinstances":          {"instance"},
 			"stopinstances":           {"instance"},

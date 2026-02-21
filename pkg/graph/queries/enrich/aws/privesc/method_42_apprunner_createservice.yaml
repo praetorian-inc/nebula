@@ -1,0 +1,26 @@
+name: Privesc Method 42 - App Runner PassRole CreateService
+description: Creates CAN_PRIVESC relationship when a principal can pass roles to App Runner and create services for arbitrary code execution
+impactedServices:
+  - IAM
+  - App Runner
+severity: High
+order: 139
+cypher: |
+  MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
+  WHERE principal.admin IS NULL
+    AND EXISTS((principal)-[:APPRUNNER_CREATESERVICE]->())
+    AND 'tasks.apprunner.amazonaws.com' IN targetRole.trustedServices
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-42-AppRunner-PassRole-CreateService",
+    privesc.requires = ["iam:PassRole", "apprunner:CreateService"],
+    privesc.service = "App Runner",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-42-AppRunner-PassRole-CreateService"
+      THEN privesc.method + ",Method-42-AppRunner-PassRole-CreateService"
+      ELSE privesc.method
+    END

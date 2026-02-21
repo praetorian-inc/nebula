@@ -21,6 +21,7 @@ cypher: |
       'eks.amazonaws.com',
       'ecs.amazonaws.com',
       'states.amazonaws.com',
+      'tasks.apprunner.amazonaws.com',
       'ssm.amazonaws.com'
     ] WHERE role.assumeRolePolicyDoc CONTAINS service] AS trustedServices
   SET role.trustedServices = CASE

@@ -90,11 +90,11 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 			"service": regexp.MustCompile(`^bedrock-agentcore.amazonaws.com$`),
 		},
 		ActionResourceMap: map[string][]string{
-			"createcodeinterpreter":        {"service"},
-			"startcodeinterpretersession":  {"service"},
-			"invokecodeinterpreter":        {"service"},
-			"getcodeinterpreter":           {"service"},
-			"listcodeinterpreters":         {"service"},
+			"createcodeinterpreter":       {"service"},
+			"startcodeinterpretersession": {"service"},
+			"invokecodeinterpreter":       {"service"},
+			"getcodeinterpreter":          {"service"},
+			"listcodeinterpreters":        {"service"},
 		},
 	},
 	"iam": {
@@ -375,9 +375,9 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 			"service":          regexp.MustCompile(`^ssm.amazonaws.com$`),
 		},
 		ActionResourceMap: map[string][]string{
-			"sendcommand":             {"instance", "managed-instance", "document"},
-			"startsession":            {"instance", "managed-instance"},
-			"resumesession":           {"instance", "managed-instance"},
+			"sendcommand":              {"instance", "managed-instance", "document"},
+			"startsession":             {"instance", "managed-instance"},
+			"resumesession":            {"instance", "managed-instance"},
 			"startautomationexecution": {"automation", "document"},
 		},
 	},
@@ -416,6 +416,14 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 			"createtrainingjob":                  {"service"},
 			"createprocessingjob":                {"service"},
 			"createhyperparametertuningjob":      {"service"},
+		},
+	},
+	"apprunner": {
+		ResourcePatterns: map[string]*regexp.Regexp{
+			"service": regexp.MustCompile(`^tasks.apprunner.amazonaws.com$`),
+		},
+		ActionResourceMap: map[string][]string{
+			"createservice": {"service"},
 		},
 	},
 	"autoscaling": {

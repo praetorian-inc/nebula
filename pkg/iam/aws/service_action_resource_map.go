@@ -434,6 +434,7 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 		},
 		ActionResourceMap: map[string][]string{
 			"createservice": {"service"},
+			"updateservice": {"service"},
 		},
 	},
 	"autoscaling": {

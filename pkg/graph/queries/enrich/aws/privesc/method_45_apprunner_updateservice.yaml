@@ -1,0 +1,27 @@
+name: Privesc Method 45 - App Runner UpdateService
+description: Creates CAN_PRIVESC relationship when a principal can update App Runner services to execute arbitrary code with the existing instance role
+impactedServices:
+  - App Runner
+severity: High
+order: 142
+cypher: |
+  MATCH (principal)-[:APPRUNNER_UPDATESERVICE]->()
+  WHERE principal.admin IS NULL
+
+  // Find roles trusted by App Runner tasks service - these are potential escalation targets
+  MATCH (targetRole:AWS_IAM_Role)
+  WHERE 'tasks.apprunner.amazonaws.com' IN targetRole.trustedServices
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-45-AppRunner-UpdateService",
+    privesc.requires = ["apprunner:UpdateService"],
+    privesc.service = "App Runner",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-45-AppRunner-UpdateService"
+      THEN privesc.method + ",Method-45-AppRunner-UpdateService"
+      ELSE privesc.method
+    END

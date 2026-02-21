@@ -24,6 +24,7 @@ func isPrivEscAction(action string) bool {
 
 var privEscActions = []string{
 	"apprunner:CreateService",
+	"apprunner:UpdateService",
 	"bedrock-agentcore:CreateCodeInterpreter",
 	"bedrock-agentcore:InvokeCodeInterpreter",
 	"bedrock-agentcore:StartCodeInterpreterSession",

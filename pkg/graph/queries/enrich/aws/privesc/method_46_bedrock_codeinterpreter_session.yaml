@@ -1,0 +1,30 @@
+name: Privesc Method 46 - Bedrock CodeInterpreter Session (Existing)
+description: Creates CAN_PRIVESC relationship when a principal can start a session and invoke an existing Bedrock code interpreter to execute arbitrary code and retrieve the execution role's credentials
+impactedServices:
+  - IAM
+  - Bedrock
+severity: High
+order: 143
+cypher: |
+  MATCH (principal)
+  WHERE principal.admin IS NULL
+    AND EXISTS((principal)-[:`BEDROCK-AGENTCORE_STARTCODEINTERPRETERSESSION`]->())
+    AND EXISTS((principal)-[:`BEDROCK-AGENTCORE_INVOKECODEINTERPRETER`]->())
+
+  // Find roles that trust Bedrock — potential execution roles for existing code interpreters
+  MATCH (targetRole:AWS_IAM_Role)
+  WHERE 'bedrock.amazonaws.com' IN targetRole.trustedServices
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-46-Bedrock-CodeInterpreter-Session",
+    privesc.requires = ["bedrock-agentcore:StartCodeInterpreterSession", "bedrock-agentcore:InvokeCodeInterpreter"],
+    privesc.service = "Bedrock",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-46-Bedrock-CodeInterpreter-Session"
+      THEN privesc.method + ",Method-46-Bedrock-CodeInterpreter-Session"
+      ELSE privesc.method
+    END

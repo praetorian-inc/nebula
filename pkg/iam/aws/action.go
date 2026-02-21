@@ -55,6 +55,7 @@ var privEscActions = []string{
 	"glue:CreateTrigger",
 	"glue:StartJobRun",
 	"glue:UpdateDevEndpoint",
+	"glue:UpdateJob",
 	"iam:AddUserToGroup",
 	"iam:AttachGroupPolicy",
 	"iam:AttachRolePolicy",

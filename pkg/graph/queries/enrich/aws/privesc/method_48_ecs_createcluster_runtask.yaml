@@ -1,0 +1,28 @@
+name: Privesc Method 48 - ECS PassRole CreateCluster RunTask
+description: Creates CAN_PRIVESC relationship when a principal can create an ECS cluster, register a task definition with a privileged role, and run a task
+impactedServices:
+  - IAM
+  - ECS
+severity: High
+order: 145
+cypher: |
+  MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
+  WHERE principal.admin IS NULL
+    AND EXISTS((principal)-[:ECS_CREATECLUSTER]->())
+    AND EXISTS((principal)-[:ECS_REGISTERTASKDEFINITION]->())
+    AND EXISTS((principal)-[:ECS_RUNTASK]->())
+    AND 'ecs-tasks.amazonaws.com' IN targetRole.trustedServices
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-48-ECS-PassRole-CreateCluster-RunTask",
+    privesc.requires = ["iam:PassRole", "ecs:CreateCluster", "ecs:RegisterTaskDefinition", "ecs:RunTask"],
+    privesc.service = "ECS",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-48-ECS-PassRole-CreateCluster-RunTask"
+      THEN privesc.method + ",Method-48-ECS-PassRole-CreateCluster-RunTask"
+      ELSE privesc.method
+    END

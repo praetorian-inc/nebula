@@ -52,7 +52,7 @@ func TestScreenshotData_AnalyzableContent(t *testing.T) {
 		analysis := LLMAnalysisResult{
 			SensitiveInfoFound: true,
 			ConfidenceScore:    0.85,
-			Summary:           "Test analysis",
+			Summary:            "Test analysis",
 			Findings: []SensitiveFinding{
 				{
 					Type:        "credential",
@@ -63,7 +63,7 @@ func TestScreenshotData_AnalyzableContent(t *testing.T) {
 				},
 			},
 			AnalysisTimestamp: time.Now(),
-			Model:            "claude-3-sonnet-20240229",
+			Model:             "claude-3-sonnet-20240229",
 		}
 
 		screenshot.SetAnalysisResult(analysis)

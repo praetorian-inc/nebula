@@ -35,7 +35,7 @@ func NewAwsCdkQualifierDiscovery(configs ...cfg.Config) chain.Link {
 }
 
 func (l *AwsCdkQualifierDiscovery) Params() []cfg.Param {
-	return append(options.AwsCommonReconOptions(), 
+	return append(options.AwsCommonReconOptions(),
 		options.AwsCdkQualifiers(),
 	)
 }
@@ -50,7 +50,7 @@ func (l *AwsCdkQualifierDiscovery) Process(input any) error {
 	// Get current account ID and regions (pass through from role detector if available)
 	accountID := ""
 	regions := []string{"us-east-1"}
-	
+
 	// Check if input contains account/region info from previous links
 	if qualInfo, ok := input.(CDKQualifierInfo); ok {
 		accountID = qualInfo.AccountID
@@ -92,7 +92,7 @@ func (l *AwsCdkQualifierDiscovery) Process(input any) error {
 			}
 		} else {
 			l.Logger.Debug("SSM qualifier discovery failed, trying IAM fallback", "region", region, "error", ssmErr)
-			
+
 			// Method 2: Fallback to IAM role enumeration (more widely accessible)
 			iamQualifiers, iamErr := l.discoverQualifiersFromIAMRoles(region, accountID)
 			if iamErr == nil && len(iamQualifiers) > 0 {
@@ -151,7 +151,7 @@ func (l *AwsCdkQualifierDiscovery) discoverQualifiersFromSSM(region string) ([]s
 	}
 
 	ssmClient := ssm.NewFromConfig(awsConfig)
-	
+
 	l.Logger.Debug("scanning for CDK bootstrap SSM parameters", "region", region)
 
 	// Get all parameters under /cdk-bootstrap/ path
@@ -160,12 +160,12 @@ func (l *AwsCdkQualifierDiscovery) discoverQualifiersFromSSM(region string) ([]s
 
 	for {
 		result, err := ssmClient.GetParametersByPath(l.Context(), &ssm.GetParametersByPathInput{
-			Path:           awsStringPtr("/cdk-bootstrap/"),
-			Recursive:      awsBoolPtr(true),
-			NextToken:      nextToken,
-			MaxResults:     awsInt32Ptr(10), // AWS SSM maximum allowed batch size
+			Path:       awsStringPtr("/cdk-bootstrap/"),
+			Recursive:  awsBoolPtr(true),
+			NextToken:  nextToken,
+			MaxResults: awsInt32Ptr(10), // AWS SSM maximum allowed batch size
 		})
-		
+
 		if err != nil {
 			l.Logger.Debug("error scanning SSM parameters", "region", region, "error", err)
 			break // Don't fail completely, just move on
@@ -202,13 +202,13 @@ func (l *AwsCdkQualifierDiscovery) discoverQualifiersFromIAMRoles(region, accoun
 	}
 
 	iamClient := iam.NewFromConfig(awsConfig)
-	
+
 	l.Logger.Debug("scanning IAM roles for CDK qualifiers", "region", region, "account_id", accountID)
 
 	// Compile regex for CDK role patterns
 	// Pattern: cdk-{qualifier}-{role-type}-{account-id}-{region}
 	cdkRolePattern := regexp.MustCompile(fmt.Sprintf(`^cdk-([a-z0-9]+)-(?:file-publishing-role|cfn-exec-role|image-publishing-role|lookup-role|deploy-role)-%s-%s$`, accountID, region))
-	
+
 	var qualifiers []string
 	var marker *string
 
@@ -261,7 +261,7 @@ func (l *AwsCdkQualifierDiscovery) extractQualifierFromParameterName(parameterNa
 	// Remove prefix and split by '/'
 	withoutPrefix := strings.TrimPrefix(parameterName, "/cdk-bootstrap/")
 	parts := strings.Split(withoutPrefix, "/")
-	
+
 	if len(parts) >= 1 && parts[0] != "" {
 		return parts[0]
 	}

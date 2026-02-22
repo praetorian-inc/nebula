@@ -191,11 +191,11 @@ func ValidateGitHubSubjectClaim(claim *GitHubSubjectClaim) error {
 
 	// Validate known context types
 	validContextTypes := map[string]bool{
-		"ref":         true,
-		"environment": true,
+		"ref":          true,
+		"environment":  true,
 		"pull_request": true,
-		"actor":       true,
-		"*":           true,
+		"actor":        true,
+		"*":            true,
 	}
 
 	if claim.ContextType != "" && !validContextTypes[claim.ContextType] {

@@ -20,12 +20,12 @@ type MarkdownTable struct {
 // ToString converts the MarkdownTable to a markdown string
 func (t MarkdownTable) ToString() string {
 	var result strings.Builder
-	
+
 	// Write table heading if exists
 	if t.TableHeading != "" {
 		result.WriteString("# " + t.TableHeading + "\n\n")
 	}
-	
+
 	if len(t.Headers) == 0 {
 		return result.String()
 	}
@@ -68,7 +68,7 @@ func (t MarkdownTable) ToString() string {
 		rowText += "\n"
 		result.WriteString(rowText)
 	}
-	
+
 	return result.String()
 }
 

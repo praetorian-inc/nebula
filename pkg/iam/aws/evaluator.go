@@ -666,7 +666,7 @@ func extractSSMDocumentRestrictions(action string, statements *types.PolicyState
 
 	// Actions that require document resource checks
 	documentActions := map[string]bool{
-		"ssm:sendcommand":             true,
+		"ssm:sendcommand":              true,
 		"ssm:startautomationexecution": true,
 	}
 
@@ -707,7 +707,7 @@ func extractSSMDocumentRestrictions(action string, statements *types.PolicyState
 			for _, resource := range *stmt.Resource {
 				// Check if this is an SSM document ARN
 				if strings.Contains(resource, ":document/") ||
-				   strings.Contains(resource, ":automation-definition/") {
+					strings.Contains(resource, ":automation-definition/") {
 					documentRestrictions = append(documentRestrictions, resource)
 				} else if resource == "*" {
 					// Wildcard means any document is allowed

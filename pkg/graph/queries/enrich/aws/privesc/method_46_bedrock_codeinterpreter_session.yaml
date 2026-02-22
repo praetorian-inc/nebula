@@ -6,13 +6,12 @@ impactedServices:
 severity: High
 order: 143
 cypher: |
-  MATCH (principal)
+  MATCH (principal)-[:`BEDROCK-AGENTCORE_STARTCODEINTERPRETERSESSION`]->(interpreter:AWS_Bedrock_CodeInterpreter)
   WHERE principal.admin IS NULL
-    AND EXISTS((principal)-[:`BEDROCK-AGENTCORE_STARTCODEINTERPRETERSESSION`]->())
-    AND EXISTS((principal)-[:`BEDROCK-AGENTCORE_INVOKECODEINTERPRETER`]->())
+    AND EXISTS((principal)-[:`BEDROCK-AGENTCORE_INVOKECODEINTERPRETER`]->(interpreter))
 
-  // Scope through actual CodeInterpreter instances that have execution roles
-  MATCH (interpreter:AWS_Bedrock_CodeInterpreter)-[:STS_ASSUMEROLE]->(targetRole:AWS_IAM_Role)
+  // Traverse from the specific interpreter to its execution role
+  MATCH (interpreter)-[:STS_ASSUMEROLE]->(targetRole:AWS_IAM_Role)
 
   // Create the privesc relationship
   MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
@@ -20,7 +19,8 @@ cypher: |
     privesc.method = "Method-46-Bedrock-CodeInterpreter-Session",
     privesc.requires = ["bedrock-agentcore:StartCodeInterpreterSession", "bedrock-agentcore:InvokeCodeInterpreter"],
     privesc.service = "Bedrock",
-    privesc.targetType = "Role"
+    privesc.targetType = "Role",
+    privesc.interpreterArn = interpreter.arn
   ON MATCH SET
     privesc.method = CASE
       WHEN NOT privesc.method CONTAINS "Method-46-Bedrock-CodeInterpreter-Session"

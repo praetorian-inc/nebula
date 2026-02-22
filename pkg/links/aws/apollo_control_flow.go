@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/codebuild"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
+	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 	awsiam "github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sagemaker"
@@ -178,6 +179,12 @@ func (a *AwsApolloControlFlow) Process(resourceType string) error {
 	err = a.gatherECSContainerInstances()
 	if err != nil {
 		a.Logger.Error("Failed to gather ECS container instances: " + err.Error())
+	}
+
+	// Gather ECS running tasks (needed for method 44 ExecuteCommand scoping)
+	err = a.gatherECSTasks()
+	if err != nil {
+		a.Logger.Error("Failed to gather ECS tasks: " + err.Error())
 	}
 
 	// Gather Glue jobs (needed for Glue privesc methods)
@@ -1236,6 +1243,139 @@ func (a *AwsApolloControlFlow) gatherECSContainerInstances() error {
 	return nil
 }
 
+// gatherECSTasks fetches running ECS tasks from all clusters.
+// Tasks are required for ecs:ExecuteCommand (Method 44) — scoping privesc detection
+// to only task definitions that have running tasks with ExecuteCommand enabled.
+func (a *AwsApolloControlFlow) gatherECSTasks() error {
+	var totalTasks int
+
+	// Precompute region → cluster ARNs map to avoid re-scanning resources per region
+	clustersByRegion := make(map[string][]string)
+	for _, resource := range *a.pd.Resources {
+		if resource.TypeName == "AWS::ECS::Cluster" {
+			clustersByRegion[resource.Region] = append(clustersByRegion[resource.Region], resource.Arn.String())
+		}
+	}
+
+	for _, region := range a.Regions {
+		clusterArns, ok := clustersByRegion[region]
+		if !ok {
+			continue
+		}
+
+		config, err := a.GetConfigWithRuntimeArgs(region)
+		if err != nil {
+			a.Logger.Error(fmt.Sprintf("Failed to get AWS config for region %s: %s", region, err.Error()))
+			continue
+		}
+
+		client := ecs.NewFromConfig(config)
+
+		for _, clusterArn := range clusterArns {
+
+			// List running tasks in this cluster
+			var taskArns []string
+			var nextToken *string
+
+			for {
+				listInput := &ecs.ListTasksInput{
+					Cluster:       &clusterArn,
+					DesiredStatus: ecstypes.DesiredStatusRunning,
+					NextToken:     nextToken,
+				}
+
+				listOutput, err := client.ListTasks(context.TODO(), listInput)
+				if err != nil {
+					a.Logger.Debug(fmt.Sprintf("Failed to list tasks for cluster %s: %s", clusterArn, err.Error()))
+					break
+				}
+
+				taskArns = append(taskArns, listOutput.TaskArns...)
+
+				if listOutput.NextToken == nil {
+					break
+				}
+				nextToken = listOutput.NextToken
+			}
+
+			if len(taskArns) == 0 {
+				continue
+			}
+
+			// DescribeTasks accepts up to 100 ARNs per call
+			for i := 0; i < len(taskArns); i += 100 {
+				end := i + 100
+				if end > len(taskArns) {
+					end = len(taskArns)
+				}
+				batch := taskArns[i:end]
+
+				describeInput := &ecs.DescribeTasksInput{
+					Cluster: &clusterArn,
+					Tasks:   batch,
+				}
+
+				describeOutput, err := client.DescribeTasks(context.TODO(), describeInput)
+				if err != nil {
+					a.Logger.Error(fmt.Sprintf("Failed to describe tasks in cluster %s: %s", clusterArn, err.Error()))
+					continue
+				}
+
+				for _, task := range describeOutput.Tasks {
+					if task.TaskArn == nil {
+						continue
+					}
+
+					parsedArn, err := arn.Parse(*task.TaskArn)
+					if err != nil {
+						a.Logger.Error(fmt.Sprintf("Failed to parse task ARN %s: %s", *task.TaskArn, err.Error()))
+						continue
+					}
+
+					properties := map[string]any{
+						"Arn":                  *task.TaskArn,
+						"ClusterArn":           clusterArn,
+						"EnableExecuteCommand": task.EnableExecuteCommand,
+					}
+
+					if task.TaskDefinitionArn != nil {
+						properties["TaskDefinitionArn"] = *task.TaskDefinitionArn
+					}
+					if task.LastStatus != nil {
+						properties["LastStatus"] = *task.LastStatus
+					}
+					if task.LaunchType != "" {
+						properties["LaunchType"] = string(task.LaunchType)
+					}
+
+					propsJSON, err := json.Marshal(properties)
+					if err != nil {
+						a.Logger.Error(fmt.Sprintf("Failed to marshal task properties: %s", err.Error()))
+						continue
+					}
+
+					erd := types.NewEnrichedResourceDescription(
+						*task.TaskArn,
+						"AWS::ECS::Task",
+						region,
+						parsedArn.AccountID,
+						string(propsJSON),
+					)
+
+					*a.pd.Resources = append(*a.pd.Resources, erd)
+					totalTasks++
+				}
+			}
+		}
+	}
+
+	if totalTasks > 0 {
+		a.Logger.Info(fmt.Sprintf("Gathered %d running ECS tasks", totalTasks))
+	}
+
+	return nil
+}
+
 // gatherGlueJobs fetches Glue jobs from all regions.
 // Glue jobs are not supported by CloudControl, so we use the Glue API directly.
 func (a *AwsApolloControlFlow) gatherGlueJobs() error {
@@ -1653,6 +1793,62 @@ func (a *AwsApolloControlFlow) sendResourceRoleRelationships() error {
 		belongsToRel := model.NewIAMRelationship(ciNode, &clusterNode, "BELONGS_TO")
 		belongsToRel.Capability = "apollo-container-instance-cluster-mapping"
 		a.Send(belongsToRel)
+	}
+
+	// Create BELONGS_TO relationships for tasks → clusters and tasks → task definitions
+	for _, resource := range *a.pd.Resources {
+		if resource.TypeName != "AWS::ECS::Task" {
+			continue
+		}
+
+		props, err := resource.PropertiesAsMap()
+		if err != nil {
+			continue
+		}
+
+		taskNode, err := TransformERDToAWSResource(&resource)
+		if err != nil {
+			a.Logger.Error(fmt.Sprintf("Failed to transform task %s: %s", resource.Arn.String(), err.Error()))
+			continue
+		}
+
+		// Task → Cluster relationship
+		clusterArn, ok := props["ClusterArn"].(string)
+		if ok && clusterArn != "" {
+			clusterParsedArn, err := arn.Parse(clusterArn)
+			if err == nil {
+				clusterNode, err := model.NewAWSResource(
+					clusterArn,
+					clusterParsedArn.AccountID,
+					model.CloudResourceType("AWS::ECS::Cluster"),
+					map[string]any{},
+				)
+				if err == nil {
+					belongsToCluster := model.NewIAMRelationship(taskNode, &clusterNode, "BELONGS_TO")
+					belongsToCluster.Capability = "apollo-task-cluster-mapping"
+					a.Send(belongsToCluster)
+				}
+			}
+		}
+
+		// Task → TaskDefinition relationship
+		taskDefArn, ok := props["TaskDefinitionArn"].(string)
+		if ok && taskDefArn != "" {
+			taskDefParsedArn, err := arn.Parse(taskDefArn)
+			if err == nil {
+				taskDefNode, err := model.NewAWSResource(
+					taskDefArn,
+					taskDefParsedArn.AccountID,
+					model.CloudResourceType("AWS::ECS::TaskDefinition"),
+					map[string]any{},
+				)
+				if err == nil {
+					belongsToTaskDef := model.NewIAMRelationship(taskNode, &taskDefNode, "BELONGS_TO")
+					belongsToTaskDef.Capability = "apollo-task-taskdef-mapping"
+					a.Send(belongsToTaskDef)
+				}
+			}
+		}
 	}
 
 	return nil

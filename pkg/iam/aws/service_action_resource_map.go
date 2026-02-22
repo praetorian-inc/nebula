@@ -286,7 +286,7 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 			"executechangeset":     {"stack"},
 			"setstackpolicy":       {"stack"},
 			"updatestack":          {"stack"},
-			"updatestackset":       {"service"},
+			"updatestackset":       {"stackset", "service"},
 		},
 	},
 	"sts": {

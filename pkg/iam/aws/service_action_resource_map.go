@@ -87,13 +87,14 @@ func getResourcePatternsFromAction(action Action) []*regexp.Regexp {
 var serviceResourceMaps = map[string]ServiceResourceMap{
 	"bedrock-agentcore": {
 		ResourcePatterns: map[string]*regexp.Regexp{
-			"service": regexp.MustCompile(`^bedrock-agentcore.amazonaws.com$`),
+			"service":          regexp.MustCompile(`^bedrock-agentcore.amazonaws.com$`),
+			"code-interpreter": regexp.MustCompile(`^arn:aws:bedrock-agentcore:[a-z0-9-]+:\d{12}:code-interpreter/.*$`),
 		},
 		ActionResourceMap: map[string][]string{
 			"createcodeinterpreter":       {"service"},
-			"startcodeinterpretersession": {"service"},
-			"invokecodeinterpreter":       {"service"},
-			"getcodeinterpreter":          {"service"},
+			"startcodeinterpretersession": {"code-interpreter", "service"},
+			"invokecodeinterpreter":       {"code-interpreter", "service"},
+			"getcodeinterpreter":          {"code-interpreter"},
 			"listcodeinterpreters":        {"service"},
 		},
 	},
@@ -449,11 +450,12 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 	},
 	"apprunner": {
 		ResourcePatterns: map[string]*regexp.Regexp{
-			"service": regexp.MustCompile(`^tasks.apprunner.amazonaws.com$`),
+			"service":          regexp.MustCompile(`^tasks.apprunner.amazonaws.com$`),
+			"service-instance": regexp.MustCompile(`^arn:aws:apprunner:[a-z0-9-]+:\d{12}:service/.*$`),
 		},
 		ActionResourceMap: map[string][]string{
 			"createservice": {"service"},
-			"updateservice": {"service"},
+			"updateservice": {"service-instance"},
 		},
 	},
 	"autoscaling": {

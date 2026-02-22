@@ -9,8 +9,11 @@ cypher: |
   MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
   WHERE principal.admin IS NULL
     AND EXISTS((principal)-[:ECS_REGISTERTASKDEFINITION]->())
-    AND EXISTS((principal)-[:ECS_CREATESERVICE]->())
     AND 'ecs-tasks.amazonaws.com' IN targetRole.trustedServices
+
+  // Scope through actual ECS clusters — CreateService requires an existing cluster
+  WITH principal, targetRole
+  WHERE EXISTS((principal)-[:ECS_CREATESERVICE]->(:AWS_ECS_Cluster))
 
   // Create the privesc relationship
   MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)

@@ -9,7 +9,10 @@ cypher: |
   MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
   WHERE principal.admin IS NULL
     AND 'cloudformation.amazonaws.com' IN targetRole.trustedServices
-    AND EXISTS((principal)-[:CLOUDFORMATION_UPDATESTACKSET]->())
+
+  // Scope through actual CloudFormation stack sets — UpdateStackSet requires an existing stack set
+  WITH principal, targetRole
+  WHERE EXISTS((principal)-[:CLOUDFORMATION_UPDATESTACKSET]->(:AWS_CloudFormation_StackSet))
 
   // Create the privesc relationship
   MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)

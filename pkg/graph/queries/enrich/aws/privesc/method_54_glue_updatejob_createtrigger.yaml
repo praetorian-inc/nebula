@@ -9,8 +9,11 @@ cypher: |
   MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
   WHERE principal.admin IS NULL
     AND 'glue.amazonaws.com' IN targetRole.trustedServices
-    AND EXISTS((principal)-[:GLUE_UPDATEJOB]->())
     AND EXISTS((principal)-[:GLUE_CREATETRIGGER]->())
+
+  // Scope through actual Glue jobs — UpdateJob requires an existing job
+  WITH principal, targetRole
+  WHERE EXISTS((principal)-[:GLUE_UPDATEJOB]->(:AWS_Glue_Job))
 
   // Create the privesc relationship
   MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)

@@ -9,8 +9,15 @@ cypher: |
   MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
   WHERE principal.admin IS NULL
     AND EXISTS((principal)-[:ECS_REGISTERTASKDEFINITION]->())
-    AND EXISTS((principal)-[:ECS_STARTTASK]->())
     AND 'ecs-tasks.amazonaws.com' IN targetRole.trustedServices
+
+  // Scope through actual ECS clusters that have container instances —
+  // StartTask requires EC2 container instances (not Fargate)
+  WITH principal, targetRole
+  WHERE EXISTS {
+    MATCH (principal)-[:ECS_STARTTASK]->(cluster:AWS_ECS_Cluster)
+    WHERE EXISTS((:AWS_ECS_ContainerInstance)-[:BELONGS_TO]->(cluster))
+  }
 
   // Create the privesc relationship
   MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)

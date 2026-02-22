@@ -106,6 +106,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/apprunner v1.39.10 // indirect
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.50.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.30.3 // indirect
+	github.com/aws/aws-sdk-go-v2/service/glue v1.137.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.4.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.11.7 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.18.2 // indirect

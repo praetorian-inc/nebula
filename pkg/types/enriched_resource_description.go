@@ -366,6 +366,10 @@ func (e *EnrichedResourceDescription) GetRoleArn() string {
 		if roleArn, ok := props["RoleARN"].(string); ok {
 			return roleArn
 		}
+	case "AWS::CloudFormation::StackSet":
+		if roleArn, ok := props["AdministrationRoleARN"].(string); ok {
+			return roleArn
+		}
 	case "AWS::CodeBuild::Project":
 		if role, ok := props["Role"].(string); ok {
 			return role
@@ -408,6 +412,10 @@ func (e *EnrichedResourceDescription) GetRoleArn() string {
 	case "AWS::Bedrock::CodeInterpreter":
 		if roleArn, ok := props["ExecutionRoleArn"].(string); ok {
 			return roleArn
+		}
+	case "AWS::Glue::Job":
+		if role, ok := props["Role"].(string); ok {
+			return role
 		}
 	}
 

@@ -11,8 +11,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/aws/aws-sdk-go-v2/service/apprunner"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockagentcorecontrol"
+	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	"github.com/aws/aws-sdk-go-v2/service/codebuild"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ecs"
+	"github.com/aws/aws-sdk-go-v2/service/glue"
 	awsiam "github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sagemaker"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
@@ -46,8 +49,12 @@ func (a *AwsApolloControlFlow) SupportedResourceTypes() []model.CloudResourceTyp
 		model.CloudResourceType("AWS::CodeBuild::Project"),
 		model.CloudResourceType("AWS::SageMaker::NotebookInstance"),
 		model.CloudResourceType("AWS::ECS::TaskDefinition"),
+		model.CloudResourceType("AWS::ECS::Cluster"),
+		model.CloudResourceType("AWS::ECS::ContainerInstance"),
 		model.CloudResourceType("AWS::AppRunner::Service"),
 		model.CloudResourceType("AWS::Bedrock::CodeInterpreter"),
+		model.CloudResourceType("AWS::Glue::Job"),
+		model.CloudResourceType("AWS::CloudFormation::StackSet"),
 	}
 }
 
@@ -159,6 +166,30 @@ func (a *AwsApolloControlFlow) Process(resourceType string) error {
 	if err != nil {
 		a.Logger.Error("Failed to gather App Runner services: " + err.Error())
 		// Don't return error - continue with other resources
+	}
+
+	// Gather ECS clusters (needed for privesc methods 49/50 resource scoping)
+	err = a.gatherECSClusters()
+	if err != nil {
+		a.Logger.Error("Failed to gather ECS clusters: " + err.Error())
+	}
+
+	// Gather ECS container instances (needed for method 50 StartTask scoping)
+	err = a.gatherECSContainerInstances()
+	if err != nil {
+		a.Logger.Error("Failed to gather ECS container instances: " + err.Error())
+	}
+
+	// Gather Glue jobs (needed for Glue privesc methods)
+	err = a.gatherGlueJobs()
+	if err != nil {
+		a.Logger.Error("Failed to gather Glue jobs: " + err.Error())
+	}
+
+	// Gather CloudFormation StackSets (needed for StackSet privesc methods)
+	err = a.gatherCloudFormationStackSets()
+	if err != nil {
+		a.Logger.Error("Failed to gather CloudFormation StackSets: " + err.Error())
 	}
 
 	err = a.gatherResourcePolicies()
@@ -958,6 +989,478 @@ func (a *AwsApolloControlFlow) gatherAppRunnerServices() error {
 	return nil
 }
 
+// gatherECSClusters fetches ECS clusters from all regions.
+// Clusters are infrastructure targets for CreateService/RunTask/StartTask privesc methods.
+func (a *AwsApolloControlFlow) gatherECSClusters() error {
+	var totalClusters int
+
+	for _, region := range a.Regions {
+		config, err := a.GetConfigWithRuntimeArgs(region)
+		if err != nil {
+			a.Logger.Error(fmt.Sprintf("Failed to get AWS config for region %s: %s", region, err.Error()))
+			continue
+		}
+
+		client := ecs.NewFromConfig(config)
+
+		// List all cluster ARNs with pagination
+		var clusterArns []string
+		var nextToken *string
+
+		for {
+			listInput := &ecs.ListClustersInput{
+				NextToken: nextToken,
+			}
+
+			listOutput, err := client.ListClusters(context.TODO(), listInput)
+			if err != nil {
+				a.Logger.Debug(fmt.Sprintf("Failed to list ECS clusters in region %s: %s", region, err.Error()))
+				break
+			}
+
+			clusterArns = append(clusterArns, listOutput.ClusterArns...)
+
+			if listOutput.NextToken == nil {
+				break
+			}
+			nextToken = listOutput.NextToken
+		}
+
+		if len(clusterArns) == 0 {
+			continue
+		}
+
+		// DescribeClusters accepts up to 100 ARNs per call
+		for i := 0; i < len(clusterArns); i += 100 {
+			end := i + 100
+			if end > len(clusterArns) {
+				end = len(clusterArns)
+			}
+			batch := clusterArns[i:end]
+
+			describeInput := &ecs.DescribeClustersInput{
+				Clusters: batch,
+			}
+
+			describeOutput, err := client.DescribeClusters(context.TODO(), describeInput)
+			if err != nil {
+				a.Logger.Error(fmt.Sprintf("Failed to describe ECS clusters in region %s: %s", region, err.Error()))
+				continue
+			}
+
+			for _, cluster := range describeOutput.Clusters {
+				if cluster.ClusterArn == nil || cluster.ClusterName == nil {
+					continue
+				}
+
+				parsedArn, err := arn.Parse(*cluster.ClusterArn)
+				if err != nil {
+					a.Logger.Error(fmt.Sprintf("Failed to parse ECS cluster ARN %s: %s", *cluster.ClusterArn, err.Error()))
+					continue
+				}
+
+				properties := map[string]any{
+					"ClusterName": *cluster.ClusterName,
+					"Arn":         *cluster.ClusterArn,
+				}
+
+				if cluster.Status != nil {
+					properties["Status"] = *cluster.Status
+				}
+
+				if cluster.RegisteredContainerInstancesCount > 0 {
+					properties["RegisteredContainerInstancesCount"] = cluster.RegisteredContainerInstancesCount
+				}
+				if cluster.RunningTasksCount > 0 {
+					properties["RunningTasksCount"] = cluster.RunningTasksCount
+				}
+				if cluster.ActiveServicesCount > 0 {
+					properties["ActiveServicesCount"] = cluster.ActiveServicesCount
+				}
+
+				propsJSON, err := json.Marshal(properties)
+				if err != nil {
+					a.Logger.Error(fmt.Sprintf("Failed to marshal ECS cluster properties: %s", err.Error()))
+					continue
+				}
+
+				erd := types.NewEnrichedResourceDescription(
+					*cluster.ClusterArn,
+					"AWS::ECS::Cluster",
+					region,
+					parsedArn.AccountID,
+					string(propsJSON),
+				)
+
+				*a.pd.Resources = append(*a.pd.Resources, erd)
+				totalClusters++
+			}
+		}
+	}
+
+	if totalClusters > 0 {
+		a.Logger.Info(fmt.Sprintf("Gathered %d ECS clusters", totalClusters))
+	}
+
+	return nil
+}
+
+// gatherECSContainerInstances fetches ECS container instances from all clusters.
+// Container instances are required for ecs:StartTask (Method 50) — StartTask only works
+// on clusters with EC2 container instances, not Fargate.
+func (a *AwsApolloControlFlow) gatherECSContainerInstances() error {
+	var totalInstances int
+
+	for _, region := range a.Regions {
+		config, err := a.GetConfigWithRuntimeArgs(region)
+		if err != nil {
+			a.Logger.Error(fmt.Sprintf("Failed to get AWS config for region %s: %s", region, err.Error()))
+			continue
+		}
+
+		client := ecs.NewFromConfig(config)
+
+		// Find clusters we already collected for this region
+		for _, resource := range *a.pd.Resources {
+			if resource.TypeName != "AWS::ECS::Cluster" || resource.Region != region {
+				continue
+			}
+
+			clusterArn := resource.Arn.String()
+
+			// List container instances in this cluster
+			var instanceArns []string
+			var nextToken *string
+
+			for {
+				listInput := &ecs.ListContainerInstancesInput{
+					Cluster:   &clusterArn,
+					NextToken: nextToken,
+				}
+
+				listOutput, err := client.ListContainerInstances(context.TODO(), listInput)
+				if err != nil {
+					a.Logger.Debug(fmt.Sprintf("Failed to list container instances for cluster %s: %s", clusterArn, err.Error()))
+					break
+				}
+
+				instanceArns = append(instanceArns, listOutput.ContainerInstanceArns...)
+
+				if listOutput.NextToken == nil {
+					break
+				}
+				nextToken = listOutput.NextToken
+			}
+
+			if len(instanceArns) == 0 {
+				continue
+			}
+
+			// DescribeContainerInstances accepts up to 100 ARNs per call
+			for i := 0; i < len(instanceArns); i += 100 {
+				end := i + 100
+				if end > len(instanceArns) {
+					end = len(instanceArns)
+				}
+				batch := instanceArns[i:end]
+
+				describeInput := &ecs.DescribeContainerInstancesInput{
+					Cluster:            &clusterArn,
+					ContainerInstances: batch,
+				}
+
+				describeOutput, err := client.DescribeContainerInstances(context.TODO(), describeInput)
+				if err != nil {
+					a.Logger.Error(fmt.Sprintf("Failed to describe container instances in cluster %s: %s", clusterArn, err.Error()))
+					continue
+				}
+
+				for _, ci := range describeOutput.ContainerInstances {
+					if ci.ContainerInstanceArn == nil {
+						continue
+					}
+
+					parsedArn, err := arn.Parse(*ci.ContainerInstanceArn)
+					if err != nil {
+						a.Logger.Error(fmt.Sprintf("Failed to parse container instance ARN %s: %s", *ci.ContainerInstanceArn, err.Error()))
+						continue
+					}
+
+					properties := map[string]any{
+						"Arn":        *ci.ContainerInstanceArn,
+						"ClusterArn": clusterArn,
+					}
+
+					if ci.Status != nil {
+						properties["Status"] = *ci.Status
+					}
+					if ci.Ec2InstanceId != nil {
+						properties["Ec2InstanceId"] = *ci.Ec2InstanceId
+					}
+					if ci.RunningTasksCount > 0 {
+						properties["RunningTasksCount"] = ci.RunningTasksCount
+					}
+
+					propsJSON, err := json.Marshal(properties)
+					if err != nil {
+						a.Logger.Error(fmt.Sprintf("Failed to marshal container instance properties: %s", err.Error()))
+						continue
+					}
+
+					erd := types.NewEnrichedResourceDescription(
+						*ci.ContainerInstanceArn,
+						"AWS::ECS::ContainerInstance",
+						region,
+						parsedArn.AccountID,
+						string(propsJSON),
+					)
+
+					*a.pd.Resources = append(*a.pd.Resources, erd)
+					totalInstances++
+				}
+			}
+		}
+	}
+
+	if totalInstances > 0 {
+		a.Logger.Info(fmt.Sprintf("Gathered %d ECS container instances", totalInstances))
+	}
+
+	return nil
+}
+
+// gatherGlueJobs fetches Glue jobs from all regions.
+// Glue jobs are not supported by CloudControl, so we use the Glue API directly.
+func (a *AwsApolloControlFlow) gatherGlueJobs() error {
+	var totalJobs int
+
+	for _, region := range a.Regions {
+		config, err := a.GetConfigWithRuntimeArgs(region)
+		if err != nil {
+			a.Logger.Error(fmt.Sprintf("Failed to get AWS config for region %s: %s", region, err.Error()))
+			continue
+		}
+
+		accountID, err := helpers.GetAccountId(config)
+		if err != nil {
+			a.Logger.Error(fmt.Sprintf("Failed to get account ID for region %s: %s", region, err.Error()))
+			continue
+		}
+
+		client := glue.NewFromConfig(config)
+
+		var nextToken *string
+
+		for {
+			input := &glue.GetJobsInput{
+				NextToken: nextToken,
+			}
+
+			output, err := client.GetJobs(context.TODO(), input)
+			if err != nil {
+				a.Logger.Debug(fmt.Sprintf("Failed to list Glue jobs in region %s: %s", region, err.Error()))
+				break
+			}
+
+			for _, job := range output.Jobs {
+				if job.Name == nil {
+					continue
+				}
+
+				jobArn := fmt.Sprintf("arn:aws:glue:%s:%s:job/%s", region, accountID, *job.Name)
+
+				properties := map[string]any{
+					"Name": *job.Name,
+					"Arn":  jobArn,
+				}
+
+				if job.Role != nil {
+					properties["Role"] = *job.Role
+				}
+
+				if job.Description != nil {
+					properties["Description"] = *job.Description
+				}
+
+				if job.GlueVersion != nil {
+					properties["GlueVersion"] = *job.GlueVersion
+				}
+
+				if job.WorkerType != "" {
+					properties["WorkerType"] = string(job.WorkerType)
+				}
+
+				if job.NumberOfWorkers != nil {
+					properties["NumberOfWorkers"] = *job.NumberOfWorkers
+				}
+
+				if job.MaxCapacity != nil {
+					properties["MaxCapacity"] = *job.MaxCapacity
+				}
+
+				if job.Command != nil {
+					cmdProps := map[string]any{}
+					if job.Command.Name != nil {
+						cmdProps["Name"] = *job.Command.Name
+					}
+					if job.Command.ScriptLocation != nil {
+						cmdProps["ScriptLocation"] = *job.Command.ScriptLocation
+					}
+					if job.Command.PythonVersion != nil {
+						cmdProps["PythonVersion"] = *job.Command.PythonVersion
+					}
+					properties["Command"] = cmdProps
+				}
+
+				propsJSON, err := json.Marshal(properties)
+				if err != nil {
+					a.Logger.Error(fmt.Sprintf("Failed to marshal Glue job properties: %s", err.Error()))
+					continue
+				}
+
+				erd := types.NewEnrichedResourceDescription(
+					jobArn,
+					"AWS::Glue::Job",
+					region,
+					accountID,
+					string(propsJSON),
+				)
+
+				*a.pd.Resources = append(*a.pd.Resources, erd)
+				totalJobs++
+			}
+
+			if output.NextToken == nil {
+				break
+			}
+			nextToken = output.NextToken
+		}
+	}
+
+	if totalJobs > 0 {
+		a.Logger.Info(fmt.Sprintf("Gathered %d Glue jobs", totalJobs))
+	}
+
+	return nil
+}
+
+// gatherCloudFormationStackSets fetches CloudFormation StackSets from all regions.
+// StackSets are not supported by CloudControl, so we use the CloudFormation API directly.
+// We need AdministrationRoleARN and ExecutionRoleName from DescribeStackSet.
+func (a *AwsApolloControlFlow) gatherCloudFormationStackSets() error {
+	var totalStackSets int
+
+	for _, region := range a.Regions {
+		config, err := a.GetConfigWithRuntimeArgs(region)
+		if err != nil {
+			a.Logger.Error(fmt.Sprintf("Failed to get AWS config for region %s: %s", region, err.Error()))
+			continue
+		}
+
+		accountID, err := helpers.GetAccountId(config)
+		if err != nil {
+			a.Logger.Error(fmt.Sprintf("Failed to get account ID for region %s: %s", region, err.Error()))
+			continue
+		}
+
+		client := cloudformation.NewFromConfig(config)
+
+		var nextToken *string
+
+		for {
+			listInput := &cloudformation.ListStackSetsInput{
+				NextToken: nextToken,
+			}
+
+			listOutput, err := client.ListStackSets(context.TODO(), listInput)
+			if err != nil {
+				a.Logger.Debug(fmt.Sprintf("Failed to list CloudFormation StackSets in region %s: %s", region, err.Error()))
+				break
+			}
+
+			for _, summary := range listOutput.Summaries {
+				if summary.StackSetName == nil || summary.StackSetId == nil {
+					continue
+				}
+
+				// Get full details for AdministrationRoleARN and ExecutionRoleName
+				describeInput := &cloudformation.DescribeStackSetInput{
+					StackSetName: summary.StackSetName,
+				}
+
+				describeOutput, err := client.DescribeStackSet(context.TODO(), describeInput)
+				if err != nil {
+					a.Logger.Debug(fmt.Sprintf("Failed to describe StackSet %s in region %s: %s", *summary.StackSetName, region, err.Error()))
+					continue
+				}
+
+				if describeOutput.StackSet == nil {
+					continue
+				}
+
+				stackSet := describeOutput.StackSet
+
+				stackSetArn := fmt.Sprintf("arn:aws:cloudformation:%s:%s:stackset/%s:%s",
+					region, accountID, *summary.StackSetName, *summary.StackSetId)
+
+				properties := map[string]any{
+					"StackSetName": *summary.StackSetName,
+					"StackSetId":   *summary.StackSetId,
+					"Arn":          stackSetArn,
+				}
+
+				if summary.Status != "" {
+					properties["Status"] = string(summary.Status)
+				}
+
+				if summary.Description != nil {
+					properties["Description"] = *summary.Description
+				}
+
+				if summary.PermissionModel != "" {
+					properties["PermissionModel"] = string(summary.PermissionModel)
+				}
+
+				if stackSet.AdministrationRoleARN != nil {
+					properties["AdministrationRoleARN"] = *stackSet.AdministrationRoleARN
+				}
+
+				if stackSet.ExecutionRoleName != nil {
+					properties["ExecutionRoleName"] = *stackSet.ExecutionRoleName
+				}
+
+				propsJSON, err := json.Marshal(properties)
+				if err != nil {
+					a.Logger.Error(fmt.Sprintf("Failed to marshal StackSet properties: %s", err.Error()))
+					continue
+				}
+
+				erd := types.NewEnrichedResourceDescription(
+					stackSetArn,
+					"AWS::CloudFormation::StackSet",
+					region,
+					accountID,
+					string(propsJSON),
+				)
+
+				*a.pd.Resources = append(*a.pd.Resources, erd)
+				totalStackSets++
+			}
+
+			if listOutput.NextToken == nil {
+				break
+			}
+			nextToken = listOutput.NextToken
+		}
+	}
+
+	if totalStackSets > 0 {
+		a.Logger.Info(fmt.Sprintf("Gathered %d CloudFormation StackSets", totalStackSets))
+	}
+
+	return nil
+}
+
 // sendGaadPrincipals sends all GAAD principals (users, roles, groups) as graph nodes
 // This ensures that all principals have full properties from GAAD, even if they
 // only appear as relationship targets (e.g., roles that can be assumed but have no permissions)
@@ -1077,6 +1580,50 @@ func (a *AwsApolloControlFlow) sendResourceRoleRelationships() error {
 
 		// Send to outputter
 		a.Send(assumeRoleRel)
+	}
+
+	// Create BELONGS_TO relationships for container instances → clusters
+	for _, resource := range *a.pd.Resources {
+		if resource.TypeName != "AWS::ECS::ContainerInstance" {
+			continue
+		}
+
+		props, err := resource.PropertiesAsMap()
+		if err != nil {
+			continue
+		}
+
+		clusterArn, ok := props["ClusterArn"].(string)
+		if !ok || clusterArn == "" {
+			continue
+		}
+
+		// Create the container instance node
+		ciNode, err := TransformERDToAWSResource(&resource)
+		if err != nil {
+			a.Logger.Error(fmt.Sprintf("Failed to transform container instance %s: %s", resource.Arn.String(), err.Error()))
+			continue
+		}
+
+		// Create the cluster node reference
+		clusterParsedArn, err := arn.Parse(clusterArn)
+		if err != nil {
+			continue
+		}
+		clusterNode, err := model.NewAWSResource(
+			clusterArn,
+			clusterParsedArn.AccountID,
+			model.CloudResourceType("AWS::ECS::Cluster"),
+			map[string]any{},
+		)
+		if err != nil {
+			continue
+		}
+
+		// Create BELONGS_TO relationship
+		belongsToRel := model.NewIAMRelationship(ciNode, &clusterNode, "BELONGS_TO")
+		belongsToRel.Capability = "apollo-container-instance-cluster-mapping"
+		a.Send(belongsToRel)
 	}
 
 	return nil

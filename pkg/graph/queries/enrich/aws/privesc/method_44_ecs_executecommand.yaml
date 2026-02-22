@@ -5,12 +5,22 @@ impactedServices:
 severity: High
 order: 141
 cypher: |
-  MATCH (principal)-[:ECS_EXECUTECOMMAND]->()
+  MATCH (principal)-[:ECS_EXECUTECOMMAND]->(target)
   WHERE principal.admin IS NULL
     AND EXISTS((principal)-[:ECS_DESCRIBETASKS]->())
 
-  // Scope through actual ECS task definitions that have privileged task roles
-  MATCH (taskDef:AWS_ECS_TaskDefinition)-[:STS_ASSUMEROLE]->(targetRole:AWS_IAM_Role)
+  // Scope through running tasks with ExecuteCommand enabled
+  WITH principal, target
+  MATCH (task:AWS_ECS_Task)-[:BELONGS_TO]->(taskDef:AWS_ECS_TaskDefinition)
+        -[:STS_ASSUMEROLE]->(targetRole:AWS_IAM_Role)
+  WHERE task.EnableExecuteCommand = true
+    AND (
+      // Cluster-scoped: only tasks in reachable cluster
+      (target:AWS_ECS_Cluster AND EXISTS((task)-[:BELONGS_TO]->(target)))
+      OR
+      // Wildcard (service principal target): match all running tasks
+      (NOT target:AWS_ECS_Cluster)
+    )
 
   // Create the privesc relationship
   MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)

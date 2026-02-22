@@ -5,11 +5,11 @@ impactedServices:
 severity: High
 order: 142
 cypher: |
-  MATCH (principal)-[:APPRUNNER_UPDATESERVICE]->()
+  MATCH (principal)-[:APPRUNNER_UPDATESERVICE]->(service:AWS_AppRunner_Service)
   WHERE principal.admin IS NULL
 
-  // Scope through actual App Runner services that have privileged instance roles
-  MATCH (service:AWS_AppRunner_Service)-[:STS_ASSUMEROLE]->(targetRole:AWS_IAM_Role)
+  // Traverse from the specific service to its instance role
+  MATCH (service)-[:STS_ASSUMEROLE]->(targetRole:AWS_IAM_Role)
 
   // Create the privesc relationship
   MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
@@ -17,7 +17,8 @@ cypher: |
     privesc.method = "Method-45-AppRunner-UpdateService",
     privesc.requires = ["apprunner:UpdateService"],
     privesc.service = "App Runner",
-    privesc.targetType = "Role"
+    privesc.targetType = "Role",
+    privesc.serviceArn = service.arn
   ON MATCH SET
     privesc.method = CASE
       WHEN NOT privesc.method CONTAINS "Method-45-AppRunner-UpdateService"

@@ -22,7 +22,7 @@ cypher: |
     privesc.requires = ["sagemaker:CreateNotebookInstanceLifecycleConfig", "sagemaker:StopNotebookInstance", "sagemaker:UpdateNotebookInstance", "sagemaker:StartNotebookInstance"],
     privesc.service = "SageMaker",
     privesc.targetType = "Role",
-    privesc.notebookName = notebook.name
+    privesc.notebookName = notebook.NotebookInstanceName
   ON MATCH SET
     privesc.method = CASE
       WHEN NOT privesc.method CONTAINS "Method-64-SageMaker-Lifecycle-Config-Injection"
@@ -30,7 +30,7 @@ cypher: |
       ELSE privesc.method
     END,
     privesc.notebookName = CASE
-      WHEN privesc.notebookName IS NULL THEN notebook.name
-      WHEN NOT privesc.notebookName CONTAINS notebook.name THEN privesc.notebookName + "," + notebook.name
+      WHEN privesc.notebookName IS NULL THEN notebook.NotebookInstanceName
+      WHEN NOT privesc.notebookName CONTAINS notebook.NotebookInstanceName THEN privesc.notebookName + "," + notebook.NotebookInstanceName
       ELSE privesc.notebookName
     END

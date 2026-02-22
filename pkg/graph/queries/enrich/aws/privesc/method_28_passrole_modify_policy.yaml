@@ -52,7 +52,7 @@ cypher: |
   ON CREATE SET
     privesc.method = "Method-28-PassRole-ModifyPolicy",
     privesc.requires = CASE
-      WHEN type(modify) = 'iam:PutRolePolicy' THEN ["iam:PutRolePolicy", "iam:PassRole"]
+      WHEN type(modify) = 'IAM_PUTROLEPOLICY' THEN ["iam:PutRolePolicy", "iam:PassRole"]
       ELSE ["iam:AttachRolePolicy", "iam:PassRole"]
     END,
     privesc.service = "IAM",

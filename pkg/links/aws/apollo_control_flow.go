@@ -1427,8 +1427,10 @@ func (a *AwsApolloControlFlow) gatherCloudFormationStackSets() error {
 
 				stackSet := describeOutput.StackSet
 
-				stackSetArn := fmt.Sprintf("arn:aws:cloudformation:%s:%s:stackset/%s:%s",
-					region, accountID, *summary.StackSetName, *summary.StackSetId)
+				if stackSet.StackSetARN == nil {
+					continue
+				}
+				stackSetArn := *stackSet.StackSetARN
 
 				properties := map[string]any{
 					"StackSetName": *summary.StackSetName,

@@ -8,9 +8,8 @@ cypher: |
   MATCH (principal)-[:APPRUNNER_UPDATESERVICE]->()
   WHERE principal.admin IS NULL
 
-  // Find roles trusted by App Runner tasks service - these are potential escalation targets
-  MATCH (targetRole:AWS_IAM_Role)
-  WHERE 'tasks.apprunner.amazonaws.com' IN targetRole.trustedServices
+  // Scope through actual App Runner services that have privileged instance roles
+  MATCH (service:AWS_AppRunner_Service)-[:STS_ASSUMEROLE]->(targetRole:AWS_IAM_Role)
 
   // Create the privesc relationship
   MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)

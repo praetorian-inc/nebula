@@ -9,9 +9,8 @@ cypher: |
   WHERE principal.admin IS NULL
     AND EXISTS((principal)-[:ECS_DESCRIBETASKS]->())
 
-  // Find roles trusted by ECS tasks service - these are potential escalation targets
-  MATCH (targetRole:AWS_IAM_Role)
-  WHERE 'ecs-tasks.amazonaws.com' IN targetRole.trustedServices
+  // Scope through actual ECS task definitions that have privileged task roles
+  MATCH (taskDef:AWS_ECS_TaskDefinition)-[:STS_ASSUMEROLE]->(targetRole:AWS_IAM_Role)
 
   // Create the privesc relationship
   MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)

@@ -11,9 +11,8 @@ cypher: |
     AND EXISTS((principal)-[:`BEDROCK-AGENTCORE_STARTCODEINTERPRETERSESSION`]->())
     AND EXISTS((principal)-[:`BEDROCK-AGENTCORE_INVOKECODEINTERPRETER`]->())
 
-  // Find roles that trust Bedrock — potential execution roles for existing code interpreters
-  MATCH (targetRole:AWS_IAM_Role)
-  WHERE 'bedrock.amazonaws.com' IN targetRole.trustedServices
+  // Scope through actual CodeInterpreter instances that have execution roles
+  MATCH (interpreter:AWS_Bedrock_CodeInterpreter)-[:STS_ASSUMEROLE]->(targetRole:AWS_IAM_Role)
 
   // Create the privesc relationship
   MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)

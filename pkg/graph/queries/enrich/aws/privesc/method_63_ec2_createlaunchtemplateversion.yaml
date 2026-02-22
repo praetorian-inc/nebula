@@ -9,12 +9,8 @@ cypher: |
   WHERE principal.admin IS NULL
     AND EXISTS((principal)-[:EC2_MODIFYLAUNCHTEMPLATE]->())
 
-  // Find target roles: EC2-trusted admin roles with instance profiles
-  // These roles could be attached to launch templates via instance profiles
-  MATCH (targetRole:AWS_IAM_Role)
-  WHERE 'ec2.amazonaws.com' IN targetRole.trustedServices
-    AND targetRole.instanceProfileList IS NOT NULL
-    AND targetRole.instanceProfileList <> '[]'
+  // Scope through actual launch templates that have privileged instance profiles
+  MATCH (template:AWS_EC2_LaunchTemplate)-[:STS_ASSUMEROLE]->(targetRole:AWS_IAM_Role)
 
   // Create the privesc relationship
   MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)

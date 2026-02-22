@@ -222,10 +222,10 @@ func (a *AwsApolloControlFlow) Process(resourceType string) error {
 
 	// Transform and send IAM permission relationships
 	fullResults := summary.FullResults()
-	a.Logger.Info(fmt.Sprintf("DEBUG: Found %d full results to process", len(fullResults)))
+	a.Logger.Debug(fmt.Sprintf("Found %d full results to process", len(fullResults)))
 
 	for i, result := range fullResults {
-		a.Logger.Debug(fmt.Sprintf("DEBUG: Processing result %d - Principal: %T, Resource: %v, Action: %s",
+		a.Logger.Debug(fmt.Sprintf("Processing result %d - Principal: %T, Resource: %v, Action: %s",
 			i, result.Principal, result.Resource, result.Action))
 
 		rel, err := TransformResultToRelationship(result)
@@ -233,7 +233,7 @@ func (a *AwsApolloControlFlow) Process(resourceType string) error {
 			a.Logger.Error("Failed to transform relationship: " + err.Error())
 			continue
 		}
-		a.Logger.Debug(fmt.Sprintf("DEBUG: Successfully transformed result %d, sending to outputter", i))
+		a.Logger.Debug(fmt.Sprintf("Successfully transformed result %d, sending to outputter", i))
 		a.Send(rel)
 	}
 
@@ -1111,7 +1111,20 @@ func (a *AwsApolloControlFlow) gatherECSClusters() error {
 func (a *AwsApolloControlFlow) gatherECSContainerInstances() error {
 	var totalInstances int
 
+	// Precompute region → cluster ARNs map to avoid re-scanning resources per region
+	clustersByRegion := make(map[string][]string)
+	for _, resource := range *a.pd.Resources {
+		if resource.TypeName == "AWS::ECS::Cluster" {
+			clustersByRegion[resource.Region] = append(clustersByRegion[resource.Region], resource.Arn.String())
+		}
+	}
+
 	for _, region := range a.Regions {
+		clusterArns, ok := clustersByRegion[region]
+		if !ok {
+			continue
+		}
+
 		config, err := a.GetConfigWithRuntimeArgs(region)
 		if err != nil {
 			a.Logger.Error(fmt.Sprintf("Failed to get AWS config for region %s: %s", region, err.Error()))
@@ -1120,13 +1133,7 @@ func (a *AwsApolloControlFlow) gatherECSContainerInstances() error {
 
 		client := ecs.NewFromConfig(config)
 
-		// Find clusters we already collected for this region
-		for _, resource := range *a.pd.Resources {
-			if resource.TypeName != "AWS::ECS::Cluster" || resource.Region != region {
-				continue
-			}
-
-			clusterArn := resource.Arn.String()
+		for _, clusterArn := range clusterArns {
 
 			// List container instances in this cluster
 			var instanceArns []string

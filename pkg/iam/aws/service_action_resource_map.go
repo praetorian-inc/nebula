@@ -87,14 +87,15 @@ func getResourcePatternsFromAction(action Action) []*regexp.Regexp {
 var serviceResourceMaps = map[string]ServiceResourceMap{
 	"bedrock-agentcore": {
 		ResourcePatterns: map[string]*regexp.Regexp{
-			"service":          regexp.MustCompile(`^bedrock-agentcore.amazonaws.com$`),
-			"code-interpreter": regexp.MustCompile(`^arn:aws:bedrock-agentcore:[a-z0-9-]+:\d{12}:code-interpreter/.*$`),
+			"service":                 regexp.MustCompile(`^bedrock-agentcore.amazonaws.com$`),
+			"code-interpreter":        regexp.MustCompile(`^arn:aws:bedrock-agentcore:[a-z0-9-]+:aws:code-interpreter/.*$`),
+			"code-interpreter-custom": regexp.MustCompile(`^arn:aws:bedrock-agentcore:[a-z0-9-]+:\d{12}:code-interpreter-custom/.*$`),
 		},
 		ActionResourceMap: map[string][]string{
 			"createcodeinterpreter":       {"service"},
-			"startcodeinterpretersession": {"code-interpreter", "service"},
-			"invokecodeinterpreter":       {"code-interpreter", "service"},
-			"getcodeinterpreter":          {"code-interpreter"},
+			"startcodeinterpretersession": {"code-interpreter", "code-interpreter-custom", "service"},
+			"invokecodeinterpreter":       {"code-interpreter", "code-interpreter-custom", "service"},
+			"getcodeinterpreter":          {"code-interpreter", "code-interpreter-custom"},
 			"listcodeinterpreters":        {"service"},
 		},
 	},

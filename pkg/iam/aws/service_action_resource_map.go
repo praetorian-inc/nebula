@@ -263,9 +263,9 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 		},
 		ActionResourceMap: map[string][]string{
 			"createlaunchtemplate":        {"service"},
-			"createlaunchtemplateversion": {"service"},
+			"createlaunchtemplateversion": {"launch-template", "service"},
 			"modifyinstanceattribute":     {"instance"},
-			"modifylaunchtemplate":        {"service"},
+			"modifylaunchtemplate":        {"launch-template", "service"},
 			"requestspotinstances":        {"service"},
 			"runinstances":                {"service"},
 			"startinstances":              {"instance"},
@@ -281,7 +281,7 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 		ActionResourceMap: map[string][]string{
 			"createchangeset":      {"stack"},
 			"createstack":          {"service"},
-			"createstackinstances": {"service"},
+			"createstackinstances": {"stackset", "service"},
 			"createstackset":       {"service"},
 			"executechangeset":     {"stack"},
 			"setstackpolicy":       {"stack"},

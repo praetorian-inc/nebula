@@ -1234,16 +1234,26 @@ func (a *AwsApolloControlFlow) gatherECSContainerInstances() error {
 func (a *AwsApolloControlFlow) gatherGlueJobs() error {
 	var totalJobs int
 
+	// Get account ID once (same across all regions)
+	var accountID string
+	if len(a.Regions) > 0 {
+		cfg, err := a.GetConfigWithRuntimeArgs(a.Regions[0])
+		if err == nil {
+			accountID, err = helpers.GetAccountId(cfg)
+			if err != nil {
+				a.Logger.Error(fmt.Sprintf("Failed to get account ID for Glue jobs: %s", err.Error()))
+				return nil
+			}
+		} else {
+			a.Logger.Error(fmt.Sprintf("Failed to get AWS config for account ID: %s", err.Error()))
+			return nil
+		}
+	}
+
 	for _, region := range a.Regions {
 		config, err := a.GetConfigWithRuntimeArgs(region)
 		if err != nil {
 			a.Logger.Error(fmt.Sprintf("Failed to get AWS config for region %s: %s", region, err.Error()))
-			continue
-		}
-
-		accountID, err := helpers.GetAccountId(config)
-		if err != nil {
-			a.Logger.Error(fmt.Sprintf("Failed to get account ID for region %s: %s", region, err.Error()))
 			continue
 		}
 
@@ -1350,16 +1360,26 @@ func (a *AwsApolloControlFlow) gatherGlueJobs() error {
 func (a *AwsApolloControlFlow) gatherCloudFormationStackSets() error {
 	var totalStackSets int
 
+	// Get account ID once (same across all regions)
+	var accountID string
+	if len(a.Regions) > 0 {
+		cfg, err := a.GetConfigWithRuntimeArgs(a.Regions[0])
+		if err == nil {
+			accountID, err = helpers.GetAccountId(cfg)
+			if err != nil {
+				a.Logger.Error(fmt.Sprintf("Failed to get account ID for CloudFormation StackSets: %s", err.Error()))
+				return nil
+			}
+		} else {
+			a.Logger.Error(fmt.Sprintf("Failed to get AWS config for account ID: %s", err.Error()))
+			return nil
+		}
+	}
+
 	for _, region := range a.Regions {
 		config, err := a.GetConfigWithRuntimeArgs(region)
 		if err != nil {
 			a.Logger.Error(fmt.Sprintf("Failed to get AWS config for region %s: %s", region, err.Error()))
-			continue
-		}
-
-		accountID, err := helpers.GetAccountId(config)
-		if err != nil {
-			a.Logger.Error(fmt.Sprintf("Failed to get account ID for region %s: %s", region, err.Error()))
 			continue
 		}
 

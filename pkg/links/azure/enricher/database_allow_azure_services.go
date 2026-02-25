@@ -42,7 +42,7 @@ func (d *DatabaseAllowAzureServicesEnricher) checkSQLServerFirewall(ctx context.
 	if serverName == "" || subscriptionID == "" || resourceGroupName == "" {
 		return []Command{{
 			Command:      "",
-			Description:  "Check SQL Server for AllowAllWindowsAzureIps firewall rule",
+			Description:  "Check SQL Server firewall for Allow Azure services rule (0.0.0.0-0.0.0.0)",
 			ActualOutput: "Error: Server name, subscription ID, or resource group is missing",
 			ExitCode:     1,
 		}}
@@ -52,7 +52,7 @@ func (d *DatabaseAllowAzureServicesEnricher) checkSQLServerFirewall(ctx context.
 	if err != nil {
 		return []Command{{
 			Command:      "",
-			Description:  "Check SQL Server for AllowAllWindowsAzureIps firewall rule",
+			Description:  "Check SQL Server firewall for Allow Azure services rule (0.0.0.0-0.0.0.0)",
 			ActualOutput: fmt.Sprintf("Error getting Azure credentials: %s", err.Error()),
 			ExitCode:     1,
 		}}
@@ -62,7 +62,7 @@ func (d *DatabaseAllowAzureServicesEnricher) checkSQLServerFirewall(ctx context.
 	if err != nil {
 		return []Command{{
 			Command:      "",
-			Description:  "Check SQL Server for AllowAllWindowsAzureIps firewall rule",
+			Description:  "Check SQL Server firewall for Allow Azure services rule (0.0.0.0-0.0.0.0)",
 			ActualOutput: fmt.Sprintf("Error creating client factory: %s", err.Error()),
 			ExitCode:     1,
 		}}
@@ -79,7 +79,7 @@ func (d *DatabaseAllowAzureServicesEnricher) checkSQLServerFirewall(ctx context.
 		if err != nil {
 			return []Command{{
 				Command:      "",
-				Description:  "Check SQL Server for AllowAllWindowsAzureIps firewall rule",
+				Description:  "Check SQL Server firewall for Allow Azure services rule (0.0.0.0-0.0.0.0)",
 				ActualOutput: fmt.Sprintf("Error retrieving firewall rules: %s", err.Error()),
 				ExitCode:     1,
 			}}
@@ -123,13 +123,13 @@ func (d *DatabaseAllowAzureServicesEnricher) checkSQLServerFirewall(ctx context.
 		output = fmt.Sprintf("FINDING: Allow Azure services enabled - %s", ruleDetails)
 		exitCode = 1
 	} else {
-		output = "OK: Allow Azure services disabled - AllowAllWindowsAzureIps rule not found"
+		output = "OK: Allow Azure services disabled - no firewall rule with 0.0.0.0-0.0.0.0 found"
 		exitCode = 0
 	}
 
 	return []Command{{
 		Command:      "",
-		Description:  "Check SQL Server for AllowAllWindowsAzureIps firewall rule",
+		Description:  "Check SQL Server firewall for Allow Azure services rule (0.0.0.0-0.0.0.0)",
 		ActualOutput: output,
 		ExitCode:     exitCode,
 	}}

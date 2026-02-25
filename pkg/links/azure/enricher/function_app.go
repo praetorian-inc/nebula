@@ -149,12 +149,14 @@ func (f *FunctionAppEnricher) enumerateSlots(ctx context.Context, client *armapp
 	}
 
 	var allSlotTriggers []HTTPTriggerInfo
+	slotErrors := 0
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Deployment slots found: %d (%s)\n", len(slotNames), strings.Join(slotNames, ", ")))
 
 	for _, slotName := range slotNames {
 		triggers, totalFuncs, err := ListHTTPTriggers(ctx, client, resourceGroupName, functionAppName, slotName)
 		if err != nil {
+			slotErrors++
 			sb.WriteString(fmt.Sprintf("  Slot %s: error listing functions: %s\n", slotName, err.Error()))
 			continue
 		}
@@ -162,12 +164,18 @@ func (f *FunctionAppEnricher) enumerateSlots(ctx context.Context, client *armapp
 		allSlotTriggers = append(allSlotTriggers, triggers...)
 	}
 
+	exitCode := 0
+	if slotErrors > 0 {
+		sb.WriteString(fmt.Sprintf("\nWARNING: %d of %d slots failed enumeration — trigger data may be incomplete.", slotErrors, len(slotNames)))
+		exitCode = -1
+	}
+
 	cmd := Command{
 		Command:                   fmt.Sprintf("az functionapp deployment slot list --resource-group %s --name %s", resourceGroupName, functionAppName),
 		Description:               "Enumerate deployment slot HTTP triggers",
 		ExpectedOutputDescription: "Lists HTTP triggers in deployment slots (staging, canary, etc.)",
 		ActualOutput:              sb.String(),
-		ExitCode:                  0,
+		ExitCode:                  exitCode,
 	}
 
 	return allSlotTriggers, &cmd
@@ -356,6 +364,29 @@ func (f *FunctionAppEnricher) checkIPRestrictions(ctx context.Context, client *a
 		cmd.ActualOutput = "No IP restrictions configured — Function App is fully open to all internet traffic."
 		cmd.ExitCode = 1
 		return cmd
+	}
+
+	// Check if any meaningful rule is a broad allow-all that provides no real protection
+	for _, r := range meaningful {
+		if r.Action != nil && strings.EqualFold(*r.Action, "Allow") {
+			// Check IP-based allow-all (e.g., Allow 0.0.0.0/0 or ::/0)
+			if r.IPAddress != nil {
+				ip := strings.TrimSpace(*r.IPAddress)
+				if ip == "0.0.0.0/0" || ip == "::/0" {
+					cmd.ActualOutput = "No effective IP restrictions — broad allow-all rule (0.0.0.0/0) present. Function App is open to all internet traffic."
+					cmd.ExitCode = 1
+					return cmd
+				}
+			}
+			// Check ServiceTag-based allow-all (e.g., Allow Internet)
+			if r.Tag != nil && *r.Tag == armappservice.IPFilterTagServiceTag && r.IPAddress != nil {
+				if strings.EqualFold(strings.TrimSpace(*r.IPAddress), "Internet") {
+					cmd.ActualOutput = "No effective IP restrictions — Allow rule with ServiceTag 'Internet' present. Function App is open to all internet traffic."
+					cmd.ExitCode = 1
+					return cmd
+				}
+			}
+		}
 	}
 
 	var sb strings.Builder

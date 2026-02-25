@@ -432,6 +432,29 @@ func (a *AppServiceEnricher) checkIPRestrictions(ctx context.Context, client *ar
 		return cmd
 	}
 
+	// Check if any meaningful rule is a broad allow-all that provides no real protection
+	for _, r := range meaningful {
+		if r.Action != nil && strings.EqualFold(*r.Action, "Allow") {
+			// Check IP-based allow-all (e.g., Allow 0.0.0.0/0 or ::/0)
+			if r.IPAddress != nil {
+				ip := strings.TrimSpace(*r.IPAddress)
+				if ip == "0.0.0.0/0" || ip == "::/0" {
+					cmd.ActualOutput = "No effective IP restrictions — broad allow-all rule (0.0.0.0/0) present. App Service is open to all internet traffic."
+					cmd.ExitCode = 1
+					return cmd
+				}
+			}
+			// Check ServiceTag-based allow-all (e.g., Allow Internet)
+			if r.Tag != nil && *r.Tag == armappservice.IPFilterTagServiceTag && r.IPAddress != nil {
+				if strings.EqualFold(strings.TrimSpace(*r.IPAddress), "Internet") {
+					cmd.ActualOutput = "No effective IP restrictions — Allow rule with ServiceTag 'Internet' present. App Service is open to all internet traffic."
+					cmd.ExitCode = 1
+					return cmd
+				}
+			}
+		}
+	}
+
 	var rsb strings.Builder
 	rsb.WriteString(fmt.Sprintf("IP restrictions found: %d rule(s)\n", len(meaningful)))
 	for _, r := range meaningful {

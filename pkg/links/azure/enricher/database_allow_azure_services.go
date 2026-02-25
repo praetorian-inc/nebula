@@ -86,19 +86,29 @@ func (d *DatabaseAllowAzureServicesEnricher) checkSQLServerFirewall(ctx context.
 		}
 
 		for _, rule := range page.Value {
-			if rule != nil && rule.Name != nil && *rule.Name == "AllowAllWindowsAzureIps" {
+			if rule == nil || rule.Properties == nil {
+				continue
+			}
+			// Match by IP range (0.0.0.0-0.0.0.0) instead of rule name.
+			// The "Allow Azure services" rule can be created with any name
+			// (e.g., "AllowAllWindowsAzureIps", "FirewallRule1", "Allow_Azure_services")
+			// depending on how it was provisioned (Portal, CLI, Terraform, ARM).
+			// The 0.0.0.0-0.0.0.0 range is the definitive indicator.
+			startIP := ""
+			endIP := ""
+			if rule.Properties.StartIPAddress != nil {
+				startIP = *rule.Properties.StartIPAddress
+			}
+			if rule.Properties.EndIPAddress != nil {
+				endIP = *rule.Properties.EndIPAddress
+			}
+			if startIP == "0.0.0.0" && endIP == "0.0.0.0" {
 				hasAllowAzureRule = true
-				if rule.Properties != nil {
-					startIP := ""
-					endIP := ""
-					if rule.Properties.StartIPAddress != nil {
-						startIP = *rule.Properties.StartIPAddress
-					}
-					if rule.Properties.EndIPAddress != nil {
-						endIP = *rule.Properties.EndIPAddress
-					}
-					ruleDetails = fmt.Sprintf("Rule found: %s (%s-%s)", *rule.Name, startIP, endIP)
+				ruleName := ""
+				if rule.Name != nil {
+					ruleName = *rule.Name
 				}
+				ruleDetails = fmt.Sprintf("Rule found: %s (%s-%s)", ruleName, startIP, endIP)
 				break
 			}
 		}

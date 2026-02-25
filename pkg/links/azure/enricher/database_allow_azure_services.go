@@ -42,7 +42,7 @@ func (d *DatabaseAllowAzureServicesEnricher) checkSQLServerFirewall(ctx context.
 	if serverName == "" || subscriptionID == "" || resourceGroupName == "" {
 		return []Command{{
 			Command:      "",
-			Description:  "Check SQL Server for AllowAllWindowsAzureIps firewall rule",
+			Description:  "Check SQL Server firewall for Allow Azure services rule (0.0.0.0-0.0.0.0)",
 			ActualOutput: "Error: Server name, subscription ID, or resource group is missing",
 			ExitCode:     1,
 		}}
@@ -52,7 +52,7 @@ func (d *DatabaseAllowAzureServicesEnricher) checkSQLServerFirewall(ctx context.
 	if err != nil {
 		return []Command{{
 			Command:      "",
-			Description:  "Check SQL Server for AllowAllWindowsAzureIps firewall rule",
+			Description:  "Check SQL Server firewall for Allow Azure services rule (0.0.0.0-0.0.0.0)",
 			ActualOutput: fmt.Sprintf("Error getting Azure credentials: %s", err.Error()),
 			ExitCode:     1,
 		}}
@@ -62,7 +62,7 @@ func (d *DatabaseAllowAzureServicesEnricher) checkSQLServerFirewall(ctx context.
 	if err != nil {
 		return []Command{{
 			Command:      "",
-			Description:  "Check SQL Server for AllowAllWindowsAzureIps firewall rule",
+			Description:  "Check SQL Server firewall for Allow Azure services rule (0.0.0.0-0.0.0.0)",
 			ActualOutput: fmt.Sprintf("Error creating client factory: %s", err.Error()),
 			ExitCode:     1,
 		}}
@@ -79,26 +79,36 @@ func (d *DatabaseAllowAzureServicesEnricher) checkSQLServerFirewall(ctx context.
 		if err != nil {
 			return []Command{{
 				Command:      "",
-				Description:  "Check SQL Server for AllowAllWindowsAzureIps firewall rule",
+				Description:  "Check SQL Server firewall for Allow Azure services rule (0.0.0.0-0.0.0.0)",
 				ActualOutput: fmt.Sprintf("Error retrieving firewall rules: %s", err.Error()),
 				ExitCode:     1,
 			}}
 		}
 
 		for _, rule := range page.Value {
-			if rule != nil && rule.Name != nil && *rule.Name == "AllowAllWindowsAzureIps" {
+			if rule == nil || rule.Properties == nil {
+				continue
+			}
+			// Match by IP range (0.0.0.0-0.0.0.0) instead of rule name.
+			// The "Allow Azure services" rule can be created with any name
+			// (e.g., "AllowAllWindowsAzureIps", "FirewallRule1", "Allow_Azure_services")
+			// depending on how it was provisioned (Portal, CLI, Terraform, ARM).
+			// The 0.0.0.0-0.0.0.0 range is the definitive indicator.
+			startIP := ""
+			endIP := ""
+			if rule.Properties.StartIPAddress != nil {
+				startIP = *rule.Properties.StartIPAddress
+			}
+			if rule.Properties.EndIPAddress != nil {
+				endIP = *rule.Properties.EndIPAddress
+			}
+			if startIP == "0.0.0.0" && endIP == "0.0.0.0" {
 				hasAllowAzureRule = true
-				if rule.Properties != nil {
-					startIP := ""
-					endIP := ""
-					if rule.Properties.StartIPAddress != nil {
-						startIP = *rule.Properties.StartIPAddress
-					}
-					if rule.Properties.EndIPAddress != nil {
-						endIP = *rule.Properties.EndIPAddress
-					}
-					ruleDetails = fmt.Sprintf("Rule found: %s (%s-%s)", *rule.Name, startIP, endIP)
+				ruleName := ""
+				if rule.Name != nil {
+					ruleName = *rule.Name
 				}
+				ruleDetails = fmt.Sprintf("Rule found: %s (%s-%s)", ruleName, startIP, endIP)
 				break
 			}
 		}
@@ -113,13 +123,13 @@ func (d *DatabaseAllowAzureServicesEnricher) checkSQLServerFirewall(ctx context.
 		output = fmt.Sprintf("FINDING: Allow Azure services enabled - %s", ruleDetails)
 		exitCode = 1
 	} else {
-		output = "OK: Allow Azure services disabled - AllowAllWindowsAzureIps rule not found"
+		output = "OK: Allow Azure services disabled - no firewall rule with 0.0.0.0-0.0.0.0 found"
 		exitCode = 0
 	}
 
 	return []Command{{
 		Command:      "",
-		Description:  "Check SQL Server for AllowAllWindowsAzureIps firewall rule",
+		Description:  "Check SQL Server firewall for Allow Azure services rule (0.0.0.0-0.0.0.0)",
 		ActualOutput: output,
 		ExitCode:     exitCode,
 	}}

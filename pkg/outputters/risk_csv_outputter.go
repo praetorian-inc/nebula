@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
@@ -128,7 +127,7 @@ func (o *RiskCSVOutputter) Complete() error {
 		// Create and write the CSV row
 		row := []string{
 			risk.Name,
-			strconv.Itoa(risk.Priority),
+			string(risk.Priority),
 			risk.DNS,
 			description,
 			impactedServices,

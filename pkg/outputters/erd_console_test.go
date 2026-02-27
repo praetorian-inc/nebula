@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // newTestLambdaExtractor creates a Lambda extractor for testing
@@ -13,7 +14,11 @@ func newTestLambdaExtractor(t *testing.T) PropertyExtractor {
 		extractors: make(map[string]PropertyExtractor),
 	}
 	o.registerDefaultExtractors()
-	return o.extractors["AWS::Lambda::Function"]
+	extractor, ok := o.extractors["AWS::Lambda::Function"]
+	if !ok || extractor == nil {
+		t.Fatalf("AWS::Lambda::Function extractor not registered")
+	}
+	return extractor
 }
 
 // TestLambdaExtractor_SingleURLNoQualifier tests a single Lambda function URL without qualifier
@@ -38,7 +43,7 @@ func TestLambdaExtractor_SingleURLNoQualifier(t *testing.T) {
 	// Assert: Should return success with formatted URL in actions slice
 	assert.True(t, success, "Extractor should succeed")
 	assert.Empty(t, extractedValue, "Extracted value should be empty (URLs go in actions)")
-	assert.Len(t, actions, 1, "Should have exactly one action")
+	require.Len(t, actions, 1, "Should have exactly one action")
 	assert.Equal(t, "Function URL: https://abc123.lambda-url.us-east-1.on.aws/ (auth: NONE)", actions[0])
 }
 
@@ -64,7 +69,7 @@ func TestLambdaExtractor_SingleURLWithQualifier(t *testing.T) {
 	// Assert
 	assert.True(t, success)
 	assert.Empty(t, extractedValue)
-	assert.Len(t, actions, 1)
+	require.Len(t, actions, 1)
 	assert.Equal(t, "Function URL: https://prod123.lambda-url.us-east-1.on.aws/ (alias: prod, auth: NONE)", actions[0])
 }
 
@@ -102,7 +107,7 @@ func TestLambdaExtractor_MultipleURLsBaseAndAliases(t *testing.T) {
 	// Assert
 	assert.True(t, success)
 	assert.Empty(t, extractedValue)
-	assert.Len(t, actions, 3, "Should have three URLs (base + 2 aliases)")
+	require.Len(t, actions, 3, "Should have three URLs (base + 2 aliases)")
 	assert.Equal(t, "Function URL: https://base123.lambda-url.us-east-1.on.aws/ (base, auth: NONE)", actions[0])
 	assert.Equal(t, "Function URL: https://prod123.lambda-url.us-east-1.on.aws/ (alias: prod, auth: NONE)", actions[1])
 	assert.Equal(t, "Function URL: https://staging123.lambda-url.us-east-1.on.aws/ (alias: staging, auth: AWS_IAM)", actions[2])
@@ -136,7 +141,7 @@ func TestLambdaExtractor_MultipleURLsDifferentAuthTypes(t *testing.T) {
 	// Assert
 	assert.True(t, success)
 	assert.Empty(t, extractedValue)
-	assert.Len(t, actions, 2)
+	require.Len(t, actions, 2)
 	assert.Equal(t, "Function URL: https://public123.lambda-url.us-east-1.on.aws/ (alias: public, auth: NONE)", actions[0])
 	assert.Equal(t, "Function URL: https://private123.lambda-url.us-east-1.on.aws/ (alias: private, auth: AWS_IAM)", actions[1])
 }
@@ -157,7 +162,7 @@ func TestLambdaExtractor_EmptyFunctionUrlsArray(t *testing.T) {
 	// Assert: Should fall back to FunctionUrl (singular)
 	assert.True(t, success, "Should fall back to singular FunctionUrl")
 	assert.Equal(t, "https://fallback123.lambda-url.us-east-1.on.aws/", extractedValue, "Should return singular URL")
-	assert.Nil(t, actions, "Actions should be nil when using fallback")
+	assert.Empty(t, actions, "Actions should be empty when using fallback")
 }
 
 // TestLambdaExtractor_InvalidFunctionUrlsEntries tests handling of invalid entries in FunctionUrls
@@ -189,7 +194,7 @@ func TestLambdaExtractor_InvalidFunctionUrlsEntries(t *testing.T) {
 	// Assert: Should skip invalid entries and only return valid one
 	assert.True(t, success, "Should succeed with at least one valid entry")
 	assert.Empty(t, extractedValue)
-	assert.Len(t, actions, 1, "Should only include valid URL")
+	require.Len(t, actions, 1, "Should only include valid URL")
 	assert.Equal(t, "Function URL: https://valid123.lambda-url.us-east-1.on.aws/ (alias: valid, auth: NONE)", actions[0])
 }
 
@@ -252,6 +257,6 @@ func TestLambdaExtractor_DefaultAuthType(t *testing.T) {
 	// Assert: Should default AuthType to NONE
 	assert.True(t, success)
 	assert.Empty(t, extractedValue)
-	assert.Len(t, actions, 1)
+	require.Len(t, actions, 1)
 	assert.Equal(t, "Function URL: https://noauth123.lambda-url.us-east-1.on.aws/ (alias: prod, auth: NONE)", actions[0])
 }

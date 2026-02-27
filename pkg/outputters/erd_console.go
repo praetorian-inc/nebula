@@ -78,6 +78,37 @@ func (o *ERDConsoleOutputter) registerDefaultExtractors() {
 
 	// Lambda Function extractor
 	o.RegisterExtractor("AWS::Lambda::Function", func(props map[string]any) (string, []string, bool) {
+		// Check for FunctionUrls (plural) first - contains all URLs including aliases
+		if functionUrls, ok := props["FunctionUrls"].([]any); ok && len(functionUrls) > 0 {
+			var urlStrings []string
+			for _, urlAny := range functionUrls {
+				urlMap, ok := urlAny.(map[string]any)
+				if !ok {
+					continue
+				}
+				url, _ := urlMap["FunctionUrl"].(string)
+				qualifier, _ := urlMap["Qualifier"].(string)
+				if url == "" {
+					continue
+				}
+
+				// Format based on qualifier
+				if qualifier == "" {
+					if len(functionUrls) > 1 {
+						urlStrings = append(urlStrings, fmt.Sprintf("Function URL: %s (base)", url))
+					} else {
+						urlStrings = append(urlStrings, fmt.Sprintf("Function URL: %s", url))
+					}
+				} else {
+					urlStrings = append(urlStrings, fmt.Sprintf("Function URL: %s (alias: %s)", url, qualifier))
+				}
+			}
+			if len(urlStrings) > 0 {
+				return "", urlStrings, true
+			}
+		}
+
+		// Fall back to FunctionUrl (singular) for backward compatibility
 		if functionUrl, ok := props["FunctionUrl"].(string); ok && functionUrl != "" {
 			return functionUrl, nil, true
 		}

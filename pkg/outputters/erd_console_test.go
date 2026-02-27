@@ -6,13 +6,19 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestLambdaExtractor_SingleURLNoQualifier tests a single Lambda function URL without qualifier
-func TestLambdaExtractor_SingleURLNoQualifier(t *testing.T) {
-	// Create the outputter to access the Lambda extractor
+// newTestLambdaExtractor creates a Lambda extractor for testing
+func newTestLambdaExtractor(t *testing.T) PropertyExtractor {
+	t.Helper()
 	o := &ERDConsoleOutputter{
 		extractors: make(map[string]PropertyExtractor),
 	}
 	o.registerDefaultExtractors()
+	return o.extractors["AWS::Lambda::Function"]
+}
+
+// TestLambdaExtractor_SingleURLNoQualifier tests a single Lambda function URL without qualifier
+func TestLambdaExtractor_SingleURLNoQualifier(t *testing.T) {
+	extractor := newTestLambdaExtractor(t)
 
 	// Arrange: Single URL with no qualifier (base function URL only)
 	props := map[string]any{
@@ -27,7 +33,7 @@ func TestLambdaExtractor_SingleURLNoQualifier(t *testing.T) {
 	}
 
 	// Act: Extract the function URL
-	extractedValue, actions, success := o.extractors["AWS::Lambda::Function"](props)
+	extractedValue, actions, success := extractor(props)
 
 	// Assert: Should return success with formatted URL in actions slice
 	assert.True(t, success, "Extractor should succeed")
@@ -38,10 +44,7 @@ func TestLambdaExtractor_SingleURLNoQualifier(t *testing.T) {
 
 // TestLambdaExtractor_SingleURLWithQualifier tests a single Lambda function URL with qualifier
 func TestLambdaExtractor_SingleURLWithQualifier(t *testing.T) {
-	o := &ERDConsoleOutputter{
-		extractors: make(map[string]PropertyExtractor),
-	}
-	o.registerDefaultExtractors()
+	extractor := newTestLambdaExtractor(t)
 
 	// Arrange: Single URL with prod alias
 	props := map[string]any{
@@ -56,7 +59,7 @@ func TestLambdaExtractor_SingleURLWithQualifier(t *testing.T) {
 	}
 
 	// Act
-	extractedValue, actions, success := o.extractors["AWS::Lambda::Function"](props)
+	extractedValue, actions, success := extractor(props)
 
 	// Assert
 	assert.True(t, success)
@@ -67,10 +70,7 @@ func TestLambdaExtractor_SingleURLWithQualifier(t *testing.T) {
 
 // TestLambdaExtractor_MultipleURLsBaseAndAliases tests multiple function URLs (base + aliases)
 func TestLambdaExtractor_MultipleURLsBaseAndAliases(t *testing.T) {
-	o := &ERDConsoleOutputter{
-		extractors: make(map[string]PropertyExtractor),
-	}
-	o.registerDefaultExtractors()
+	extractor := newTestLambdaExtractor(t)
 
 	// Arrange: Base URL (empty qualifier) + prod and staging aliases
 	props := map[string]any{
@@ -97,7 +97,7 @@ func TestLambdaExtractor_MultipleURLsBaseAndAliases(t *testing.T) {
 	}
 
 	// Act
-	extractedValue, actions, success := o.extractors["AWS::Lambda::Function"](props)
+	extractedValue, actions, success := extractor(props)
 
 	// Assert
 	assert.True(t, success)
@@ -110,10 +110,7 @@ func TestLambdaExtractor_MultipleURLsBaseAndAliases(t *testing.T) {
 
 // TestLambdaExtractor_MultipleURLsDifferentAuthTypes tests multiple URLs with mixed auth types
 func TestLambdaExtractor_MultipleURLsDifferentAuthTypes(t *testing.T) {
-	o := &ERDConsoleOutputter{
-		extractors: make(map[string]PropertyExtractor),
-	}
-	o.registerDefaultExtractors()
+	extractor := newTestLambdaExtractor(t)
 
 	// Arrange: Public NONE auth and private AWS_IAM auth
 	props := map[string]any{
@@ -134,7 +131,7 @@ func TestLambdaExtractor_MultipleURLsDifferentAuthTypes(t *testing.T) {
 	}
 
 	// Act
-	extractedValue, actions, success := o.extractors["AWS::Lambda::Function"](props)
+	extractedValue, actions, success := extractor(props)
 
 	// Assert
 	assert.True(t, success)
@@ -146,10 +143,7 @@ func TestLambdaExtractor_MultipleURLsDifferentAuthTypes(t *testing.T) {
 
 // TestLambdaExtractor_EmptyFunctionUrlsArray tests empty FunctionUrls array fallback
 func TestLambdaExtractor_EmptyFunctionUrlsArray(t *testing.T) {
-	o := &ERDConsoleOutputter{
-		extractors: make(map[string]PropertyExtractor),
-	}
-	o.registerDefaultExtractors()
+	extractor := newTestLambdaExtractor(t)
 
 	// Arrange: Empty FunctionUrls array with singular FunctionUrl fallback
 	props := map[string]any{
@@ -158,7 +152,7 @@ func TestLambdaExtractor_EmptyFunctionUrlsArray(t *testing.T) {
 	}
 
 	// Act
-	extractedValue, actions, success := o.extractors["AWS::Lambda::Function"](props)
+	extractedValue, actions, success := extractor(props)
 
 	// Assert: Should fall back to FunctionUrl (singular)
 	assert.True(t, success, "Should fall back to singular FunctionUrl")
@@ -168,10 +162,7 @@ func TestLambdaExtractor_EmptyFunctionUrlsArray(t *testing.T) {
 
 // TestLambdaExtractor_InvalidFunctionUrlsEntries tests handling of invalid entries in FunctionUrls
 func TestLambdaExtractor_InvalidFunctionUrlsEntries(t *testing.T) {
-	o := &ERDConsoleOutputter{
-		extractors: make(map[string]PropertyExtractor),
-	}
-	o.registerDefaultExtractors()
+	extractor := newTestLambdaExtractor(t)
 
 	// Arrange: Mix of valid and invalid entries
 	props := map[string]any{
@@ -193,7 +184,7 @@ func TestLambdaExtractor_InvalidFunctionUrlsEntries(t *testing.T) {
 	}
 
 	// Act
-	extractedValue, actions, success := o.extractors["AWS::Lambda::Function"](props)
+	extractedValue, actions, success := extractor(props)
 
 	// Assert: Should skip invalid entries and only return valid one
 	assert.True(t, success, "Should succeed with at least one valid entry")
@@ -204,10 +195,7 @@ func TestLambdaExtractor_InvalidFunctionUrlsEntries(t *testing.T) {
 
 // TestLambdaExtractor_OnlyFunctionUrlSingular tests backward compatibility with singular FunctionUrl
 func TestLambdaExtractor_OnlyFunctionUrlSingular(t *testing.T) {
-	o := &ERDConsoleOutputter{
-		extractors: make(map[string]PropertyExtractor),
-	}
-	o.registerDefaultExtractors()
+	extractor := newTestLambdaExtractor(t)
 
 	// Arrange: Only singular FunctionUrl (no FunctionUrls array)
 	props := map[string]any{
@@ -215,7 +203,7 @@ func TestLambdaExtractor_OnlyFunctionUrlSingular(t *testing.T) {
 	}
 
 	// Act
-	extractedValue, actions, success := o.extractors["AWS::Lambda::Function"](props)
+	extractedValue, actions, success := extractor(props)
 
 	// Assert: Should use backward compatibility path
 	assert.True(t, success, "Should support backward compatibility")
@@ -225,10 +213,7 @@ func TestLambdaExtractor_OnlyFunctionUrlSingular(t *testing.T) {
 
 // TestLambdaExtractor_NeitherFunctionUrlsNorFunctionUrl tests no URLs present
 func TestLambdaExtractor_NeitherFunctionUrlsNorFunctionUrl(t *testing.T) {
-	o := &ERDConsoleOutputter{
-		extractors: make(map[string]PropertyExtractor),
-	}
-	o.registerDefaultExtractors()
+	extractor := newTestLambdaExtractor(t)
 
 	// Arrange: Lambda function with no function URLs at all
 	props := map[string]any{
@@ -237,7 +222,7 @@ func TestLambdaExtractor_NeitherFunctionUrlsNorFunctionUrl(t *testing.T) {
 	}
 
 	// Act
-	extractedValue, actions, success := o.extractors["AWS::Lambda::Function"](props)
+	extractedValue, actions, success := extractor(props)
 
 	// Assert: Should return false (no URLs to extract)
 	assert.False(t, success, "Should return false when no URLs present")
@@ -247,10 +232,7 @@ func TestLambdaExtractor_NeitherFunctionUrlsNorFunctionUrl(t *testing.T) {
 
 // TestLambdaExtractor_DefaultAuthType tests that missing AuthType defaults to NONE
 func TestLambdaExtractor_DefaultAuthType(t *testing.T) {
-	o := &ERDConsoleOutputter{
-		extractors: make(map[string]PropertyExtractor),
-	}
-	o.registerDefaultExtractors()
+	extractor := newTestLambdaExtractor(t)
 
 	// Arrange: URL without AuthType specified
 	props := map[string]any{
@@ -265,7 +247,7 @@ func TestLambdaExtractor_DefaultAuthType(t *testing.T) {
 	}
 
 	// Act
-	extractedValue, actions, success := o.extractors["AWS::Lambda::Function"](props)
+	extractedValue, actions, success := extractor(props)
 
 	// Assert: Should default AuthType to NONE
 	assert.True(t, success)

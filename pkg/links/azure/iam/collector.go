@@ -602,7 +602,7 @@ func (l *IAMComprehensiveCollectorLink) getAllRBACAssignmentsViaARG(accessToken 
 	groupedAssignments := map[string][]interface{}{
 		"subscription":    []interface{}{},
 		"resourceGroup":   []interface{}{},
-		"resourceLevel":   []interface{}{},
+		"resource":   []interface{}{},
 	}
 
 	for _, assignment := range result.Data {
@@ -623,7 +623,7 @@ func (l *IAMComprehensiveCollectorLink) getAllRBACAssignmentsViaARG(accessToken 
 				groupedAssignments["resourceGroup"] = append(groupedAssignments["resourceGroup"], assignment)
 			} else if strings.Contains(scopeStr, "/resourceGroups/") && strings.Count(scopeStr, "/") > 4 {
 				// /subscriptions/{sub}/resourceGroups/{rg}/providers/... = resource level
-				groupedAssignments["resourceLevel"] = append(groupedAssignments["resourceLevel"], assignment)
+				groupedAssignments["resource"] = append(groupedAssignments["resource"], assignment)
 			} else {
 				// Default to subscription level if unsure
 				groupedAssignments["subscription"] = append(groupedAssignments["subscription"], assignment)
@@ -634,7 +634,7 @@ func (l *IAMComprehensiveCollectorLink) getAllRBACAssignmentsViaARG(accessToken 
 	l.Logger.Info("RBAC assignment breakdown",
 		"subscription_level", len(groupedAssignments["subscription"]),
 		"resource_group_level", len(groupedAssignments["resourceGroup"]),
-		"resource_level", len(groupedAssignments["resourceLevel"]))
+		"resource_level", len(groupedAssignments["resource"]))
 
 	return groupedAssignments, nil
 }

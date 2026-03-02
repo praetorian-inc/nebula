@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -18,6 +21,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions"
 	"github.com/google/uuid"
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
+	"github.com/microsoftgraph/msgraph-sdk-go/rolemanagement"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/internal/message"
@@ -53,6 +57,52 @@ func NewSDKComprehensiveCollectorLink(configs ...cfg.Config) chain.Link {
 func (l *SDKComprehensiveCollectorLink) Params() []cfg.Param {
 	return []cfg.Param{
 		options.AzureSubscription(),
+	}
+}
+
+// writeCheckpoint writes intermediate collection data to disk for progress tracking
+func (l *SDKComprehensiveCollectorLink) writeCheckpoint(name string, data interface{}) {
+	outputDir, err := cfg.As[string](l.Arg("output"))
+	if err != nil || outputDir == "" {
+		outputDir = "nebula-output"
+	}
+	checkpointDir := filepath.Join(outputDir, "checkpoints")
+	if err := os.MkdirAll(checkpointDir, 0755); err != nil {
+		l.Logger.Error("Failed to create checkpoint directory", "error", err)
+		return
+	}
+
+	filePath := filepath.Join(checkpointDir, name)
+	tmpPath := filePath + ".tmp"
+
+	jsonData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		l.Logger.Error("Failed to marshal checkpoint", "name", name, "error", err)
+		return
+	}
+
+	if err := os.WriteFile(tmpPath, jsonData, 0644); err != nil {
+		l.Logger.Error("Failed to write checkpoint", "name", name, "error", err)
+		return
+	}
+
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		l.Logger.Error("Failed to finalize checkpoint", "name", name, "error", err)
+		return
+	}
+
+	l.Logger.Info("Checkpoint saved", "name", name, "items", countCheckpointItems(data), "bytes", len(jsonData))
+}
+
+// countCheckpointItems returns the item count for checkpoint logging
+func countCheckpointItems(data interface{}) int {
+	switch v := data.(type) {
+	case []interface{}:
+		return len(v)
+	case map[string]interface{}:
+		return len(v)
+	default:
+		return 1
 	}
 }
 
@@ -98,7 +148,7 @@ func (l *SDKComprehensiveCollectorLink) Process(input interface{}) error {
 	l.Logger.Info("Collecting Azure AD data via Graph SDK (once for all subscriptions)")
 	message.Info("Collecting Azure AD data via Graph SDK...")
 
-	azureADData, err := l.collectAllGraphDataSDK()
+	azureADData, err := l.collectAllGraphDataSDKOptimized()
 	if err != nil {
 		l.Logger.Error("Failed to collect Graph SDK data", "error", err)
 		return err
@@ -117,19 +167,26 @@ func (l *SDKComprehensiveCollectorLink) Process(input interface{}) error {
 	}
 
 	message.Info("PIM SDK collector completed successfully! Collected %d assignment types", len(pimData))
+	if eligible, ok := pimData["eligible_assignments"]; ok {
+		l.writeCheckpoint("15-pim-eligible.json", eligible)
+	}
+	if active, ok := pimData["active_assignments"]; ok {
+		l.writeCheckpoint("16-pim-active.json", active)
+	}
 
 	// STEP 3: Collect Management Groups hierarchy using SDK
 	l.Logger.Info("Collecting Management Groups hierarchy via SDK")
 	message.Info("Collecting Management Groups hierarchy via SDK...")
 
-	managementGroupsData, err := l.getManagementGroupHierarchyViaSDK()
+	managementGroupsData, err := l.getManagementGroupHierarchyViaARG(tenantID)
 	if err != nil {
-		l.Logger.Warn("Failed to collect Management Groups data via SDK, continuing without it", "error", err)
+		l.Logger.Warn("Failed to collect Management Groups data via ARG, continuing without it", "error", err)
 		message.Info("Warning: Failed to collect Management Groups data: %v", err)
 		managementGroupsData = []interface{}{}
 	}
 
 	message.Info("Management Groups SDK collector completed! Collected %d management groups", len(managementGroupsData))
+	l.writeCheckpoint("17-management-groups.json", managementGroupsData)
 
 	// STEP 4: Process subscriptions using optimized batched SDK clients
 	l.Logger.Info("Processing %d subscriptions with optimized batched SDK clients", len(subscriptionIDs))
@@ -364,6 +421,155 @@ func (l *SDKComprehensiveCollectorLink) callGraphBatchAPI(ctx context.Context, a
 	return nil, fmt.Errorf("unexpected end of retry loop")
 }
 
+// batchWork represents a single batch of requests to execute
+type batchWork struct {
+	index    int
+	requests []map[string]interface{}
+}
+
+// batchResult represents the result of a single batch execution
+type batchResult struct {
+	index     int
+	responses []interface{}
+	err       error
+}
+
+// executeBatchesConcurrently runs multiple batch API calls in parallel with W workers.
+// Results are returned indexed by batchWork.index for ordered processing.
+// Rate limiting is handled by callGraphBatchAPI's existing retry+429 logic.
+func (l *SDKComprehensiveCollectorLink) executeBatchesConcurrently(
+	ctx context.Context, accessToken string, batches []batchWork, maxWorkers int,
+) []batchResult {
+	if maxWorkers < 1 {
+		maxWorkers = 5
+	}
+
+	results := make([]batchResult, len(batches))
+	workChan := make(chan batchWork, len(batches))
+	var wg sync.WaitGroup
+
+	// Feed work
+	for _, b := range batches {
+		workChan <- b
+	}
+	close(workChan)
+
+	// Spawn workers
+	var completed int64
+	totalBatches := int64(len(batches))
+	for w := 0; w < maxWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for work := range workChan {
+				batchResponse, err := l.callGraphBatchAPI(ctx, accessToken, work.requests)
+				n := atomic.AddInt64(&completed, 1)
+				if n%50 == 0 || n == totalBatches {
+					l.Logger.Info("Concurrent batch progress", "completed", n, "total", totalBatches)
+				}
+				if err != nil {
+					results[work.index] = batchResult{index: work.index, err: err}
+					continue
+				}
+
+				responses, _ := batchResponse["responses"].([]interface{})
+				results[work.index] = batchResult{index: work.index, responses: responses}
+			}
+		}()
+	}
+
+	wg.Wait()
+	return results
+}
+
+// followPaginationLink follows @odata.nextLink pagination for individual Graph API responses.
+// Used when a batch response item has more results than fit in a single page (>100 items).
+func (l *SDKComprehensiveCollectorLink) followPaginationLink(ctx context.Context, accessToken string, nextLink string) []interface{} {
+	var allItems []interface{}
+
+	for nextLink != "" {
+		req, err := http.NewRequestWithContext(ctx, "GET", nextLink, nil)
+		if err != nil {
+			l.Logger.Debug("Failed to create pagination request", "error", err)
+			break
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := l.httpClient.Do(req)
+		if err != nil {
+			l.Logger.Debug("Pagination request failed", "error", err)
+			break
+		}
+
+		if resp.StatusCode == 429 {
+			// Rate limited — wait and retry
+			resp.Body.Close()
+			retryAfter := time.Second
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				if seconds, err := strconv.Atoi(ra); err == nil && seconds > 0 && seconds <= 60 {
+					retryAfter = time.Duration(seconds) * time.Second
+				}
+			}
+			l.Logger.Info("Pagination rate limited", "retryAfter", retryAfter)
+			time.Sleep(retryAfter)
+			continue
+		}
+		if resp.StatusCode != 200 {
+			resp.Body.Close()
+			l.Logger.Debug("Pagination request returned non-200", "status", resp.StatusCode)
+			break
+		}
+
+		var result map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			l.Logger.Debug("Failed to decode pagination response", "error", err)
+			break
+		}
+		resp.Body.Close()
+
+		if value, ok := result["value"].([]interface{}); ok {
+			allItems = append(allItems, value...)
+		}
+
+		// Check for next page
+		if nl, ok := result["@odata.nextLink"].(string); ok && nl != "" {
+			nextLink = nl
+		} else {
+			break
+		}
+	}
+
+	return allItems
+}
+
+// filterSPDirectoryRolesFromExisting filters directoryRoleAssignments to find those
+// where the principal is a service principal. This replaces the expensive memberOf scan.
+func (l *SDKComprehensiveCollectorLink) filterSPDirectoryRolesFromExisting(
+	directoryRoleAssignments []interface{}, servicePrincipals []interface{},
+) []interface{} {
+	spIDs := make(map[string]bool, len(servicePrincipals))
+	for _, sp := range servicePrincipals {
+		if spMap, ok := sp.(map[string]interface{}); ok {
+			if id, ok := spMap["id"].(string); ok {
+				spIDs[id] = true
+			}
+		}
+	}
+
+	var filtered []interface{}
+	for _, a := range directoryRoleAssignments {
+		if aMap, ok := a.(map[string]interface{}); ok {
+			if pid, ok := aMap["principalId"].(string); ok && spIDs[pid] {
+				filtered = append(filtered, a)
+			}
+		}
+	}
+	l.Logger.Info("Filtered SP directory roles from existing assignments", "spCount", len(spIDs), "matched", len(filtered))
+	return filtered
+}
+
 // performanceMetrics tracks collection performance for benchmarking
 type performanceMetrics struct {
 	collectionName string
@@ -488,6 +694,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["users"] = users
 		l.logCollectionEnd("users", startTime, len(users))
+		l.writeCheckpoint("01-users.json", users)
 	}
 
 	// Collection 2: Groups (with pagination)
@@ -502,6 +709,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["groups"] = groups
 		l.logCollectionEnd("groups", startTime, len(groups))
+		l.writeCheckpoint("02-groups.json", groups)
 	}
 
 	// Collection 3: Service Principals (with pagination)
@@ -516,6 +724,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["servicePrincipals"] = servicePrincipals
 		l.logCollectionEnd("servicePrincipals", startTime, len(servicePrincipals))
+		l.writeCheckpoint("03-service-principals.json", servicePrincipals)
 	}
 
 	// Collection 4: Applications (with pagination)
@@ -530,6 +739,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["applications"] = applications
 		l.logCollectionEnd("applications", startTime, len(applications))
+		l.writeCheckpoint("04-applications.json", applications)
 	}
 
 	// Collection 5: Devices (with pagination)
@@ -544,6 +754,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["devices"] = devices
 		l.logCollectionEnd("devices", startTime, len(devices))
+		l.writeCheckpoint("05-devices.json", devices)
 	}
 
 	// Collection 6: Directory Roles (with pagination)
@@ -558,6 +769,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["directoryRoles"] = directoryRoles
 		l.logCollectionEnd("directoryRoles", startTime, len(directoryRoles))
+		l.writeCheckpoint("06-directory-roles.json", directoryRoles)
 	}
 
 	// Collection 7: Role Definitions (with pagination)
@@ -572,6 +784,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["roleDefinitions"] = roleDefinitions
 		l.logCollectionEnd("roleDefinitions", startTime, len(roleDefinitions))
+		l.writeCheckpoint("07-role-definitions-entra.json", roleDefinitions)
 	}
 
 	// Collection 8: Conditional Access Policies (with pagination)
@@ -586,6 +799,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["conditionalAccessPolicies"] = conditionalAccessPolicies
 		l.logCollectionEnd("conditionalAccessPolicies", startTime, len(conditionalAccessPolicies))
+		l.writeCheckpoint("08-conditional-access.json", conditionalAccessPolicies)
 	}
 
 	// Collection 9: Directory Role Assignments (CRITICAL for iam-push compatibility)
@@ -599,12 +813,45 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["directoryRoleAssignments"] = directoryRoleAssignments
 		l.logCollectionEnd("directoryRoleAssignments", startTime, len(directoryRoleAssignments))
+		l.writeCheckpoint("10-directory-role-assignments.json", directoryRoleAssignments)
 	}
+
+	// Collection 9b: Service Principal Directory Roles
+	// Filter existing directoryRoleAssignments for SP principals instead of rescanning all SPs
+	startTime = l.logCollectionStart("spDirectoryRoles")
+	message.Info("Filtering SP directory roles from existing assignments...")
+	spDirectoryRoles := l.filterSPDirectoryRolesFromExisting(directoryRoleAssignments, servicePrincipals)
+	if len(spDirectoryRoles) > 0 {
+		// Merge into existing directoryRoleAssignments, deduplicating by principalId+roleId
+		existing := azureADData["directoryRoleAssignments"].([]interface{})
+		seen := make(map[string]bool)
+		for _, a := range existing {
+			if m, ok := a.(map[string]interface{}); ok {
+				key := fmt.Sprintf("%v-%v", m["principalId"], m["roleId"])
+				seen[key] = true
+			}
+		}
+		added := 0
+		for _, a := range spDirectoryRoles {
+			if m, ok := a.(map[string]interface{}); ok {
+				key := fmt.Sprintf("%v-%v", m["principalId"], m["roleId"])
+				if !seen[key] {
+					existing = append(existing, a)
+					seen[key] = true
+					added++
+				}
+			}
+		}
+		azureADData["directoryRoleAssignments"] = existing
+		l.Logger.Info("Merged SP directory role assignments", "new_from_memberOf", added, "total", len(existing))
+	}
+	l.logCollectionEnd("spDirectoryRoles", startTime, len(spDirectoryRoles))
+	l.writeCheckpoint("13-sp-directory-roles.json", azureADData["directoryRoleAssignments"])
 
 	// Collection 10: Group Memberships (CRITICAL for iam-push compatibility)
 	startTime = l.logCollectionStart("groupMemberships")
 	message.Info("Collecting group memberships from Graph SDK...")
-	groupMemberships, err := l.collectAllGroupMembershipsWithPagination(ctx)
+	groupMemberships, err := l.collectAllGroupMembershipsWithPagination(ctx, groups)
 	if err != nil {
 		l.Logger.Error("Failed to collect group memberships via SDK", "error", err)
 		azureADData["groupMemberships"] = []interface{}{} // Empty array on error
@@ -612,6 +859,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["groupMemberships"] = groupMemberships
 		l.logCollectionEnd("groupMemberships", startTime, len(groupMemberships))
+		l.writeCheckpoint("11-group-memberships.json", groupMemberships)
 	}
 
 	// Collection 11: OAuth2 Permission Grants (CRITICAL for iam-push compatibility)
@@ -625,12 +873,13 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["oauth2PermissionGrants"] = oauth2Grants
 		l.logCollectionEnd("oauth2PermissionGrants", startTime, len(oauth2Grants))
+		l.writeCheckpoint("09-oauth2-permission-grants.json", oauth2Grants)
 	}
 
 	// Collection 12: App Role Assignments (CRITICAL for iam-push compatibility)
 	startTime = l.logCollectionStart("appRoleAssignments")
 	message.Info("Collecting app role assignments from Graph SDK...")
-	appRoleAssignments, err := l.collectAllAppRoleAssignmentsWithPagination(ctx)
+	appRoleAssignments, err := l.collectAllAppRoleAssignmentsWithPagination(ctx, servicePrincipals)
 	if err != nil {
 		l.Logger.Error("Failed to collect app role assignments via SDK", "error", err)
 		azureADData["appRoleAssignments"] = []interface{}{} // Empty array on error
@@ -638,6 +887,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["appRoleAssignments"] = appRoleAssignments
 		l.logCollectionEnd("appRoleAssignments", startTime, len(appRoleAssignments))
+		l.writeCheckpoint("12-app-role-assignments.json", appRoleAssignments)
 	}
 
 	// Collection 13: Group Ownership (CRITICAL for iam-push compatibility)
@@ -651,6 +901,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["groupOwnership"] = groupOwnership
 		l.logCollectionEnd("groupOwnership", startTime, len(groupOwnership))
+		l.writeCheckpoint("14a-group-ownership.json", groupOwnership)
 	}
 
 	// Collection 14: Service Principal Ownership (CRITICAL for iam-push compatibility)
@@ -664,6 +915,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["servicePrincipalOwnership"] = servicePrincipalOwnership
 		l.logCollectionEnd("servicePrincipalOwnership", startTime, len(servicePrincipalOwnership))
+		l.writeCheckpoint("14b-sp-ownership.json", servicePrincipalOwnership)
 	}
 
 	// Collection 15: Application Ownership (CRITICAL for iam-push compatibility)
@@ -677,11 +929,13 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	} else {
 		azureADData["applicationOwnership"] = applicationOwnership
 		l.logCollectionEnd("applicationOwnership", startTime, len(applicationOwnership))
+		l.writeCheckpoint("14c-app-ownership.json", applicationOwnership)
 	}
 
 	// Credential Enrichment (CRITICAL for iam-push compatibility)
 	l.Logger.Info("Enriching applications with credential metadata")
 	l.enrichApplicationsWithCredentialMetadataSDK(azureADData)
+	l.writeCheckpoint("14-credential-enrichment.json", azureADData["applications"])
 
 	// Calculate total resource counts for final summary
 	totalItems := len(users) + len(groups) + len(servicePrincipals) + len(applications) + len(devices) +
@@ -925,6 +1179,137 @@ func (l *SDKComprehensiveCollectorLink) collectServicePrincipalOwnershipSDK(ctx 
 
 	l.logCollectionEnd("servicePrincipalOwnership", startTime, len(ownerships))
 	return ownerships, nil
+}
+
+// collectServicePrincipalDirectoryRolesSDK collects directory role assignments for service principals
+// using the memberOf approach to work around Graph API asymmetry bug where SPs don't appear
+// in directoryRoles/{id}/members. Matches HTTP version (collector.go:1770-1913).
+func (l *SDKComprehensiveCollectorLink) collectServicePrincipalDirectoryRolesSDK(servicePrincipals []interface{}) ([]interface{}, error) {
+	if len(servicePrincipals) == 0 {
+		return nil, fmt.Errorf("no service principals provided")
+	}
+
+	ctx := l.Context()
+	accessToken, err := l.getAccessToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get access token for SP directory roles: %v", err)
+	}
+
+	var assignments []interface{}
+
+	batchSize := 20
+	for batchIdx := 0; batchIdx < len(servicePrincipals); batchIdx += batchSize {
+		end := batchIdx + batchSize
+		if end > len(servicePrincipals) {
+			end = len(servicePrincipals)
+		}
+		batchSPs := servicePrincipals[batchIdx:end]
+
+		var batchRequests []map[string]interface{}
+		for i, sp := range batchSPs {
+			spMap, ok := sp.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			spID, ok := spMap["id"].(string)
+			if !ok {
+				continue
+			}
+			batchRequests = append(batchRequests, map[string]interface{}{
+				"id":     fmt.Sprintf("%d", i+1),
+				"method": "GET",
+				"url":    fmt.Sprintf("/servicePrincipals/%s/memberOf", spID),
+			})
+		}
+
+		if len(batchRequests) == 0 {
+			continue
+		}
+
+		batchResponse, err := l.callGraphBatchAPI(ctx, accessToken, batchRequests)
+		if err != nil {
+			continue
+		}
+
+		responses, ok := batchResponse["responses"].([]interface{})
+		if !ok {
+			continue
+		}
+
+		// Build SP index map for matching responses by ID (Graph batch API doesn't guarantee order)
+		spIndexMap := make(map[int]map[string]interface{})
+		for i, sp := range batchSPs {
+			spMap, ok := sp.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			spIndexMap[i+1] = spMap
+		}
+
+		for _, responseInterface := range responses {
+			response, ok := responseInterface.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			respIDStr, ok := response["id"].(string)
+			if !ok {
+				continue
+			}
+			respID, err := strconv.Atoi(respIDStr)
+			if err != nil {
+				continue
+			}
+
+			spMap, exists := spIndexMap[respID]
+			if !exists {
+				continue
+			}
+
+			spID, ok := spMap["id"].(string)
+			if !ok {
+				continue
+			}
+
+			if status, ok := response["status"].(float64); ok && status == 200 {
+				if body, ok := response["body"].(map[string]interface{}); ok {
+					if memberObjects, ok := body["value"].([]interface{}); ok {
+						for _, memberObj := range memberObjects {
+							memberMap, ok := memberObj.(map[string]interface{})
+							if !ok {
+								continue
+							}
+
+							// Filter for directory roles only
+							odataType, ok := memberMap["@odata.type"].(string)
+							if !ok || odataType != "#microsoft.graph.directoryRole" {
+								continue
+							}
+
+							roleID, ok := memberMap["id"].(string)
+							if !ok {
+								continue
+							}
+
+							assignment := map[string]interface{}{
+								"roleId":         roleID,
+								"roleTemplateId": memberMap["roleTemplateId"],
+								"roleName":       memberMap["displayName"],
+								"principalId":    spID,
+								"principalType":  "#microsoft.graph.servicePrincipal",
+							}
+							assignments = append(assignments, assignment)
+						}
+					}
+				}
+			}
+		}
+
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	l.Logger.Info("Collected SP directory roles via memberOf workaround", "count", len(assignments))
+	return assignments, nil
 }
 
 // collectApplicationOwnershipSDK collects application ownership relationships
@@ -1244,49 +1629,84 @@ func (l *SDKComprehensiveCollectorLink) collectAllPIMDataSDK() (map[string]inter
 }
 
 // getManagementGroupHierarchyViaSDK gets management groups hierarchy using SDK
-func (l *SDKComprehensiveCollectorLink) getManagementGroupHierarchyViaSDK() ([]interface{}, error) {
+// getManagementGroupHierarchyViaARG gets management groups and subscriptions with full hierarchy using Azure Resource Graph
+// This matches the HTTP version's output exactly, including ParentId, HierarchyLevel, and managementGroupAncestorsChain
+func (l *SDKComprehensiveCollectorLink) getManagementGroupHierarchyViaARG(tenantID string) ([]interface{}, error) {
 	ctx := l.Context()
-	var managementGroups []interface{}
 
-	l.Logger.Info("Collecting management groups via SDK")
+	l.Logger.Info("Collecting management groups hierarchy via Resource Graph")
 
-	// Use Management Groups client to list all management groups
-	pager := l.managementGroupClient.NewListPager(nil)
+	// KQL query matching the HTTP version exactly
+	kqlQuery := fmt.Sprintf(`
+		resourcecontainers
+		| where type == "microsoft.management/managementgroups" or type == "microsoft.resources/subscriptions"
+		| extend ParentId = case(
+			type == "microsoft.management/managementgroups" and isnotempty(properties.details.parent.name), strcat("/providers/Microsoft.Management/managementGroups/", properties.details.parent.name),
+			type == "microsoft.resources/subscriptions" and isnotempty(properties.managementGroupAncestorsChain), properties.managementGroupAncestorsChain[0].name,
+			""
+		)
+		| extend HierarchyLevel = case(
+			type == "microsoft.management/managementgroups", array_length(properties.details.managementGroupAncestorsChain),
+			type == "microsoft.resources/subscriptions", array_length(properties.managementGroupAncestorsChain) + 1,
+			0
+		)
+		| extend managementGroupAncestorsChain = case(
+			type == "microsoft.management/managementgroups", properties.details.managementGroupAncestorsChain,
+			type == "microsoft.resources/subscriptions", properties.managementGroupAncestorsChain,
+			dynamic([])
+		)
+		| extend ResourceType = case(
+			type == "microsoft.management/managementgroups", "ManagementGroup",
+			type == "microsoft.resources/subscriptions", "Subscription",
+			""
+		)
+		| where tenantId == "%s"
+		| project id, name, type, ResourceType, ParentId, HierarchyLevel, managementGroupAncestorsChain, properties, tenantId
+		| order by HierarchyLevel asc, name asc`, tenantID)
 
-	for pager.More() {
-		page, err := pager.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get management groups page: %v", err)
-		}
-
-		for _, mg := range page.Value {
-			if mg == nil || mg.ID == nil {
-				continue
-			}
-
-			mgMap := map[string]interface{}{
-				"id":   *mg.ID,
-				"name": stringPtrToInterface(mg.Name),
-				"type": "microsoft.management/managementgroups",
-				"properties": map[string]interface{}{
-					"displayName": stringPtrToInterface(mg.Properties.DisplayName),
-					"tenantId":    stringPtrToInterface(mg.Properties.TenantID),
-				},
-				// Additional fields for Neo4j compatibility
-				"ResourceType":   "ManagementGroup",
-				"HierarchyLevel": 0, // Will be calculated later if needed
-			}
-
-			// Add parent information if available (simplified for now)
-			// TODO: Get parent details from expanded properties if needed
-			mgMap["ParentId"] = nil
-
-			managementGroups = append(managementGroups, mgMap)
-		}
+	resultFormat := armresourcegraph.ResultFormatObjectArray
+	queryRequest := armresourcegraph.QueryRequest{
+		Query:   &kqlQuery,
+		Options: &armresourcegraph.QueryRequestOptions{ResultFormat: &resultFormat},
 	}
 
-	l.Logger.Info("Collected management groups via SDK", "count", len(managementGroups))
-	return managementGroups, nil
+	var allResults []interface{}
+	for {
+		response, err := l.resourceGraphClient.Resources(ctx, queryRequest, nil)
+		if err != nil {
+			return nil, fmt.Errorf("Resource Graph management groups query failed: %v", err)
+		}
+
+		if response.Data != nil {
+			decodeResourceGraphData(response.Data, &allResults)
+		}
+
+		if response.SkipToken == nil || len(*response.SkipToken) == 0 {
+			break
+		}
+		queryRequest.Options.SkipToken = response.SkipToken
+	}
+
+	l.Logger.Info("Retrieved management hierarchy via Resource Graph", "total_resources", len(allResults))
+
+	// Separate management groups and subscriptions for logging
+	mgCount := 0
+	subCount := 0
+	for _, item := range allResults {
+		if itemMap, ok := item.(map[string]interface{}); ok {
+			if resourceType, exists := itemMap["ResourceType"]; exists {
+				switch resourceType {
+				case "ManagementGroup":
+					mgCount++
+				case "Subscription":
+					subCount++
+				}
+			}
+		}
+	}
+	l.Logger.Info("Resource breakdown", "management_groups", mgCount, "subscriptions", subCount)
+
+	return allResults, nil
 }
 
 // processSubscriptionsParallelSDK processes multiple subscriptions in parallel using SDK clients
@@ -1429,6 +1849,9 @@ func (l *SDKComprehensiveCollectorLink) collectAllAzureRMDataSDK(subscriptionID 
 		azurermData["azureRoleDefinitions"] = roleDefinitions
 		l.Logger.Info("Collected role definitions via SDK", "count", len(roleDefinitions))
 	}
+
+	// Apply deduplication to RBAC assignments (matching HTTP version behavior)
+	l.deduplicateRBACAssignments(azurermData)
 
 	return azurermData, nil
 }
@@ -1654,7 +2077,8 @@ func (l *SDKComprehensiveCollectorLink) collectRoleDefinitionsViaSDK(subscriptio
 }
 */
 
-// collectAllRoleAssignmentsSDK collects all role assignments for a subscription using Authorization SDK
+// collectAllRoleAssignmentsSDK collects all role assignments for a subscription using Azure Resource Graph
+// This matches the HTTP version's approach (collector.go:517-636) which uses ARG to get principalType and other fields
 func (l *SDKComprehensiveCollectorLink) collectAllRoleAssignmentsSDK(subscriptionID string) ([]interface{}, []interface{}, []interface{}, []interface{}, []interface{}, error) {
 	ctx := l.Context()
 	var subscriptionRoleAssignments []interface{}
@@ -1663,74 +2087,73 @@ func (l *SDKComprehensiveCollectorLink) collectAllRoleAssignmentsSDK(subscriptio
 	var managementGroupRoleAssignments []interface{}
 	var tenantRoleAssignments []interface{}
 
-	l.Logger.Info("Starting role assignments collection via SDK", "subscription", subscriptionID)
+	l.Logger.Info("Starting role assignments collection via Resource Graph", "subscription", subscriptionID)
 
-	// Create role assignments client with specific subscription ID
-	authClient, err := armauthorization.NewRoleAssignmentsClient(subscriptionID, &l.credential, nil)
-	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("failed to create role assignments client for subscription %s: %v", subscriptionID, err)
+	// Use same KQL query as HTTP version (collector.go:525-534) to get principalType
+	query := fmt.Sprintf(`
+		authorizationresources
+		| where type =~ 'microsoft.authorization/roleassignments'
+		| where subscriptionId == '%s'
+		| extend principalId = tostring(properties.principalId)
+		| extend roleDefinitionId = tostring(properties.roleDefinitionId)
+		| extend scope = tostring(properties.scope)
+		| extend principalType = tostring(properties.principalType)
+		| project id, name, subscriptionId, principalId, roleDefinitionId, scope, principalType, properties
+		| order by scope asc`, subscriptionID)
+
+	resultFormat := armresourcegraph.ResultFormatObjectArray
+	queryRequest := armresourcegraph.QueryRequest{
+		Query:         &query,
+		Subscriptions: []*string{&subscriptionID},
+		Options:       &armresourcegraph.QueryRequestOptions{ResultFormat: &resultFormat},
 	}
 
-	// Get all role assignments for the subscription with pagination
-	pager := authClient.NewListPager(&armauthorization.RoleAssignmentsClientListOptions{})
-
-	totalCount := 0
-	for pager.More() {
-		page, err := pager.NextPage(ctx)
+	var allAssignments []interface{}
+	for {
+		response, err := l.resourceGraphClient.Resources(ctx, queryRequest, nil)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("failed to get role assignments page: %v", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("Resource Graph RBAC query failed for subscription %s: %v", subscriptionID, err)
 		}
 
-		for _, assignment := range page.Value {
-			if assignment == nil || assignment.ID == nil || assignment.Properties == nil {
-				continue
-			}
+		if response.Data != nil {
+			decodeResourceGraphData(response.Data, &allAssignments)
+		}
 
-			// Extract assignment details
-			assignmentMap := map[string]interface{}{
-				"id":                 *assignment.ID,
-				"name":               stringPtrToInterface(assignment.Name),
-				"type":               stringPtrToInterface(assignment.Type),
-				"principalId":        stringPtrToInterface(assignment.Properties.PrincipalID),
-				// PrincipalType not available in this SDK version, will be filled from Graph API lookup if needed
-				"roleDefinitionId":   stringPtrToInterface(assignment.Properties.RoleDefinitionID),
-				"scope":              stringPtrToInterface(assignment.Properties.Scope),
-			}
+		if response.SkipToken == nil || len(*response.SkipToken) == 0 {
+			break
+		}
+		queryRequest.Options.SkipToken = response.SkipToken
+	}
 
-			// Categorize by scope type
-			scope := ""
-			if assignment.Properties.Scope != nil {
-				scope = *assignment.Properties.Scope
-			}
+	// Group assignments by scope type (matching HTTP version's grouping logic at collector.go:601-631)
+	for _, assignment := range allAssignments {
+		assignmentMap, ok := assignment.(map[string]interface{})
+		if !ok {
+			continue
+		}
 
-			// Determine scope type based on the scope string structure
-			switch {
-			case strings.HasPrefix(scope, "/providers/Microsoft.Management/managementGroups/"):
-				// Management group-level: /providers/Microsoft.Management/managementGroups/{mg-id}
-				managementGroupRoleAssignments = append(managementGroupRoleAssignments, assignmentMap)
-			case scope == "/" || scope == "":
-				// Tenant root-level: / or empty scope
-				tenantRoleAssignments = append(tenantRoleAssignments, assignmentMap)
-			case strings.Contains(scope, "/subscriptions/"):
-				if strings.Count(scope, "/") == 2 {
-					// Subscription-level: /subscriptions/{subscription-id}
-					subscriptionRoleAssignments = append(subscriptionRoleAssignments, assignmentMap)
-				} else if strings.Contains(scope, "/resourceGroups/") && strings.Count(scope, "/") == 4 {
-					// Resource group-level: /subscriptions/{subscription-id}/resourceGroups/{rg-name}
-					resourceGroupRoleAssignments = append(resourceGroupRoleAssignments, assignmentMap)
-				} else {
-					// Resource-level: /subscriptions/{subscription-id}/resourceGroups/{rg-name}/providers/{provider}/{resource}
-					resourceLevelRoleAssignments = append(resourceLevelRoleAssignments, assignmentMap)
-				}
-			}
+		scope, _ := assignmentMap["scope"].(string)
 
-			totalCount++
+		switch {
+		case strings.HasPrefix(scope, "/providers/Microsoft.Management/managementGroups/"):
+			managementGroupRoleAssignments = append(managementGroupRoleAssignments, assignmentMap)
+		case scope == "/" || scope == "":
+			tenantRoleAssignments = append(tenantRoleAssignments, assignmentMap)
+		case strings.Count(scope, "/") == 2:
+			// /subscriptions/{subscription-id}
+			subscriptionRoleAssignments = append(subscriptionRoleAssignments, assignmentMap)
+		case strings.Contains(scope, "/resourceGroups/") && strings.Count(scope, "/") == 4:
+			// /subscriptions/{sub}/resourceGroups/{rg}
+			resourceGroupRoleAssignments = append(resourceGroupRoleAssignments, assignmentMap)
+		default:
+			// Resource-level or other
+			resourceLevelRoleAssignments = append(resourceLevelRoleAssignments, assignmentMap)
 		}
 	}
 
-	l.Logger.Info("Completed role assignments collection via SDK",
+	l.Logger.Info("Completed role assignments collection via Resource Graph",
 		"subscription", subscriptionID,
-		"total", totalCount,
+		"total", len(allAssignments),
 		"subscriptionLevel", len(subscriptionRoleAssignments),
 		"resourceGroupLevel", len(resourceGroupRoleAssignments),
 		"resourceLevel", len(resourceLevelRoleAssignments),
@@ -1738,6 +2161,80 @@ func (l *SDKComprehensiveCollectorLink) collectAllRoleAssignmentsSDK(subscriptio
 		"tenantLevel", len(tenantRoleAssignments))
 
 	return subscriptionRoleAssignments, resourceGroupRoleAssignments, resourceLevelRoleAssignments, managementGroupRoleAssignments, tenantRoleAssignments, nil
+}
+
+// deduplicateRBACAssignments removes duplicate RBAC assignments by ID across all scope levels
+// This matches the HTTP version's deduplication behavior (collector.go lines 1104-1155)
+func (l *SDKComprehensiveCollectorLink) deduplicateRBACAssignments(azurermData map[string]interface{}) {
+	seenAssignments := make(map[string]bool)
+
+	deduplicateAssignments := func(assignments []interface{}) []interface{} {
+		var unique []interface{}
+		for _, assignment := range assignments {
+			if assignmentMap, ok := assignment.(map[string]interface{}); ok {
+				if id, ok := assignmentMap["id"].(string); ok && id != "" {
+					if !seenAssignments[id] {
+						seenAssignments[id] = true
+						unique = append(unique, assignment)
+					}
+				}
+			}
+		}
+		return unique
+	}
+
+	// Apply to subscription-level assignments
+	if val, exists := azurermData["subscriptionRoleAssignments"]; exists {
+		if assignments, ok := val.([]interface{}); ok {
+			originalCount := len(assignments)
+			deduplicated := deduplicateAssignments(assignments)
+			azurermData["subscriptionRoleAssignments"] = deduplicated
+			l.Logger.Info("Subscription RBAC deduplication", "original", originalCount, "unique", len(deduplicated), "duplicates_removed", originalCount-len(deduplicated))
+		}
+	}
+
+	// Apply to resource group-level assignments
+	if val, exists := azurermData["resourceGroupRoleAssignments"]; exists {
+		if assignments, ok := val.([]interface{}); ok {
+			originalCount := len(assignments)
+			deduplicated := deduplicateAssignments(assignments)
+			azurermData["resourceGroupRoleAssignments"] = deduplicated
+			l.Logger.Info("Resource Group RBAC deduplication", "original", originalCount, "unique", len(deduplicated), "duplicates_removed", originalCount-len(deduplicated))
+		}
+	}
+
+	// Apply to resource-level assignments
+	if val, exists := azurermData["resourceLevelRoleAssignments"]; exists {
+		if assignments, ok := val.([]interface{}); ok {
+			originalCount := len(assignments)
+			deduplicated := deduplicateAssignments(assignments)
+			azurermData["resourceLevelRoleAssignments"] = deduplicated
+			l.Logger.Info("Resource-level RBAC deduplication", "original", originalCount, "unique", len(deduplicated), "duplicates_removed", originalCount-len(deduplicated))
+		}
+	}
+
+	// Apply to management group-level assignments (SDK-only scope, not in HTTP)
+	if val, exists := azurermData["managementGroupRoleAssignments"]; exists {
+		if assignments, ok := val.([]interface{}); ok {
+			originalCount := len(assignments)
+			deduplicated := deduplicateAssignments(assignments)
+			azurermData["managementGroupRoleAssignments"] = deduplicated
+			l.Logger.Info("Management Group RBAC deduplication", "original", originalCount, "unique", len(deduplicated), "duplicates_removed", originalCount-len(deduplicated))
+		}
+	}
+
+	// Apply to tenant-level assignments (SDK-only scope, not in HTTP)
+	if val, exists := azurermData["tenantRoleAssignments"]; exists {
+		if assignments, ok := val.([]interface{}); ok {
+			originalCount := len(assignments)
+			deduplicated := deduplicateAssignments(assignments)
+			azurermData["tenantRoleAssignments"] = deduplicated
+			l.Logger.Info("Tenant RBAC deduplication", "original", originalCount, "unique", len(deduplicated), "duplicates_removed", originalCount-len(deduplicated))
+		}
+	}
+
+	totalUnique := len(seenAssignments)
+	l.Logger.Info("Total RBAC assignment deduplication complete", "total_unique_assignments", totalUnique)
 }
 
 // collectAllRoleDefinitionsSDK collects all role definitions for a subscription using Authorization SDK
@@ -1801,8 +2298,12 @@ func (l *SDKComprehensiveCollectorLink) collectAllRoleDefinitionsSDK(subscriptio
 						permMap["notActions"] = notActions
 					}
 
-					// DataActions and NotDataActions are not available in this SDK version
-					// They can be added later when the SDK supports them
+					// Note: DataActions and NotDataActions are not available on armauthorization.Permission
+					// in this SDK version. The HTTP version gets them via the full ARM API response.
+					// These fields are only present on data-plane roles (e.g., Storage Blob Data Reader).
+					// Include as empty for schema compatibility.
+					permMap["dataActions"] = []string{}
+					permMap["notDataActions"] = []string{}
 
 					permissions = append(permissions, permMap)
 				}
@@ -2017,13 +2518,21 @@ func (l *SDKComprehensiveCollectorLink) collectAllServicePrincipalsWithPaginatio
 
 		// Convert service principals from current page (matching HTTP version fields exactly)
 		for _, sp := range sps {
+			// Extract createdDateTime from additional data if available
+			var createdDateTime interface{}
+			if additionalData := sp.GetAdditionalData(); additionalData != nil {
+				if val, ok := additionalData["createdDateTime"]; ok {
+					createdDateTime = val
+				}
+			}
+
 			spMap := map[string]interface{}{
 				"id":                         *sp.GetId(),
 				"appId":                      stringPtrToInterface(sp.GetAppId()),
 				"displayName":                stringPtrToInterface(sp.GetDisplayName()),
 				"servicePrincipalType":       stringPtrToInterface(sp.GetServicePrincipalType()),
 				"accountEnabled":             boolPtrToInterface(sp.GetAccountEnabled()),
-				"createdDateTime":            nil, // Not available in SDK
+				"createdDateTime":            createdDateTime,
 				"replyUrls":                  stringSliceToInterface(sp.GetReplyUrls()),
 				"signInAudience":             stringPtrToInterface(sp.GetSignInAudience()),
 			}
@@ -2086,6 +2595,51 @@ func (l *SDKComprehensiveCollectorLink) collectAllApplicationsWithPagination(ctx
 				appMap["replyUrls"] = []interface{}{}
 			}
 
+			// Extract keyCredentials (certificates) - CRITICAL for credential enrichment
+			if keyCreds := app.GetKeyCredentials(); keyCreds != nil {
+				var keyCredsList []interface{}
+				for _, kc := range keyCreds {
+					if kc == nil {
+						continue
+					}
+					kcMap := map[string]interface{}{
+						"keyId":         uuidPtrToInterface(kc.GetKeyId()),
+						"displayName":   stringPtrToInterface(kc.GetDisplayName()),
+						"usage":         stringPtrToInterface(kc.GetUsage()),
+						"startDateTime": timeToInterface(kc.GetStartDateTime()),
+						"endDateTime":   timeToInterface(kc.GetEndDateTime()),
+					}
+					if kc.GetTypeEscaped() != nil {
+						kcMap["type"] = *kc.GetTypeEscaped()
+					}
+					keyCredsList = append(keyCredsList, kcMap)
+				}
+				appMap["keyCredentials"] = keyCredsList
+			} else {
+				appMap["keyCredentials"] = []interface{}{}
+			}
+
+			// Extract passwordCredentials (client secrets) - CRITICAL for credential enrichment
+			if pwdCreds := app.GetPasswordCredentials(); pwdCreds != nil {
+				var pwdCredsList []interface{}
+				for _, pc := range pwdCreds {
+					if pc == nil {
+						continue
+					}
+					pcMap := map[string]interface{}{
+						"keyId":         uuidPtrToInterface(pc.GetKeyId()),
+						"displayName":   stringPtrToInterface(pc.GetDisplayName()),
+						"hint":          stringPtrToInterface(pc.GetHint()),
+						"startDateTime": timeToInterface(pc.GetStartDateTime()),
+						"endDateTime":   timeToInterface(pc.GetEndDateTime()),
+					}
+					pwdCredsList = append(pwdCredsList, pcMap)
+				}
+				appMap["passwordCredentials"] = pwdCredsList
+			} else {
+				appMap["passwordCredentials"] = []interface{}{}
+			}
+
 			allApps = append(allApps, appMap)
 		}
 
@@ -2117,8 +2671,13 @@ func (l *SDKComprehensiveCollectorLink) collectAllPIMEligibleWithPagination(ctx 
 
 	l.Logger.Info("Starting paginated PIM eligible assignment collection")
 
-	// Get first page
-	response, err := l.graphClient.RoleManagement().Directory().RoleEligibilitySchedules().Get(ctx, nil)
+	// Get first page with $expand to get principal and role definition display names
+	requestConfig := &rolemanagement.DirectoryRoleEligibilitySchedulesRequestBuilderGetRequestConfiguration{
+		QueryParameters: &rolemanagement.DirectoryRoleEligibilitySchedulesRequestBuilderGetQueryParameters{
+			Expand: []string{"principal", "roleDefinition"},
+		},
+	}
+	response, err := l.graphClient.RoleManagement().Directory().RoleEligibilitySchedules().Get(ctx, requestConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get first page of PIM eligible assignments: %v", err)
 	}
@@ -2142,6 +2701,22 @@ func (l *SDKComprehensiveCollectorLink) collectAllPIMEligibleWithPagination(ctx 
 				"assignmentState":    "Eligible",
 				"assignmentType":     "Eligible",
 			}
+
+			// Extract expanded principal display name
+			if principal := schedule.GetPrincipal(); principal != nil {
+				scheduleMap["principalDisplayName"] = nil
+				if additionalData := principal.GetAdditionalData(); additionalData != nil {
+					if displayName, ok := additionalData["displayName"]; ok {
+						scheduleMap["principalDisplayName"] = displayName
+					}
+				}
+			}
+
+			// Extract expanded role definition display name
+			if roleDef := schedule.GetRoleDefinition(); roleDef != nil {
+				scheduleMap["roleDefinitionDisplayName"] = stringPtrToInterface(roleDef.GetDisplayName())
+			}
+
 			allEligible = append(allEligible, scheduleMap)
 		}
 
@@ -2153,7 +2728,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllPIMEligibleWithPagination(ctx 
 			break // No more pages
 		}
 
-		// Get next page
+		// Get next page (WithUrl preserves $expand from original request)
 		response, err = l.graphClient.RoleManagement().Directory().RoleEligibilitySchedules().WithUrl(*odataNextLink).Get(ctx, nil)
 		if err != nil {
 			l.Logger.Error("Failed to get next page of PIM eligible assignments", "error", err, "page", pageCount+1)
@@ -2173,8 +2748,13 @@ func (l *SDKComprehensiveCollectorLink) collectAllPIMActiveWithPagination(ctx co
 
 	l.Logger.Info("Starting paginated PIM active assignment collection")
 
-	// Get first page
-	response, err := l.graphClient.RoleManagement().Directory().RoleAssignmentSchedules().Get(ctx, nil)
+	// Get first page with $expand to get principal and role definition display names
+	requestConfig := &rolemanagement.DirectoryRoleAssignmentSchedulesRequestBuilderGetRequestConfiguration{
+		QueryParameters: &rolemanagement.DirectoryRoleAssignmentSchedulesRequestBuilderGetQueryParameters{
+			Expand: []string{"principal", "roleDefinition"},
+		},
+	}
+	response, err := l.graphClient.RoleManagement().Directory().RoleAssignmentSchedules().Get(ctx, requestConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get first page of PIM active assignments: %v", err)
 	}
@@ -2198,6 +2778,22 @@ func (l *SDKComprehensiveCollectorLink) collectAllPIMActiveWithPagination(ctx co
 				// Additional fields for compatibility
 				"assignmentState":    "Active",
 			}
+
+			// Extract expanded principal display name
+			if principal := schedule.GetPrincipal(); principal != nil {
+				scheduleMap["principalDisplayName"] = nil
+				if additionalData := principal.GetAdditionalData(); additionalData != nil {
+					if displayName, ok := additionalData["displayName"]; ok {
+						scheduleMap["principalDisplayName"] = displayName
+					}
+				}
+			}
+
+			// Extract expanded role definition display name
+			if roleDef := schedule.GetRoleDefinition(); roleDef != nil {
+				scheduleMap["roleDefinitionDisplayName"] = stringPtrToInterface(roleDef.GetDisplayName())
+			}
+
 			allActive = append(allActive, scheduleMap)
 		}
 
@@ -2209,7 +2805,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllPIMActiveWithPagination(ctx co
 			break // No more pages
 		}
 
-		// Get next page
+		// Get next page (WithUrl preserves $expand from original request)
 		response, err = l.graphClient.RoleManagement().Directory().RoleAssignmentSchedules().WithUrl(*odataNextLink).Get(ctx, nil)
 		if err != nil {
 			l.Logger.Error("Failed to get next page of PIM active assignments", "error", err, "page", pageCount+1)
@@ -2242,6 +2838,18 @@ func (l *SDKComprehensiveCollectorLink) collectAllDevicesWithPagination(ctx cont
 
 		// Convert devices from current page (matching HTTP version fields exactly)
 		for _, device := range devices {
+			// Try to get createdDateTime from additionalData first (matches HTTP $select field),
+			// fall back to registrationDateTime if not available
+			var createdDateTime interface{}
+			if additionalData := device.GetAdditionalData(); additionalData != nil {
+				if val, ok := additionalData["createdDateTime"]; ok {
+					createdDateTime = val
+				}
+			}
+			if createdDateTime == nil {
+				createdDateTime = timeToInterface(device.GetRegistrationDateTime())
+			}
+
 			deviceMap := map[string]interface{}{
 				"id":                    *device.GetId(),
 				"displayName":           stringPtrToInterface(device.GetDisplayName()),
@@ -2251,7 +2859,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllDevicesWithPagination(ctx cont
 				"isCompliant":           boolPtrToInterface(device.GetIsCompliant()),
 				"isManaged":             boolPtrToInterface(device.GetIsManaged()),
 				"accountEnabled":        boolPtrToInterface(device.GetAccountEnabled()),
-				"createdDateTime":       timeToInterface(device.GetRegistrationDateTime()),
+				"createdDateTime":       createdDateTime,
 			}
 			allDevices = append(allDevices, deviceMap)
 		}
@@ -2666,19 +3274,15 @@ func decodeResourceGraphData(responseData interface{}, resources *[]interface{})
 	}
 }
 
-// collectAllGroupMembershipsWithPagination collects all group membership relationships using batched Graph API calls
-//
-// Performance Optimization: This function uses Microsoft Graph's $batch API to dramatically improve performance:
-// - Reduces API calls from N (one per group) to N/15 (batched requests)
-// - Expected 10-15x performance improvement for tenants with many groups
-// - Maintains backward compatibility with existing data structures
-// - Includes robust fallback mechanisms for batch failures or authentication issues
-func (l *SDKComprehensiveCollectorLink) collectAllGroupMembershipsWithPagination(ctx context.Context) ([]interface{}, error) {
+// collectAllGroupMembershipsWithPagination collects all group membership relationships using concurrent batched Graph API calls.
+// If preCollectedGroups is non-nil and non-empty, uses those instead of re-fetching.
+// Uses concurrent workers for batch execution and handles intra-batch pagination for large groups.
+func (l *SDKComprehensiveCollectorLink) collectAllGroupMembershipsWithPagination(ctx context.Context, preCollectedGroups ...[]interface{}) ([]interface{}, error) {
 	var allMemberships []interface{}
 	totalObjects := 0
 
-	l.Logger.Info("Starting optimized batched group memberships collection")
-	message.Info("Collecting group memberships from Graph SDK (batched)...")
+	l.Logger.Info("Starting concurrent batched group memberships collection")
+	message.Info("Collecting group memberships from Graph SDK (concurrent batched)...")
 
 	// Get access token for batch API calls
 	accessToken, err := l.getAccessToken(ctx)
@@ -2687,51 +3291,62 @@ func (l *SDKComprehensiveCollectorLink) collectAllGroupMembershipsWithPagination
 		return l.collectAllGroupMembershipsWithPaginationFallback(ctx)
 	}
 
-	// Collect all groups first using SDK (as before)
+	// Use pre-collected groups if provided, otherwise fetch
 	var allGroups []interface{}
-	groupsResponse, err := l.graphClient.Groups().Get(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get groups for membership collection: %v", err)
-	}
-
-	// Process all pages of groups to collect group information
-	for {
-		groups := groupsResponse.GetValue()
-		l.Logger.Info("Collecting groups page", "groups", len(groups))
-
-		for _, group := range groups {
-			if group == nil || group.GetId() == nil {
-				continue
+	if len(preCollectedGroups) > 0 && len(preCollectedGroups[0]) > 0 {
+		// Extract just id and displayName from pre-collected groups
+		for _, g := range preCollectedGroups[0] {
+			if gMap, ok := g.(map[string]interface{}); ok {
+				if id, ok := gMap["id"].(string); ok {
+					groupMap := map[string]interface{}{"id": id}
+					if dn, ok := gMap["displayName"].(string); ok {
+						groupMap["displayName"] = dn
+					}
+					allGroups = append(allGroups, groupMap)
+				}
 			}
-
-			groupMap := map[string]interface{}{
-				"id": *group.GetId(),
-			}
-			if group.GetDisplayName() != nil {
-				groupMap["displayName"] = *group.GetDisplayName()
-			}
-			allGroups = append(allGroups, groupMap)
 		}
-
-		// Check for next page of groups
-		odataNextLink := groupsResponse.GetOdataNextLink()
-		if odataNextLink == nil || *odataNextLink == "" {
-			break
-		}
-
-		groupsResponse, err = l.graphClient.Groups().WithUrl(*odataNextLink).Get(ctx, nil)
+		l.Logger.Info("Using pre-collected groups for membership collection", "totalGroups", len(allGroups))
+	} else {
+		// Fetch groups from scratch (fallback)
+		groupsResponse, err := l.graphClient.Groups().Get(ctx, nil)
 		if err != nil {
-			l.Logger.Error("Failed to get next page of groups", "error", err)
-			break
+			return nil, fmt.Errorf("failed to get groups for membership collection: %v", err)
 		}
+		for {
+			groups := groupsResponse.GetValue()
+			for _, group := range groups {
+				if group == nil || group.GetId() == nil {
+					continue
+				}
+				groupMap := map[string]interface{}{"id": *group.GetId()}
+				if group.GetDisplayName() != nil {
+					groupMap["displayName"] = *group.GetDisplayName()
+				}
+				allGroups = append(allGroups, groupMap)
+			}
+			odataNextLink := groupsResponse.GetOdataNextLink()
+			if odataNextLink == nil || *odataNextLink == "" {
+				break
+			}
+			groupsResponse, err = l.graphClient.Groups().WithUrl(*odataNextLink).Get(ctx, nil)
+			if err != nil {
+				l.Logger.Error("Failed to get next page of groups", "error", err)
+				break
+			}
+		}
+		l.Logger.Info("Fetched groups for membership collection", "totalGroups", len(allGroups))
 	}
 
-	l.Logger.Info("Collected all groups, starting batched member collection", "totalGroups", len(allGroups))
+	// Build all batch work upfront
+	batchSize := 20 // Graph API batch limit
+	var batches []batchWork
+	// groupDataMaps stores per-batch group lookup maps
+	type batchMeta struct {
+		groupDataMap map[string]interface{}
+	}
+	var batchMetas []batchMeta
 
-	// Process groups in batches for member collection
-	// Microsoft Graph API batch limit is 20 requests per batch
-	// We use 15 to leave some buffer for other concurrent operations
-	batchSize := 15
 	for i := 0; i < len(allGroups); i += batchSize {
 		end := i + batchSize
 		if end > len(allGroups) {
@@ -2739,9 +3354,6 @@ func (l *SDKComprehensiveCollectorLink) collectAllGroupMembershipsWithPagination
 		}
 		batchGroups := allGroups[i:end]
 
-		l.Logger.Info("Processing group batch", "batch", fmt.Sprintf("%d/%d", (i/batchSize)+1, (len(allGroups)+batchSize-1)/batchSize), "groups", len(batchGroups))
-
-		// Create batch requests for group members
 		var batchRequests []map[string]interface{}
 		groupDataMap := make(map[string]interface{})
 
@@ -2750,15 +3362,11 @@ func (l *SDKComprehensiveCollectorLink) collectAllGroupMembershipsWithPagination
 			if !ok {
 				continue
 			}
-
 			groupID, ok := groupMap["id"].(string)
 			if !ok {
 				continue
 			}
-
 			groupDataMap[fmt.Sprintf("group_%d", j)] = groupMap
-
-			// Add members request to batch
 			batchRequests = append(batchRequests, map[string]interface{}{
 				"id":     fmt.Sprintf("group_%d_members", j),
 				"method": "GET",
@@ -2766,80 +3374,144 @@ func (l *SDKComprehensiveCollectorLink) collectAllGroupMembershipsWithPagination
 			})
 		}
 
-		// Execute batch request
 		if len(batchRequests) > 0 {
-			batchResults, err := l.callGraphBatchAPI(ctx, accessToken, batchRequests)
-			if err != nil {
-				l.Logger.Error("Batch request failed for group memberships, falling back to individual calls", "error", err)
-				// Fallback to individual calls for this batch
-				batchMemberships, err := l.processBatchGroupsFallback(ctx, batchGroups)
-				if err != nil {
-					l.Logger.Error("Fallback processing failed for batch", "error", err)
-					continue
-				}
-				allMemberships = append(allMemberships, batchMemberships...)
-				totalObjects += len(batchMemberships)
+			batches = append(batches, batchWork{index: len(batches), requests: batchRequests})
+			batchMetas = append(batchMetas, batchMeta{groupDataMap: groupDataMap})
+		}
+	}
+
+	l.Logger.Info("Executing concurrent group membership batches", "totalBatches", len(batches), "workers", 5, "totalGroups", len(allGroups))
+
+	// Execute all batches concurrently with 5 workers
+	results := l.executeBatchesConcurrently(ctx, accessToken, batches, 5)
+
+	// Phase 1: Extract first-page members and identify groups needing pagination
+	type groupResult struct {
+		groupID   string
+		firstPage []interface{}
+		nextLink  string
+	}
+	var smallGroups []groupResult  // groups with <=100 members (no pagination needed)
+	var largeGroups []groupResult  // groups with >100 members (need pagination follow-up)
+
+	for idx, result := range results {
+		if result.err != nil {
+			l.Logger.Error("Batch failed for group memberships", "batch", idx, "error", result.err)
+			continue
+		}
+
+		meta := batchMetas[idx]
+
+		for _, response := range result.responses {
+			respMap, ok := response.(map[string]interface{})
+			if !ok {
 				continue
 			}
 
-			// Process batch results
-			if responses, ok := batchResults["responses"].([]interface{}); ok {
-				for _, response := range responses {
-					if respMap, ok := response.(map[string]interface{}); ok {
-						// Check response status
-						status, _ := respMap["status"].(float64)
-						if status != 200 {
-							l.Logger.Debug("Batch response failed", "status", status, "id", respMap["id"])
-							continue
-						}
+			status, _ := respMap["status"].(float64)
+			if status != 200 {
+				l.Logger.Debug("Batch response failed", "status", status, "id", respMap["id"])
+				continue
+			}
 
-						if body, ok := respMap["body"].(map[string]interface{}); ok {
-							if value, ok := body["value"].([]interface{}); ok {
-								for _, member := range value {
-									if memberMap, ok := member.(map[string]interface{}); ok {
-										memberID, ok := memberMap["id"].(string)
-										if !ok {
-											continue
-										}
+			body, ok := respMap["body"].(map[string]interface{})
+			if !ok {
+				continue
+			}
 
-										// Extract group ID from request ID
-										requestID, _ := respMap["id"].(string)
-										groupIndex := strings.Replace(strings.Replace(requestID, "group_", "", 1), "_members", "", 1)
+			// Extract group ID from request ID
+			requestID, _ := respMap["id"].(string)
+			groupIndex := strings.Replace(strings.Replace(requestID, "group_", "", 1), "_members", "", 1)
+			groupData, exists := meta.groupDataMap[fmt.Sprintf("group_%s", groupIndex)]
+			if !exists {
+				continue
+			}
+			groupInfo, ok := groupData.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			groupID, _ := groupInfo["id"].(string)
 
-										// Find corresponding group
-										if groupData, exists := groupDataMap[fmt.Sprintf("group_%s", groupIndex)]; exists {
-											if groupInfo, ok := groupData.(map[string]interface{}); ok {
-												groupID, _ := groupInfo["id"].(string)
+			var firstPage []interface{}
+			if value, ok := body["value"].([]interface{}); ok {
+				firstPage = value
+			}
 
-												membership := map[string]interface{}{
-													"groupId":  groupID,
-													"memberId": memberID,
-												}
-
-												// Add member type if available
-												if memberType, ok := memberMap["@odata.type"].(string); ok {
-													membership["memberType"] = memberType
-												}
-
-												allMemberships = append(allMemberships, membership)
-												totalObjects++
-											}
-										}
-									}
-								}
-							}
-						}
-					}
-				}
+			if nextLink, ok := body["@odata.nextLink"].(string); ok && nextLink != "" {
+				largeGroups = append(largeGroups, groupResult{groupID: groupID, firstPage: firstPage, nextLink: nextLink})
+			} else {
+				smallGroups = append(smallGroups, groupResult{groupID: groupID, firstPage: firstPage})
 			}
 		}
-
-		// Small delay to avoid throttling
-		time.Sleep(100 * time.Millisecond)
 	}
 
-	l.Logger.Info("Completed optimized batched group memberships collection", "totalMemberships", totalObjects, "totalGroups", len(allGroups))
-	message.Info("Group memberships collection completed successfully! Collected %d memberships from %d groups", totalObjects, len(allGroups))
+	l.Logger.Info("Batch results parsed", "smallGroups", len(smallGroups), "largeGroups", len(largeGroups))
+
+	// Phase 2: Parallel pagination for large groups
+	type paginatedResult struct {
+		groupID string
+		members []interface{}
+	}
+	paginatedResults := make([]paginatedResult, len(largeGroups))
+
+	if len(largeGroups) > 0 {
+		var pgWg sync.WaitGroup
+		sem := make(chan struct{}, 10) // 10 concurrent pagination workers
+		var pgCompleted int64
+
+		for i, lg := range largeGroups {
+			pgWg.Add(1)
+			sem <- struct{}{}
+			go func(idx int, g groupResult) {
+				defer pgWg.Done()
+				defer func() { <-sem }()
+				additional := l.followPaginationLink(ctx, accessToken, g.nextLink)
+				allMembers := make([]interface{}, 0, len(g.firstPage)+len(additional))
+				allMembers = append(allMembers, g.firstPage...)
+				allMembers = append(allMembers, additional...)
+				paginatedResults[idx] = paginatedResult{groupID: g.groupID, members: allMembers}
+				n := atomic.AddInt64(&pgCompleted, 1)
+				if n%10 == 0 || n == int64(len(largeGroups)) {
+					l.Logger.Info("Pagination progress", "completed", n, "total", len(largeGroups))
+				}
+			}(i, lg)
+		}
+		pgWg.Wait()
+		l.Logger.Info("All large group pagination complete", "groups", len(largeGroups))
+	}
+
+	// Phase 3: Merge all memberships
+	addMemberships := func(groupID string, members []interface{}) {
+		for _, member := range members {
+			memberMap, ok := member.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			memberID, ok := memberMap["id"].(string)
+			if !ok {
+				continue
+			}
+			membership := map[string]interface{}{
+				"groupId":  groupID,
+				"memberId": memberID,
+			}
+			if memberType, ok := memberMap["@odata.type"].(string); ok {
+				membership["memberType"] = memberType
+			}
+			allMemberships = append(allMemberships, membership)
+			totalObjects++
+		}
+	}
+
+	for _, sg := range smallGroups {
+		addMemberships(sg.groupID, sg.firstPage)
+	}
+	for _, pr := range paginatedResults {
+		addMemberships(pr.groupID, pr.members)
+	}
+
+	l.Logger.Info("Completed concurrent batched group memberships collection", "totalMemberships", totalObjects, "totalGroups", len(allGroups))
+	message.Info("Group memberships collection completed! Collected %d memberships from %d groups", totalObjects, len(allGroups))
 	return allMemberships, nil
 }
 
@@ -3227,19 +3899,15 @@ func (l *SDKComprehensiveCollectorLink) collectAllOAuth2PermissionGrantsWithPagi
 	return allGrants, nil
 }
 
-// collectAllAppRoleAssignmentsWithPagination collects all app role assignments using batched Graph API calls
-//
-// Performance Optimization: This function uses Microsoft Graph's $batch API to dramatically improve performance:
-// - Reduces API calls from 2N (two per service principal) to 2N/15 (batched requests)
-// - Expected 10-15x performance improvement for tenants with many service principals
-// - Maintains backward compatibility with existing data structures
-// - Includes robust fallback mechanisms for batch failures or authentication issues
-func (l *SDKComprehensiveCollectorLink) collectAllAppRoleAssignmentsWithPagination(ctx context.Context) ([]interface{}, error) {
+// collectAllAppRoleAssignmentsWithPagination collects all app role assignments using concurrent batched Graph API calls.
+// If preCollectedSPs is non-nil and non-empty, uses those instead of re-fetching.
+// Uses concurrent workers and handles intra-batch pagination.
+func (l *SDKComprehensiveCollectorLink) collectAllAppRoleAssignmentsWithPagination(ctx context.Context, preCollectedSPs ...[]interface{}) ([]interface{}, error) {
 	var allAppRoleAssignments []interface{}
 	totalObjects := 0
 
-	l.Logger.Info("Starting optimized batched app role assignments collection")
-	message.Info("Collecting app role assignments from Graph SDK (batched)...")
+	l.Logger.Info("Starting concurrent batched app role assignments collection")
+	message.Info("Collecting app role assignments from Graph SDK (concurrent batched)...")
 
 	// Get access token for batch API calls
 	accessToken, err := l.getAccessToken(ctx)
@@ -3248,50 +3916,61 @@ func (l *SDKComprehensiveCollectorLink) collectAllAppRoleAssignmentsWithPaginati
 		return l.collectAllAppRoleAssignmentsWithPaginationFallback(ctx)
 	}
 
-	// First, collect all service principals
+	// Use pre-collected SPs if provided, otherwise fetch
 	var allServicePrincipals []interface{}
-	servicePrincipalsResponse, err := l.graphClient.ServicePrincipals().Get(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get service principals for app role assignments: %v", err)
-	}
-
-	// Process all pages of service principals to collect SP information
-	for {
-		servicePrincipals := servicePrincipalsResponse.GetValue()
-		l.Logger.Info("Collecting service principals page", "servicePrincipals", len(servicePrincipals))
-
-		for _, sp := range servicePrincipals {
-			if sp == nil || sp.GetId() == nil {
-				continue
+	if len(preCollectedSPs) > 0 && len(preCollectedSPs[0]) > 0 {
+		for _, sp := range preCollectedSPs[0] {
+			if spMap, ok := sp.(map[string]interface{}); ok {
+				if id, ok := spMap["id"].(string); ok {
+					m := map[string]interface{}{"id": id}
+					if dn, ok := spMap["displayName"].(string); ok {
+						m["displayName"] = dn
+					}
+					allServicePrincipals = append(allServicePrincipals, m)
+				}
 			}
-
-			spMap := map[string]interface{}{
-				"id": *sp.GetId(),
-			}
-			if sp.GetDisplayName() != nil {
-				spMap["displayName"] = *sp.GetDisplayName()
-			}
-			allServicePrincipals = append(allServicePrincipals, spMap)
 		}
-
-		// Check for next page of service principals
-		odataNextLink := servicePrincipalsResponse.GetOdataNextLink()
-		if odataNextLink == nil || *odataNextLink == "" {
-			break
-		}
-
-		servicePrincipalsResponse, err = l.graphClient.ServicePrincipals().WithUrl(*odataNextLink).Get(ctx, nil)
+		l.Logger.Info("Using pre-collected service principals for app role assignments", "totalSPs", len(allServicePrincipals))
+	} else {
+		// Fetch SPs from scratch (fallback)
+		servicePrincipalsResponse, err := l.graphClient.ServicePrincipals().Get(ctx, nil)
 		if err != nil {
-			l.Logger.Error("Failed to get next page of service principals", "error", err)
-			break
+			return nil, fmt.Errorf("failed to get service principals for app role assignments: %v", err)
 		}
+		for {
+			sps := servicePrincipalsResponse.GetValue()
+			for _, sp := range sps {
+				if sp == nil || sp.GetId() == nil {
+					continue
+				}
+				spMap := map[string]interface{}{"id": *sp.GetId()}
+				if sp.GetDisplayName() != nil {
+					spMap["displayName"] = *sp.GetDisplayName()
+				}
+				allServicePrincipals = append(allServicePrincipals, spMap)
+			}
+			odataNextLink := servicePrincipalsResponse.GetOdataNextLink()
+			if odataNextLink == nil || *odataNextLink == "" {
+				break
+			}
+			servicePrincipalsResponse, err = l.graphClient.ServicePrincipals().WithUrl(*odataNextLink).Get(ctx, nil)
+			if err != nil {
+				l.Logger.Error("Failed to get next page of service principals", "error", err)
+				break
+			}
+		}
+		l.Logger.Info("Fetched service principals for app role assignments", "totalSPs", len(allServicePrincipals))
 	}
 
-	l.Logger.Info("Collected all service principals, starting batched app role assignments collection", "totalServicePrincipals", len(allServicePrincipals))
+	// Build all batch work upfront
+	// 10 SPs per batch = 20 requests (Graph API max)
+	batchSize := 10
+	var batches []batchWork
+	type spBatchMeta struct {
+		spDataMap map[string]interface{}
+	}
+	var batchMetas []spBatchMeta
 
-	// Process service principals in batches for app role assignments collection
-	// Since we need 2 requests per SP (appRoleAssignedTo + appRoleAssignments), we use smaller batches
-	batchSize := 7 // Use 7 SPs per batch = 14 requests per batch (under the 20 request limit)
 	for i := 0; i < len(allServicePrincipals); i += batchSize {
 		end := i + batchSize
 		if end > len(allServicePrincipals) {
@@ -3299,9 +3978,6 @@ func (l *SDKComprehensiveCollectorLink) collectAllAppRoleAssignmentsWithPaginati
 		}
 		batchSPs := allServicePrincipals[i:end]
 
-		l.Logger.Info("Processing service principal batch", "batch", fmt.Sprintf("%d/%d", (i/batchSize)+1, (len(allServicePrincipals)+batchSize-1)/batchSize), "servicePrincipals", len(batchSPs))
-
-		// Create batch requests for both appRoleAssignedTo and appRoleAssignments
 		var batchRequests []map[string]interface{}
 		spDataMap := make(map[string]interface{})
 
@@ -3310,22 +3986,17 @@ func (l *SDKComprehensiveCollectorLink) collectAllAppRoleAssignmentsWithPaginati
 			if !ok {
 				continue
 			}
-
 			spID, ok := spMap["id"].(string)
 			if !ok {
 				continue
 			}
-
 			spDataMap[fmt.Sprintf("sp_%d", j)] = spMap
 
-			// Add appRoleAssignedTo request to batch (roles assigned TO this service principal)
 			batchRequests = append(batchRequests, map[string]interface{}{
 				"id":     fmt.Sprintf("sp_%d_assignedTo", j),
 				"method": "GET",
 				"url":    fmt.Sprintf("/servicePrincipals/%s/appRoleAssignedTo", spID),
 			})
-
-			// Add appRoleAssignments request to batch (roles assigned BY this service principal)
 			batchRequests = append(batchRequests, map[string]interface{}{
 				"id":     fmt.Sprintf("sp_%d_assignments", j),
 				"method": "GET",
@@ -3333,104 +4004,136 @@ func (l *SDKComprehensiveCollectorLink) collectAllAppRoleAssignmentsWithPaginati
 			})
 		}
 
-		// Execute batch request
 		if len(batchRequests) > 0 {
-			batchResults, err := l.callGraphBatchAPI(ctx, accessToken, batchRequests)
-			if err != nil {
-				l.Logger.Error("Batch request failed for app role assignments, falling back to individual calls", "error", err)
-				// Fallback to individual calls for this batch
-				batchAssignments, err := l.processBatchServicePrincipalsFallback(ctx, batchSPs)
-				if err != nil {
-					l.Logger.Error("Fallback processing failed for batch", "error", err)
-					continue
-				}
-				allAppRoleAssignments = append(allAppRoleAssignments, batchAssignments...)
-				totalObjects += len(batchAssignments)
+			batches = append(batches, batchWork{index: len(batches), requests: batchRequests})
+			batchMetas = append(batchMetas, spBatchMeta{spDataMap: spDataMap})
+		}
+	}
+
+	l.Logger.Info("Executing concurrent app role assignment batches", "totalBatches", len(batches), "workers", 5, "totalSPs", len(allServicePrincipals))
+
+	// Execute all batches concurrently with 5 workers
+	results := l.executeBatchesConcurrently(ctx, accessToken, batches, 5)
+
+	// Process results in order
+	for idx, result := range results {
+		if result.err != nil {
+			l.Logger.Error("Batch failed for app role assignments", "batch", idx, "error", result.err)
+			continue
+		}
+
+		meta := batchMetas[idx]
+
+		for _, response := range result.responses {
+			respMap, ok := response.(map[string]interface{})
+			if !ok {
 				continue
 			}
 
-			// Process batch results
-			if responses, ok := batchResults["responses"].([]interface{}); ok {
-				for _, response := range responses {
-					if respMap, ok := response.(map[string]interface{}); ok {
-						// Check response status
-						status, _ := respMap["status"].(float64)
-						if status != 200 {
-							l.Logger.Debug("Batch response failed", "status", status, "id", respMap["id"])
-							continue
-						}
+			status, _ := respMap["status"].(float64)
+			if status != 200 {
+				l.Logger.Debug("Batch response failed", "status", status, "id", respMap["id"])
+				continue
+			}
 
-						if body, ok := respMap["body"].(map[string]interface{}); ok {
-							if value, ok := body["value"].([]interface{}); ok {
-								for _, assignment := range value {
-									if assignmentMap, ok := assignment.(map[string]interface{}); ok {
-										assignmentID, ok := assignmentMap["id"].(string)
-										if !ok {
-											continue
-										}
+			body, ok := respMap["body"].(map[string]interface{})
+			if !ok {
+				continue
+			}
 
-										// Extract SP index and assignment type from request ID
-										requestID, _ := respMap["id"].(string)
-										var spIndex string
-										var assignmentType string
+			// Extract SP index and assignment type from request ID
+			requestID, _ := respMap["id"].(string)
+			var spIndex string
+			var assignmentType string
 
-										if strings.Contains(requestID, "_assignedTo") {
-											spIndex = strings.Replace(strings.Replace(requestID, "sp_", "", 1), "_assignedTo", "", 1)
-											assignmentType = "AppRoleAssignedTo"
-										} else if strings.Contains(requestID, "_assignments") {
-											spIndex = strings.Replace(strings.Replace(requestID, "sp_", "", 1), "_assignments", "", 1)
-											assignmentType = "AppRoleAssignments"
-										} else {
-											continue
-										}
+			if strings.Contains(requestID, "_assignedTo") {
+				spIndex = strings.Replace(strings.Replace(requestID, "sp_", "", 1), "_assignedTo", "", 1)
+				assignmentType = "AppRoleAssignedTo"
+			} else if strings.Contains(requestID, "_assignments") {
+				spIndex = strings.Replace(strings.Replace(requestID, "sp_", "", 1), "_assignments", "", 1)
+				assignmentType = "AppRoleAssignments"
+			} else {
+				continue
+			}
 
-										// Find corresponding service principal
-										if spData, exists := spDataMap[fmt.Sprintf("sp_%s", spIndex)]; exists {
-											if spInfo, ok := spData.(map[string]interface{}); ok {
-												spID, _ := spInfo["id"].(string)
+			spData, exists := meta.spDataMap[fmt.Sprintf("sp_%s", spIndex)]
+			if !exists {
+				continue
+			}
+			spInfo, ok := spData.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			spID, _ := spInfo["id"].(string)
+			spDisplayName, _ := spInfo["displayName"].(string)
 
-												appRoleAssignment := map[string]interface{}{
-													"id":               assignmentID,
-													"assignmentType":   assignmentType,
-													"serviceOnSpId":    spID, // Reference to the service principal
-												}
+			// Determine direction (matching HTTP version field)
+			direction := "assigned_to"
+			if assignmentType == "AppRoleAssignedTo" {
+				direction = "assigned_from"
+			}
 
-												// Add standard app role assignment fields
-												if principalId, ok := assignmentMap["principalId"].(string); ok {
-													appRoleAssignment["principalId"] = principalId
-												}
-												if principalType, ok := assignmentMap["principalType"].(string); ok {
-													appRoleAssignment["principalType"] = principalType
-												}
-												if resourceId, ok := assignmentMap["resourceId"].(string); ok {
-													appRoleAssignment["resourceId"] = resourceId
-												}
-												if appRoleId, ok := assignmentMap["appRoleId"].(string); ok {
-													appRoleAssignment["appRoleId"] = appRoleId
-												}
-												if createdDateTime, ok := assignmentMap["createdDateTime"].(string); ok {
-													appRoleAssignment["createdDateTime"] = createdDateTime
-												}
+			// Process assignments from first page
+			var assignments []interface{}
+			if value, ok := body["value"].([]interface{}); ok {
+				assignments = append(assignments, value...)
+			}
 
-												allAppRoleAssignments = append(allAppRoleAssignments, appRoleAssignment)
-												totalObjects++
-											}
-										}
-									}
-								}
-							}
-						}
-					}
+			// Handle pagination for SPs with many assignments
+			if nextLink, ok := body["@odata.nextLink"].(string); ok && nextLink != "" {
+				additional := l.followPaginationLink(ctx, accessToken, nextLink)
+				assignments = append(assignments, additional...)
+			}
+
+			for _, assignment := range assignments {
+				assignmentMap, ok := assignment.(map[string]interface{})
+				if !ok {
+					continue
 				}
+				assignmentID, ok := assignmentMap["id"].(string)
+				if !ok {
+					continue
+				}
+
+				appRoleAssignment := map[string]interface{}{
+					"id":                          assignmentID,
+					"assignmentType":              assignmentType,
+					"serviceOnSpId":               spID,
+					"direction":                   direction,
+					"servicePrincipalId":          spID,
+					"servicePrincipalDisplayName": spDisplayName,
+				}
+
+				if v, ok := assignmentMap["principalId"].(string); ok {
+					appRoleAssignment["principalId"] = v
+				}
+				if v, ok := assignmentMap["principalDisplayName"].(string); ok {
+					appRoleAssignment["principalDisplayName"] = v
+				}
+				if v, ok := assignmentMap["principalType"].(string); ok {
+					appRoleAssignment["principalType"] = v
+				}
+				if v, ok := assignmentMap["resourceId"].(string); ok {
+					appRoleAssignment["resourceId"] = v
+				}
+				if v, ok := assignmentMap["resourceDisplayName"].(string); ok {
+					appRoleAssignment["resourceDisplayName"] = v
+				}
+				if v, ok := assignmentMap["appRoleId"].(string); ok {
+					appRoleAssignment["appRoleId"] = v
+				}
+				if v, ok := assignmentMap["createdDateTime"].(string); ok {
+					appRoleAssignment["createdDateTime"] = v
+				}
+
+				allAppRoleAssignments = append(allAppRoleAssignments, appRoleAssignment)
+				totalObjects++
 			}
 		}
-
-		// Small delay to avoid throttling
-		time.Sleep(100 * time.Millisecond)
 	}
 
-	l.Logger.Info("Completed optimized batched app role assignments collection", "totalAssignments", totalObjects, "totalServicePrincipals", len(allServicePrincipals))
-	message.Info("App role assignments collection completed successfully! Collected %d assignments from %d service principals", totalObjects, len(allServicePrincipals))
+	l.Logger.Info("Completed concurrent batched app role assignments collection", "totalAssignments", totalObjects, "totalSPs", len(allServicePrincipals))
+	message.Info("App role assignments collection completed! Collected %d assignments from %d service principals", totalObjects, len(allServicePrincipals))
 	return allAppRoleAssignments, nil
 }
 
@@ -3485,11 +4188,16 @@ func (l *SDKComprehensiveCollectorLink) collectAllAppRoleAssignmentsWithPaginati
 						assignmentMap := map[string]interface{}{
 							"id":               *assignment.GetId(),
 							"principalId":      uuidPtrToInterface(assignment.GetPrincipalId()),
+							"principalDisplayName": stringPtrToInterface(assignment.GetPrincipalDisplayName()),
 							"principalType":    stringPtrToInterface(assignment.GetPrincipalType()),
 							"resourceId":       uuidPtrToInterface(assignment.GetResourceId()),
+							"resourceDisplayName": stringPtrToInterface(assignment.GetResourceDisplayName()),
 							"appRoleId":        uuidPtrToInterface(assignment.GetAppRoleId()),
 							"createdDateTime":  timeToInterface(assignment.GetCreatedDateTime()),
 							"assignmentType":   "AppRoleAssignedTo",
+							"direction":        "assigned_from",
+							"servicePrincipalId":          spId,
+							"servicePrincipalDisplayName": spDisplayName,
 						}
 						allAppRoleAssignments = append(allAppRoleAssignments, assignmentMap)
 						totalObjects++
@@ -3528,11 +4236,16 @@ func (l *SDKComprehensiveCollectorLink) collectAllAppRoleAssignmentsWithPaginati
 						assignmentMap := map[string]interface{}{
 							"id":               *assignment.GetId(),
 							"principalId":      uuidPtrToInterface(assignment.GetPrincipalId()),
+							"principalDisplayName": stringPtrToInterface(assignment.GetPrincipalDisplayName()),
 							"principalType":    stringPtrToInterface(assignment.GetPrincipalType()),
 							"resourceId":       uuidPtrToInterface(assignment.GetResourceId()),
+							"resourceDisplayName": stringPtrToInterface(assignment.GetResourceDisplayName()),
 							"appRoleId":        uuidPtrToInterface(assignment.GetAppRoleId()),
 							"createdDateTime":  timeToInterface(assignment.GetCreatedDateTime()),
 							"assignmentType":   "AppRoleAssignments",
+							"direction":        "assigned_to",
+							"servicePrincipalId":          spId,
+							"servicePrincipalDisplayName": spDisplayName,
 						}
 						allAppRoleAssignments = append(allAppRoleAssignments, assignmentMap)
 						totalObjects++
@@ -3587,6 +4300,8 @@ func (l *SDKComprehensiveCollectorLink) processBatchServicePrincipalsFallback(ct
 			continue
 		}
 
+		spDisplayName, _ := spMap["displayName"].(string)
+
 		l.Logger.Debug("Processing service principal (batch fallback)", "spId", spID)
 
 		// Get appRoleAssignedTo using SDK
@@ -3594,7 +4309,6 @@ func (l *SDKComprehensiveCollectorLink) processBatchServicePrincipalsFallback(ct
 		if err != nil {
 			l.Logger.Error("Failed to get appRoleAssignedTo for service principal (batch fallback)", "spId", spID, "error", err)
 		} else {
-			// Process all pages of appRoleAssignedTo
 			for assignedToResponse != nil {
 				assignedToAssignments := assignedToResponse.GetValue()
 
@@ -3604,18 +4318,22 @@ func (l *SDKComprehensiveCollectorLink) processBatchServicePrincipalsFallback(ct
 					}
 
 					assignmentMap := map[string]interface{}{
-						"id":               *assignment.GetId(),
-						"principalId":      uuidPtrToInterface(assignment.GetPrincipalId()),
-						"principalType":    stringPtrToInterface(assignment.GetPrincipalType()),
-						"resourceId":       uuidPtrToInterface(assignment.GetResourceId()),
-						"appRoleId":        uuidPtrToInterface(assignment.GetAppRoleId()),
-						"createdDateTime":  timeToInterface(assignment.GetCreatedDateTime()),
-						"assignmentType":   "AppRoleAssignedTo",
+						"id":                          *assignment.GetId(),
+						"principalId":                 uuidPtrToInterface(assignment.GetPrincipalId()),
+						"principalDisplayName":        stringPtrToInterface(assignment.GetPrincipalDisplayName()),
+						"principalType":               stringPtrToInterface(assignment.GetPrincipalType()),
+						"resourceId":                  uuidPtrToInterface(assignment.GetResourceId()),
+						"resourceDisplayName":         stringPtrToInterface(assignment.GetResourceDisplayName()),
+						"appRoleId":                   uuidPtrToInterface(assignment.GetAppRoleId()),
+						"createdDateTime":             timeToInterface(assignment.GetCreatedDateTime()),
+						"assignmentType":              "AppRoleAssignedTo",
+						"direction":                   "assigned_from",
+						"servicePrincipalId":          spID,
+						"servicePrincipalDisplayName": spDisplayName,
 					}
 					assignments = append(assignments, assignmentMap)
 				}
 
-				// Check for next page
 				odataNextLink := assignedToResponse.GetOdataNextLink()
 				if odataNextLink == nil || *odataNextLink == "" {
 					break
@@ -3634,7 +4352,6 @@ func (l *SDKComprehensiveCollectorLink) processBatchServicePrincipalsFallback(ct
 		if err != nil {
 			l.Logger.Error("Failed to get appRoleAssignments for service principal (batch fallback)", "spId", spID, "error", err)
 		} else {
-			// Process all pages of appRoleAssignments
 			for assignmentsResponse != nil {
 				roleAssignments := assignmentsResponse.GetValue()
 
@@ -3644,18 +4361,22 @@ func (l *SDKComprehensiveCollectorLink) processBatchServicePrincipalsFallback(ct
 					}
 
 					assignmentMap := map[string]interface{}{
-						"id":               *assignment.GetId(),
-						"principalId":      uuidPtrToInterface(assignment.GetPrincipalId()),
-						"principalType":    stringPtrToInterface(assignment.GetPrincipalType()),
-						"resourceId":       uuidPtrToInterface(assignment.GetResourceId()),
-						"appRoleId":        uuidPtrToInterface(assignment.GetAppRoleId()),
-						"createdDateTime":  timeToInterface(assignment.GetCreatedDateTime()),
-						"assignmentType":   "AppRoleAssignments",
+						"id":                          *assignment.GetId(),
+						"principalId":                 uuidPtrToInterface(assignment.GetPrincipalId()),
+						"principalDisplayName":        stringPtrToInterface(assignment.GetPrincipalDisplayName()),
+						"principalType":               stringPtrToInterface(assignment.GetPrincipalType()),
+						"resourceId":                  uuidPtrToInterface(assignment.GetResourceId()),
+						"resourceDisplayName":         stringPtrToInterface(assignment.GetResourceDisplayName()),
+						"appRoleId":                   uuidPtrToInterface(assignment.GetAppRoleId()),
+						"createdDateTime":             timeToInterface(assignment.GetCreatedDateTime()),
+						"assignmentType":              "AppRoleAssignments",
+						"direction":                   "assigned_to",
+						"servicePrincipalId":          spID,
+						"servicePrincipalDisplayName": spDisplayName,
 					}
 					assignments = append(assignments, assignmentMap)
 				}
 
-				// Check for next page
 				odataNextLink := assignmentsResponse.GetOdataNextLink()
 				if odataNextLink == nil || *odataNextLink == "" {
 					break

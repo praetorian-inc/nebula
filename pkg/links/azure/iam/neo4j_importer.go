@@ -310,8 +310,22 @@ func (l *Neo4jImporterLink) loadConsolidatedData(dataFile string) error {
 			return fmt.Errorf("empty JSON array")
 		}
 	} else if dataObject, ok := tempData.(map[string]interface{}); ok {
-		// If it's already an object (direct format), use it directly
-		l.consolidatedData = dataObject
+		// Check if this is a Nebula RuntimeJSONOutputter envelope with "resources" array
+		if resources, hasResources := dataObject["resources"]; hasResources {
+			if resArray, ok := resources.([]interface{}); ok && len(resArray) > 0 {
+				if firstResource, ok := resArray[0].(map[string]interface{}); ok {
+					l.consolidatedData = firstResource
+					l.Logger.Info("Detected Nebula envelope format, extracted resources[0]")
+				} else {
+					return fmt.Errorf("invalid JSON structure: resources[0] is not an object")
+				}
+			} else {
+				return fmt.Errorf("invalid JSON structure: resources array is empty or not an array")
+			}
+		} else {
+			// Direct format — use as-is
+			l.consolidatedData = dataObject
+		}
 	} else {
 		return fmt.Errorf("invalid JSON structure: expected object or array")
 	}

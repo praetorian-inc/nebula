@@ -1,0 +1,46 @@
+name: Privesc Method 42 - KMS CreateGrant
+description: Creates CAN_PRIVESC relationship when a principal has kms:CreateGrant and can grant itself decryption access to secrets
+impactedServices:
+  - KMS
+  - SecretsManager
+  - SSM
+severity: High
+order: 142
+cypher: |
+  // Find principals that can create KMS grants
+  MATCH (principal)-[:IAM_CREATEGRANT]->(key:AWS_KMS_Key)
+  WHERE principal.admin IS NULL
+    AND key.keyManager <> 'AWS'  // Skip AWS-managed keys
+
+  // Create the privesc relationship - can grant self Decrypt access
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(principal)
+  ON CREATE SET
+    privesc.method = "Method-42-KMS-CreateGrant",
+    privesc.requires = ["kms:CreateGrant"],
+    privesc.service = "KMS",
+    privesc.targetType = "Self",
+    privesc.targetKey = key.arn,
+    privesc.description = "Can create grant to self for Decrypt permission on KMS key"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-42-KMS-CreateGrant"
+      THEN privesc.method + ",Method-42-KMS-CreateGrant"
+      ELSE privesc.method
+    END,
+    privesc.targetKey = CASE
+      WHEN privesc.targetKey IS NULL THEN key.arn
+      WHEN NOT privesc.targetKey CONTAINS key.arn THEN privesc.targetKey + "," + key.arn
+      ELSE privesc.targetKey
+    END
+
+  // Mark as self-escalation capable
+  SET principal.canSelfEscalate = true
+
+  // If the key encrypts secrets, escalation leads to secret access
+  WITH principal, key, privesc
+  OPTIONAL MATCH (secret)-[:ENCRYPTED_BY]->(key)
+  WHERE secret:AWS_SecretsManager_Secret OR secret:AWS_SSM_Parameter
+  WITH principal, key, privesc, collect(secret.arn) AS encryptedSecrets
+  WHERE size(encryptedSecrets) > 0
+  SET privesc.encryptedSecrets = encryptedSecrets,
+      privesc.impactDescription = "CreateGrant self-escalation leads to decryption of " + toString(size(encryptedSecrets)) + " secrets"

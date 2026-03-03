@@ -248,16 +248,30 @@ func handleKMSFallback(a *AWSCloudControl, resourceType, region string, config a
 	}
 }
 
-// listKMSKeys lists KMS keys using the native KMS API
-// resourceType determines what CloudFormation type to emit (AWS::KMS::Key or AWS::KMS::ReplicaKey)
+// listKMSKeys lists KMS keys using the native KMS API.
+// resourceType determines what CloudFormation type to emit (AWS::KMS::Key or AWS::KMS::ReplicaKey).
+//
+// This function handles partial access scenarios gracefully:
+// - ListKeys only requires kms:ListKeys permission
+// - DescribeKey may fail for individual keys with restrictive key policies
+// - Keys that cannot be described are still emitted with minimal properties
+// - AWS-managed keys are filtered out when DescribeKey succeeds
 func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, accountId string) {
 	paginator := kms.NewListKeysPaginator(client, &kms.ListKeysInput{})
 
 	var keyCount int
+	var accessDeniedCount int
+
 	for paginator.HasMorePages() {
 		output, err := paginator.NextPage(a.Context())
 		if err != nil {
-			slog.Warn("Failed to list KMS keys via native API", "region", region, "error", err)
+			// Log with context about partial progress if any keys were collected
+			if keyCount > 0 {
+				slog.Error("Failed to list KMS keys via native API after partial success",
+					"region", region, "error", err, "keysCollectedBeforeFailure", keyCount)
+			} else {
+				slog.Error("Failed to list KMS keys via native API", "region", region, "error", err)
+			}
 			return
 		}
 
@@ -270,11 +284,17 @@ func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, 
 				KeyId: aws.String(keyID),
 			})
 
-			// If we can't describe the key, include with minimal properties
+			// If we can't describe the key, emit with minimal properties
+			// This handles keys with restrictive key policies that deny DescribeKey
 			if err != nil {
+				accessDeniedCount++
+				slog.Debug("Cannot describe KMS key, emitting with minimal properties",
+					"keyId", keyID, "region", region, "error", err)
+
 				properties := map[string]interface{}{
-					"KeyId": keyID,
-					"Arn":   keyArnStr,
+					"KeyId":                 keyID,
+					"Arn":                   keyArnStr,
+					"DescribeKeyAccessDenied": true, // Flag to indicate incomplete metadata
 				}
 				propsJSON, _ := json.Marshal(properties)
 				erd := types.NewEnrichedResourceDescription(keyID, resourceType, region, accountId, string(propsJSON))
@@ -284,16 +304,17 @@ func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, 
 			}
 
 			if describeOutput.KeyMetadata == nil {
+				slog.Debug("DescribeKey returned nil metadata, skipping", "keyId", keyID)
 				continue
 			}
 
-			// Skip AWS-managed keys
+			// Skip AWS-managed keys (only possible when DescribeKey succeeds)
 			if describeOutput.KeyMetadata.KeyManager == kmstypes.KeyManagerTypeAws {
 				slog.Debug("Skipping AWS managed key", "id", keyID)
 				continue
 			}
 
-			// Build properties
+			// Build properties with full metadata
 			properties := map[string]interface{}{
 				"KeyId": keyID,
 				"Arn":   keyArnStr,
@@ -309,6 +330,7 @@ func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, 
 				properties["Description"] = aws.ToString(describeOutput.KeyMetadata.Description)
 			}
 			properties["MultiRegion"] = describeOutput.KeyMetadata.MultiRegion
+			properties["KeyManager"] = string(describeOutput.KeyMetadata.KeyManager)
 
 			// For multi-region keys, include configuration
 			if describeOutput.KeyMetadata.MultiRegion != nil && *describeOutput.KeyMetadata.MultiRegion {
@@ -348,18 +370,35 @@ func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, 
 		}
 	}
 
-	slog.Debug("Listed KMS keys via native API", "region", region, "type", resourceType, "count", keyCount)
+	// Log summary including partial access info
+	if accessDeniedCount > 0 {
+		slog.Info("Listed KMS keys via native API with partial access",
+			"region", region, "type", resourceType,
+			"totalKeys", keyCount, "keysWithRestrictedAccess", accessDeniedCount)
+	} else {
+		slog.Debug("Listed KMS keys via native API", "region", region, "type", resourceType, "count", keyCount)
+	}
 }
 
-// listKMSAliases lists KMS aliases using the native KMS API
+// listKMSAliases lists KMS aliases using the native KMS API.
+// ListAliases only requires kms:ListAliases permission and returns all aliases
+// the caller can see, making it resilient to partial access scenarios.
 func (a *AWSCloudControl) listKMSAliases(client *kms.Client, region, accountId string) {
 	paginator := kms.NewListAliasesPaginator(client, &kms.ListAliasesInput{})
 
 	var aliasCount int
+	var skippedAwsManaged int
+
 	for paginator.HasMorePages() {
 		output, err := paginator.NextPage(a.Context())
 		if err != nil {
-			slog.Warn("Failed to list KMS aliases via native API", "region", region, "error", err)
+			// Log with context about partial progress if any aliases were collected
+			if aliasCount > 0 {
+				slog.Error("Failed to list KMS aliases via native API after partial success",
+					"region", region, "error", err, "aliasesCollectedBeforeFailure", aliasCount)
+			} else {
+				slog.Error("Failed to list KMS aliases via native API", "region", region, "error", err)
+			}
 			return
 		}
 
@@ -367,8 +406,9 @@ func (a *AWSCloudControl) listKMSAliases(client *kms.Client, region, accountId s
 			aliasName := aws.ToString(alias.AliasName)
 			aliasArn := aws.ToString(alias.AliasArn)
 
-			// Skip AWS-managed aliases (aws/*)
+			// Skip AWS-managed aliases (alias/aws/*)
 			if strings.HasPrefix(aliasName, "alias/aws/") {
+				skippedAwsManaged++
 				continue
 			}
 
@@ -378,6 +418,12 @@ func (a *AWSCloudControl) listKMSAliases(client *kms.Client, region, accountId s
 			}
 			if alias.TargetKeyId != nil {
 				properties["TargetKeyId"] = aws.ToString(alias.TargetKeyId)
+			}
+			if alias.CreationDate != nil {
+				properties["CreationDate"] = alias.CreationDate
+			}
+			if alias.LastUpdatedDate != nil {
+				properties["LastUpdatedDate"] = alias.LastUpdatedDate
 			}
 
 			propsJSON, err := json.Marshal(properties)
@@ -398,7 +444,8 @@ func (a *AWSCloudControl) listKMSAliases(client *kms.Client, region, accountId s
 		}
 	}
 
-	slog.Debug("Listed KMS aliases via native API", "region", region, "count", aliasCount)
+	slog.Debug("Listed KMS aliases via native API",
+		"region", region, "count", aliasCount, "skippedAwsManaged", skippedAwsManaged)
 }
 
 func (a *AWSCloudControl) resourceDescriptionToERD(resource cctypes.ResourceDescription, rType, accountId, region string) *types.EnrichedResourceDescription {

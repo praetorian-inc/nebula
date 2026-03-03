@@ -1,14 +1,18 @@
 package cloudcontrol
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/aws/aws-sdk-go-v2/service/cloudcontrol"
 	cctypes "github.com/aws/aws-sdk-go-v2/service/cloudcontrol/types"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
+	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/internal/helpers"
@@ -129,9 +133,16 @@ func (a *AWSCloudControl) listResourcesInRegion(resourceType, region string) {
 		res, err := paginator.NextPage(a.Context())
 
 		if err != nil {
-			err, shouldBreak := a.processError(resourceType, region, err)
-			if err != nil {
-				slog.Error("Failed to list resources", "error", err)
+			processErr, shouldBreak, useFallback := a.processError(resourceType, region, err)
+
+			// Use native API fallback if available for this resource type
+			if useFallback {
+				a.listResourcesWithNativeFallback(resourceType, region, config, accountId)
+				return
+			}
+
+			if processErr != nil {
+				slog.Error("Failed to list resources", "error", processErr)
 				return
 			}
 
@@ -148,25 +159,333 @@ func (a *AWSCloudControl) listResourcesInRegion(resourceType, region string) {
 	}
 }
 
-func (a *AWSCloudControl) processError(resourceType, region string, err error) (error, bool) {
+// processError handles CloudControl errors and returns whether to use fallback
+// Returns: (error, shouldBreak, useFallback)
+func (a *AWSCloudControl) processError(resourceType, region string, err error) (error, bool, bool) {
 	errMsg := err.Error()
 	switch {
 	case strings.Contains(errMsg, "TypeNotFoundException"):
-		return fmt.Errorf("%s is not available in region %s", resourceType, region), true
+		return fmt.Errorf("%s is not available in region %s", resourceType, region), true, false
 
 	case strings.Contains(errMsg, "is not authorized to perform") || strings.Contains(errMsg, "AccessDeniedException"):
-		return fmt.Errorf("access denied to list resources of type %s in region %s: %s", resourceType, region, errMsg), true
+		// Check if a native API fallback exists for this resource type
+		if hasNativeAPIFallback(resourceType) {
+			slog.Info("CloudControl access denied, falling back to native API",
+				"type", resourceType, "region", region)
+			return nil, true, true // Signal to use fallback
+		}
+		return fmt.Errorf("access denied to list resources of type %s in region %s: %s", resourceType, region, errMsg), true, false
 
 	case strings.Contains(errMsg, "UnsupportedActionException"):
-		return fmt.Errorf("the type %s is not supported in region %s", resourceType, region), true
+		return fmt.Errorf("the type %s is not supported in region %s", resourceType, region), true, false
 
 	case strings.Contains(errMsg, "ThrottlingException"):
 		// Log throttling but don't terminate - let AWS SDK retry with backoff
-		return fmt.Errorf("rate limited: %s", errMsg), false
+		return fmt.Errorf("rate limited: %s", errMsg), false, false
 
 	default:
-		return fmt.Errorf("failed to ListResources of type %s in region %s: %w", resourceType, region, err), false
+		return fmt.Errorf("failed to ListResources of type %s in region %s: %w", resourceType, region, err), false, false
 	}
+}
+
+// NativeAPIFallbackHandler defines a function that handles native API fallback for a resource type
+type NativeAPIFallbackHandler func(a *AWSCloudControl, resourceType, region string, config aws.Config, accountId string)
+
+// nativeAPIFallbackRegistry maps resource type prefixes to their fallback handlers
+var nativeAPIFallbackRegistry = map[string]NativeAPIFallbackHandler{
+	"AWS::KMS::": handleKMSFallback,
+	// Add more service fallbacks here as needed:
+	// "AWS::S3::": handleS3Fallback,
+	// "AWS::EC2::": handleEC2Fallback,
+}
+
+// hasNativeAPIFallback checks if a native API fallback exists for the resource type
+func hasNativeAPIFallback(resourceType string) bool {
+	for prefix := range nativeAPIFallbackRegistry {
+		if strings.HasPrefix(resourceType, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// getNativeAPIFallbackHandler returns the fallback handler for a resource type, if one exists
+func getNativeAPIFallbackHandler(resourceType string) (NativeAPIFallbackHandler, bool) {
+	for prefix, handler := range nativeAPIFallbackRegistry {
+		if strings.HasPrefix(resourceType, prefix) {
+			return handler, true
+		}
+	}
+	return nil, false
+}
+
+// listResourcesWithNativeFallback uses a native API fallback when CloudControl fails
+func (a *AWSCloudControl) listResourcesWithNativeFallback(resourceType, region string, config aws.Config, accountId string) {
+	handler, ok := getNativeAPIFallbackHandler(resourceType)
+	if !ok {
+		slog.Warn("No native API fallback handler for resource type", "type", resourceType)
+		return
+	}
+	handler(a, resourceType, region, config, accountId)
+}
+
+// handleKMSFallback handles native KMS API fallback for KMS resources.
+// CloudControl's KMS handler calls DescribeKey internally during ListResources,
+// and fails the entire listing if ANY key has a restricted key policy that denies
+// DescribeKey (e.g., keys using explicit key policy model without IAM delegation).
+// The native KMS ListKeys API only requires kms:ListKeys permission.
+//
+// LIMITATION: CloudControl lists AWS::KMS::Key and AWS::KMS::ReplicaKey as separate
+// resource types, but native KMS ListKeys returns all keys together. This fallback
+// filters keys by MultiRegionKeyType to match CloudControl semantics. However, if
+// only one resource type triggers the fallback (e.g., AWS::KMS::Key), keys of the
+// other type (AWS::KMS::ReplicaKey) may be missed if that type's CloudControl call
+// also fails. To get a complete inventory, both resource types should be listed.
+// See: LAB-1354
+func handleKMSFallback(a *AWSCloudControl, resourceType, region string, config aws.Config, accountId string) {
+	message.Info("Using native KMS API fallback for %s in %s", resourceType, region)
+	client := kms.NewFromConfig(config)
+
+	switch resourceType {
+	case "AWS::KMS::Key", "AWS::KMS::ReplicaKey":
+		a.listKMSKeys(client, resourceType, region, accountId)
+	case "AWS::KMS::Alias":
+		a.listKMSAliases(client, region, accountId)
+	default:
+		slog.Warn("No KMS fallback implemented for resource type", "type", resourceType)
+	}
+}
+
+// listKMSKeys lists KMS keys using the native KMS API.
+// resourceType determines what CloudFormation type to emit (AWS::KMS::Key or AWS::KMS::ReplicaKey).
+//
+// This function handles partial access scenarios gracefully:
+// - ListKeys only requires kms:ListKeys permission
+// - DescribeKey may fail for individual keys with restrictive key policies
+// - Keys that cannot be described are still emitted with minimal properties (for AWS::KMS::Key only)
+// - Both customer-managed and AWS-managed keys are included in the output
+//
+// IMPORTANT: This function filters keys based on resourceType to match CloudControl semantics:
+// - AWS::KMS::Key: emits single-region keys and multi-region PRIMARY keys
+// - AWS::KMS::ReplicaKey: emits only multi-region REPLICA keys
+// When DescribeKey fails, we cannot determine MultiRegionKeyType, so:
+// - For AWS::KMS::Key: emit with minimal properties (safe default, most keys are not replicas)
+// - For AWS::KMS::ReplicaKey: skip the key (cannot verify it's actually a replica)
+// See LAB-1354 for known limitation with partial fallback coverage.
+func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, accountId string) {
+	paginator := kms.NewListKeysPaginator(client, &kms.ListKeysInput{})
+
+	var keyCount int
+	var describeFailedCount int
+
+	for paginator.HasMorePages() {
+		output, err := paginator.NextPage(a.Context())
+		if err != nil {
+			// Log with context about partial progress if any keys were collected
+			if keyCount > 0 {
+				slog.Error("Failed to list KMS keys via native API after partial success",
+					"region", region, "error", err, "keysCollectedBeforeFailure", keyCount)
+			} else {
+				slog.Error("Failed to list KMS keys via native API", "region", region, "error", err)
+			}
+			return
+		}
+
+		for _, key := range output.Keys {
+			keyID := aws.ToString(key.KeyId)
+			keyArnStr := aws.ToString(key.KeyArn)
+
+			// Get key metadata to build properties
+			describeOutput, err := client.DescribeKey(a.Context(), &kms.DescribeKeyInput{
+				KeyId: aws.String(keyID),
+			})
+
+			// If we can't describe the key, handle based on resource type
+			// This handles keys with restrictive key policies that deny DescribeKey
+			if err != nil {
+				describeFailedCount++
+
+				// For ReplicaKey requests, we cannot verify the key is actually a replica
+				// without DescribeKey metadata, so skip it to avoid misclassification
+				if resourceType == "AWS::KMS::ReplicaKey" {
+					slog.Debug("Cannot classify KMS key as ReplicaKey without DescribeKey metadata, skipping",
+						"keyId", keyID, "region", region, "error", err)
+					continue
+				}
+
+				// For AWS::KMS::Key, emit with minimal properties (most keys are not replicas)
+				slog.Debug("Cannot describe KMS key, emitting with minimal properties",
+					"keyId", keyID, "region", region, "error", err)
+
+				properties := map[string]interface{}{
+					"KeyId":             keyID,
+					"Arn":               keyArnStr,
+					"DescribeKeyFailed": true, // Flag to indicate incomplete metadata
+				}
+				propsJSON, marshalErr := json.Marshal(properties)
+				if marshalErr != nil {
+					slog.Warn("Failed to marshal minimal KMS key properties", "keyId", keyID, "error", marshalErr)
+					continue
+				}
+				erd := types.NewEnrichedResourceDescription(keyID, resourceType, region, accountId, string(propsJSON))
+				a.sendResource(region, &erd)
+				keyCount++
+				continue
+			}
+
+			if describeOutput.KeyMetadata == nil {
+				slog.Debug("DescribeKey returned nil metadata, skipping", "keyId", keyID)
+				continue
+			}
+
+			// Determine if this key is a multi-region replica
+			isReplica := false
+			if cfg := describeOutput.KeyMetadata.MultiRegionConfiguration; cfg != nil {
+				isReplica = cfg.MultiRegionKeyType == kmstypes.MultiRegionKeyTypeReplica
+			}
+
+			// Filter based on requested resource type
+			// AWS::KMS::ReplicaKey should only include multi-region replicas
+			// AWS::KMS::Key should include everything except replicas
+			if resourceType == "AWS::KMS::ReplicaKey" && !isReplica {
+				continue
+			}
+			if resourceType == "AWS::KMS::Key" && isReplica {
+				continue
+			}
+
+			// Build properties with full metadata
+			properties := map[string]interface{}{
+				"KeyId": keyID,
+				"Arn":   keyArnStr,
+			}
+
+			properties["KeyState"] = string(describeOutput.KeyMetadata.KeyState)
+			properties["KeyUsage"] = string(describeOutput.KeyMetadata.KeyUsage)
+			properties["KeySpec"] = string(describeOutput.KeyMetadata.KeySpec)
+			properties["Origin"] = string(describeOutput.KeyMetadata.Origin)
+			properties["Enabled"] = describeOutput.KeyMetadata.Enabled
+			properties["CreationDate"] = describeOutput.KeyMetadata.CreationDate
+			if describeOutput.KeyMetadata.Description != nil {
+				properties["Description"] = aws.ToString(describeOutput.KeyMetadata.Description)
+			}
+			properties["MultiRegion"] = describeOutput.KeyMetadata.MultiRegion
+			properties["KeyManager"] = string(describeOutput.KeyMetadata.KeyManager)
+
+			// For multi-region keys, include configuration
+			if describeOutput.KeyMetadata.MultiRegion != nil && *describeOutput.KeyMetadata.MultiRegion {
+				if describeOutput.KeyMetadata.MultiRegionConfiguration != nil {
+					properties["MultiRegionKeyType"] = string(describeOutput.KeyMetadata.MultiRegionConfiguration.MultiRegionKeyType)
+					if describeOutput.KeyMetadata.MultiRegionConfiguration.PrimaryKey != nil {
+						properties["PrimaryKeyArn"] = aws.ToString(describeOutput.KeyMetadata.MultiRegionConfiguration.PrimaryKey.Arn)
+						properties["PrimaryKeyRegion"] = aws.ToString(describeOutput.KeyMetadata.MultiRegionConfiguration.PrimaryKey.Region)
+					}
+				}
+			}
+
+			// Convert properties to JSON string (CloudControl format)
+			propsJSON, err := json.Marshal(properties)
+			if err != nil {
+				slog.Warn("Failed to marshal KMS key properties", "id", keyID, "error", err)
+				continue
+			}
+
+			// Parse ARN for region info
+			var erdRegion string
+			if parsedArn, err := arn.Parse(keyArnStr); err == nil {
+				erdRegion = parsedArn.Region
+			} else {
+				erdRegion = region
+			}
+
+			erd := types.NewEnrichedResourceDescription(
+				keyID,
+				resourceType,
+				erdRegion,
+				accountId,
+				string(propsJSON),
+			)
+			a.sendResource(region, &erd)
+			keyCount++
+		}
+	}
+
+	// Log summary including partial access info
+	if describeFailedCount > 0 {
+		slog.Info("Listed KMS keys via native API with partial access",
+			"region", region, "type", resourceType,
+			"totalKeys", keyCount, "describeKeyFailed", describeFailedCount)
+	} else {
+		slog.Debug("Listed KMS keys via native API", "region", region, "type", resourceType, "count", keyCount)
+	}
+}
+
+// listKMSAliases lists KMS aliases using the native KMS API.
+// ListAliases only requires kms:ListAliases permission and returns all aliases
+// the caller can see, making it resilient to partial access scenarios.
+func (a *AWSCloudControl) listKMSAliases(client *kms.Client, region, accountId string) {
+	paginator := kms.NewListAliasesPaginator(client, &kms.ListAliasesInput{})
+
+	var aliasCount int
+	var skippedAwsManaged int
+
+	for paginator.HasMorePages() {
+		output, err := paginator.NextPage(a.Context())
+		if err != nil {
+			// Log with context about partial progress if any aliases were collected
+			if aliasCount > 0 {
+				slog.Error("Failed to list KMS aliases via native API after partial success",
+					"region", region, "error", err, "aliasesCollectedBeforeFailure", aliasCount)
+			} else {
+				slog.Error("Failed to list KMS aliases via native API", "region", region, "error", err)
+			}
+			return
+		}
+
+		for _, alias := range output.Aliases {
+			aliasName := aws.ToString(alias.AliasName)
+			aliasArn := aws.ToString(alias.AliasArn)
+
+			// Skip AWS-managed aliases (alias/aws/*)
+			if strings.HasPrefix(aliasName, "alias/aws/") {
+				skippedAwsManaged++
+				continue
+			}
+
+			properties := map[string]interface{}{
+				"AliasName": aliasName,
+				"Arn":       aliasArn,
+			}
+			if alias.TargetKeyId != nil {
+				properties["TargetKeyId"] = aws.ToString(alias.TargetKeyId)
+			}
+			if alias.CreationDate != nil {
+				properties["CreationDate"] = alias.CreationDate
+			}
+			if alias.LastUpdatedDate != nil {
+				properties["LastUpdatedDate"] = alias.LastUpdatedDate
+			}
+
+			propsJSON, err := json.Marshal(properties)
+			if err != nil {
+				slog.Warn("Failed to marshal KMS alias properties", "alias", aliasName, "error", err)
+				continue
+			}
+
+			erd := types.NewEnrichedResourceDescription(
+				aliasName,
+				"AWS::KMS::Alias",
+				region,
+				accountId,
+				string(propsJSON),
+			)
+			a.sendResource(region, &erd)
+			aliasCount++
+		}
+	}
+
+	slog.Debug("Listed KMS aliases via native API",
+		"region", region, "count", aliasCount, "skippedAwsManaged", skippedAwsManaged)
 }
 
 func (a *AWSCloudControl) resourceDescriptionToERD(resource cctypes.ResourceDescription, rType, accountId, region string) *types.EnrichedResourceDescription {

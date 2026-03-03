@@ -12,7 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudcontrol"
 	cctypes "github.com/aws/aws-sdk-go-v2/service/cloudcontrol/types"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
-	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/internal/helpers"
@@ -255,7 +254,7 @@ func handleKMSFallback(a *AWSCloudControl, resourceType, region string, config a
 // - ListKeys only requires kms:ListKeys permission
 // - DescribeKey may fail for individual keys with restrictive key policies
 // - Keys that cannot be described are still emitted with minimal properties
-// - AWS-managed keys are filtered out when DescribeKey succeeds
+// - Both customer-managed and AWS-managed keys are included in the output
 func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, accountId string) {
 	paginator := kms.NewListKeysPaginator(client, &kms.ListKeysInput{})
 
@@ -305,12 +304,6 @@ func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, 
 
 			if describeOutput.KeyMetadata == nil {
 				slog.Debug("DescribeKey returned nil metadata, skipping", "keyId", keyID)
-				continue
-			}
-
-			// Skip AWS-managed keys (only possible when DescribeKey succeeds)
-			if describeOutput.KeyMetadata.KeyManager == kmstypes.KeyManagerTypeAws {
-				slog.Debug("Skipping AWS managed key", "id", keyID)
 				continue
 			}
 

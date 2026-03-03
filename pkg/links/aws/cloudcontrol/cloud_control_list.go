@@ -259,7 +259,7 @@ func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, 
 	paginator := kms.NewListKeysPaginator(client, &kms.ListKeysInput{})
 
 	var keyCount int
-	var accessDeniedCount int
+	var describeFailedCount int
 
 	for paginator.HasMorePages() {
 		output, err := paginator.NextPage(a.Context())
@@ -278,7 +278,7 @@ func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, 
 			keyID := aws.ToString(key.KeyId)
 			keyArnStr := aws.ToString(key.KeyArn)
 
-			// Get key metadata to filter AWS-managed keys and build properties
+			// Get key metadata to build properties
 			describeOutput, err := client.DescribeKey(a.Context(), &kms.DescribeKeyInput{
 				KeyId: aws.String(keyID),
 			})
@@ -286,16 +286,20 @@ func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, 
 			// If we can't describe the key, emit with minimal properties
 			// This handles keys with restrictive key policies that deny DescribeKey
 			if err != nil {
-				accessDeniedCount++
+				describeFailedCount++
 				slog.Debug("Cannot describe KMS key, emitting with minimal properties",
 					"keyId", keyID, "region", region, "error", err)
 
 				properties := map[string]interface{}{
-					"KeyId":                 keyID,
-					"Arn":                   keyArnStr,
-					"DescribeKeyAccessDenied": true, // Flag to indicate incomplete metadata
+					"KeyId":               keyID,
+					"Arn":                 keyArnStr,
+					"DescribeKeyFailed": true, // Flag to indicate incomplete metadata
 				}
-				propsJSON, _ := json.Marshal(properties)
+				propsJSON, marshalErr := json.Marshal(properties)
+				if marshalErr != nil {
+					slog.Warn("Failed to marshal minimal KMS key properties", "keyId", keyID, "error", marshalErr)
+					continue
+				}
 				erd := types.NewEnrichedResourceDescription(keyID, resourceType, region, accountId, string(propsJSON))
 				a.sendResource(region, &erd)
 				keyCount++
@@ -364,10 +368,10 @@ func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, 
 	}
 
 	// Log summary including partial access info
-	if accessDeniedCount > 0 {
+	if describeFailedCount > 0 {
 		slog.Info("Listed KMS keys via native API with partial access",
 			"region", region, "type", resourceType,
-			"totalKeys", keyCount, "keysWithRestrictedAccess", accessDeniedCount)
+			"totalKeys", keyCount, "describeKeyFailed", describeFailedCount)
 	} else {
 		slog.Debug("Listed KMS keys via native API", "region", region, "type", resourceType, "count", keyCount)
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudcontrol"
 	cctypes "github.com/aws/aws-sdk-go-v2/service/cloudcontrol/types"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
+	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/internal/helpers"
@@ -233,6 +234,14 @@ func (a *AWSCloudControl) listResourcesWithNativeFallback(resourceType, region s
 // and fails the entire listing if ANY key has a restricted key policy that denies
 // DescribeKey (e.g., keys using explicit key policy model without IAM delegation).
 // The native KMS ListKeys API only requires kms:ListKeys permission.
+//
+// LIMITATION: CloudControl lists AWS::KMS::Key and AWS::KMS::ReplicaKey as separate
+// resource types, but native KMS ListKeys returns all keys together. This fallback
+// filters keys by MultiRegionKeyType to match CloudControl semantics. However, if
+// only one resource type triggers the fallback (e.g., AWS::KMS::Key), keys of the
+// other type (AWS::KMS::ReplicaKey) may be missed if that type's CloudControl call
+// also fails. To get a complete inventory, both resource types should be listed.
+// See: LAB-1354
 func handleKMSFallback(a *AWSCloudControl, resourceType, region string, config aws.Config, accountId string) {
 	message.Info("Using native KMS API fallback for %s in %s", resourceType, region)
 	client := kms.NewFromConfig(config)
@@ -253,8 +262,16 @@ func handleKMSFallback(a *AWSCloudControl, resourceType, region string, config a
 // This function handles partial access scenarios gracefully:
 // - ListKeys only requires kms:ListKeys permission
 // - DescribeKey may fail for individual keys with restrictive key policies
-// - Keys that cannot be described are still emitted with minimal properties
+// - Keys that cannot be described are still emitted with minimal properties (for AWS::KMS::Key only)
 // - Both customer-managed and AWS-managed keys are included in the output
+//
+// IMPORTANT: This function filters keys based on resourceType to match CloudControl semantics:
+// - AWS::KMS::Key: emits single-region keys and multi-region PRIMARY keys
+// - AWS::KMS::ReplicaKey: emits only multi-region REPLICA keys
+// When DescribeKey fails, we cannot determine MultiRegionKeyType, so:
+// - For AWS::KMS::Key: emit with minimal properties (safe default, most keys are not replicas)
+// - For AWS::KMS::ReplicaKey: skip the key (cannot verify it's actually a replica)
+// See LAB-1354 for known limitation with partial fallback coverage.
 func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, accountId string) {
 	paginator := kms.NewListKeysPaginator(client, &kms.ListKeysInput{})
 
@@ -283,16 +300,26 @@ func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, 
 				KeyId: aws.String(keyID),
 			})
 
-			// If we can't describe the key, emit with minimal properties
+			// If we can't describe the key, handle based on resource type
 			// This handles keys with restrictive key policies that deny DescribeKey
 			if err != nil {
 				describeFailedCount++
+
+				// For ReplicaKey requests, we cannot verify the key is actually a replica
+				// without DescribeKey metadata, so skip it to avoid misclassification
+				if resourceType == "AWS::KMS::ReplicaKey" {
+					slog.Debug("Cannot classify KMS key as ReplicaKey without DescribeKey metadata, skipping",
+						"keyId", keyID, "region", region, "error", err)
+					continue
+				}
+
+				// For AWS::KMS::Key, emit with minimal properties (most keys are not replicas)
 				slog.Debug("Cannot describe KMS key, emitting with minimal properties",
 					"keyId", keyID, "region", region, "error", err)
 
 				properties := map[string]interface{}{
-					"KeyId":               keyID,
-					"Arn":                 keyArnStr,
+					"KeyId":             keyID,
+					"Arn":               keyArnStr,
 					"DescribeKeyFailed": true, // Flag to indicate incomplete metadata
 				}
 				propsJSON, marshalErr := json.Marshal(properties)
@@ -308,6 +335,22 @@ func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, 
 
 			if describeOutput.KeyMetadata == nil {
 				slog.Debug("DescribeKey returned nil metadata, skipping", "keyId", keyID)
+				continue
+			}
+
+			// Determine if this key is a multi-region replica
+			isReplica := false
+			if cfg := describeOutput.KeyMetadata.MultiRegionConfiguration; cfg != nil {
+				isReplica = cfg.MultiRegionKeyType == kmstypes.MultiRegionKeyTypeReplica
+			}
+
+			// Filter based on requested resource type
+			// AWS::KMS::ReplicaKey should only include multi-region replicas
+			// AWS::KMS::Key should include everything except replicas
+			if resourceType == "AWS::KMS::ReplicaKey" && !isReplica {
+				continue
+			}
+			if resourceType == "AWS::KMS::Key" && isReplica {
 				continue
 			}
 

@@ -356,7 +356,7 @@ type GrantFinding struct {
 	Description      string
 }
 
-// analyzeKeyPolicyForCreateGrant parses key policy and finds CreateGrant permissions
+// analyzeKeyPolicyForPrivesc parses key policy and finds privilege escalation patterns
 func analyzeKeyPolicyForCreateGrant(policyJSON string, accountID string) []PolicyFinding {
 	var findings []PolicyFinding
 
@@ -376,6 +376,10 @@ func analyzeKeyPolicyForCreateGrant(policyJSON string, accountID string) []Polic
 		return findings
 	}
 
+	// Track statements for IAM delegation detection
+	rootAccountArn := fmt.Sprintf("arn:aws:iam::%s:root", accountID)
+	var hasRootWithKMSWildcard bool // tracks if root account has kms:* (enables IAM delegation)
+
 	for _, stmt := range policy.Statement {
 		if stmt.Effect != "Allow" {
 			continue
@@ -383,51 +387,339 @@ func analyzeKeyPolicyForCreateGrant(policyJSON string, accountID string) []Polic
 
 		actions := normalizeToStringSlice(stmt.Action)
 		hasCreateGrant := false
-		var grantActions []string
+		hasKMSWildcard := false
+		hasCryptoOps := false
+		var relevantActions []string
+
+		cryptoActions := map[string]bool{
+			"kms:decrypt": true, "kms:encrypt": true, "kms:generatedatakey": true,
+			"kms:generatedatakey*": true, "kms:generatedatakeywithoutplaintext": true,
+			"kms:reencryptfrom": true, "kms:reencryptto": true, "kms:reencrypt*": true,
+		}
 
 		for _, action := range actions {
 			actionLower := strings.ToLower(action)
-			if actionLower == "kms:creategrant" || actionLower == "kms:*" || actionLower == "*" {
+			if actionLower == "kms:creategrant" {
 				hasCreateGrant = true
-				grantActions = append(grantActions, action)
+				relevantActions = append(relevantActions, action)
+			} else if actionLower == "kms:*" || actionLower == "*" {
+				hasCreateGrant = true
+				hasKMSWildcard = true
+				hasCryptoOps = true
+				relevantActions = append(relevantActions, action)
+			} else if cryptoActions[actionLower] {
+				hasCryptoOps = true
+				relevantActions = append(relevantActions, action)
 			}
 		}
 
-		if !hasCreateGrant {
-			continue
+		principals := extractPrincipals(stmt.Principal)
+		conditionInfo := parseConditions(stmt.Condition)
+
+		// Check if root account has kms:* - this enables IAM delegation model
+		for _, p := range principals {
+			if p == rootAccountArn && hasKMSWildcard {
+				hasRootWithKMSWildcard = true
+			}
 		}
 
-		principals := extractPrincipals(stmt.Principal)
-		hasConditions := stmt.Condition != nil
-
 		for _, principal := range principals {
-			severity := classifyPrincipalRisk(principal, accountID, hasConditions, grantActions)
-			if severity != "NONE" {
-				findings = append(findings, PolicyFinding{
-					Severity:       severity,
-					Principal:      principal,
-					Actions:        grantActions,
-					HasConstraints: hasConditions,
-					Description:    buildPolicyFindingDescription(principal, grantActions, hasConditions),
-				})
+			// Check for wildcard principal with crypto operations (even without CreateGrant)
+			if principal == "*" && hasCryptoOps {
+				severity, description := classifyWildcardPrincipalRisk(accountID, relevantActions, conditionInfo)
+				if severity != "NONE" {
+					findings = append(findings, PolicyFinding{
+						Severity:       severity,
+						Principal:      principal,
+						Actions:        relevantActions,
+						HasConstraints: conditionInfo.hasConditions,
+						Description:    description,
+					})
+				}
+				continue
+			}
+
+			// Check for CreateGrant permissions
+			if hasCreateGrant {
+				severity, description := classifyPolicyStatementRisk(
+					principal, accountID, relevantActions, hasKMSWildcard, conditionInfo,
+				)
+				if severity != "NONE" {
+					findings = append(findings, PolicyFinding{
+						Severity:       severity,
+						Principal:      principal,
+						Actions:        relevantActions,
+						HasConstraints: conditionInfo.hasConditions,
+						Description:    description,
+					})
+				}
 			}
 		}
 	}
 
+	// Check for IAM delegation model: if root account has kms:*, IAM policies can grant access
+	// This requires IAM policy evaluation to determine who can actually access the key
+	if hasRootWithKMSWildcard {
+		findings = append(findings, PolicyFinding{
+			Severity:       "INFO",
+			Principal:      rootAccountArn,
+			Actions:        []string{"kms:*"},
+			HasConstraints: false,
+			Description:    "Key uses IAM delegation model (root account has kms:*) - requires IAM policy evaluation to determine actual access",
+		})
+	}
+
 	return findings
+}
+
+// ConditionInfo holds parsed condition details for risk classification
+type ConditionInfo struct {
+	hasConditions            bool
+	hasGrantIsForAWSResource bool
+	grantIsForAWSResourceVal bool // true if GrantIsForAWSResource=true
+	hasViaService            bool
+	hasCalledVia             bool
+	hasPrincipalOrgID        bool
+	hasPrincipalAccount      bool
+	hasPrincipalArn          bool
+	hasPrincipalTag          bool
+	principalArnPattern      string // for StringLike patterns
+}
+
+// parseConditions extracts relevant condition information
+func parseConditions(condition interface{}) ConditionInfo {
+	info := ConditionInfo{}
+	if condition == nil {
+		return info
+	}
+
+	condMap, ok := condition.(map[string]interface{})
+	if !ok {
+		return info
+	}
+
+	info.hasConditions = true
+
+	// Check for Bool conditions
+	if boolCond, ok := condMap["Bool"].(map[string]interface{}); ok {
+		if val, ok := boolCond["kms:GrantIsForAWSResource"]; ok {
+			info.hasGrantIsForAWSResource = true
+			// Value can be string "true"/"false" or bool
+			switch v := val.(type) {
+			case string:
+				info.grantIsForAWSResourceVal = strings.ToLower(v) == "true"
+			case bool:
+				info.grantIsForAWSResourceVal = v
+			}
+		}
+	}
+
+	// Check for StringEquals conditions
+	if strEquals, ok := condMap["StringEquals"].(map[string]interface{}); ok {
+		if _, ok := strEquals["kms:ViaService"]; ok {
+			info.hasViaService = true
+		}
+		if _, ok := strEquals["aws:PrincipalOrgID"]; ok {
+			info.hasPrincipalOrgID = true
+		}
+		if _, ok := strEquals["aws:PrincipalAccount"]; ok {
+			info.hasPrincipalAccount = true
+		}
+		if _, ok := strEquals["aws:PrincipalTag/KMSAccess"]; ok {
+			info.hasPrincipalTag = true
+		}
+	}
+
+	// Check for StringLike conditions (often used for role patterns)
+	if strLike, ok := condMap["StringLike"].(map[string]interface{}); ok {
+		if pattern, ok := strLike["aws:PrincipalArn"].(string); ok {
+			info.hasPrincipalArn = true
+			info.principalArnPattern = pattern
+		}
+	}
+
+	// Check for ArnLike conditions
+	if arnLike, ok := condMap["ArnLike"].(map[string]interface{}); ok {
+		if pattern, ok := arnLike["aws:PrincipalArn"].(string); ok {
+			info.hasPrincipalArn = true
+			info.principalArnPattern = pattern
+		}
+	}
+
+	// Check for ForAnyValue:StringEquals (CalledVia)
+	if forAny, ok := condMap["ForAnyValue:StringEquals"].(map[string]interface{}); ok {
+		if _, ok := forAny["aws:CalledVia"]; ok {
+			info.hasCalledVia = true
+		}
+	}
+
+	return info
+}
+
+// isAdminRole checks if a principal appears to be an administrative role
+func isAdminRole(principal string) bool {
+	principalLower := strings.ToLower(principal)
+	adminPatterns := []string{
+		"terraform",
+		"admin",
+		"administrator",
+		"cloudformation",
+		"cdk",
+		"pulumi",
+		"crossplane",
+		"organizationaccountaccessrole",
+		"awsreservedsso",
+		"stacksets",
+	}
+	for _, pattern := range adminPatterns {
+		if strings.Contains(principalLower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyPolicyStatementRisk determines risk level with smarter logic
+func classifyPolicyStatementRisk(principal, accountID string, actions []string, hasKMSWildcard bool, cond ConditionInfo) (string, string) {
+	// Root account is expected to have full access - skip entirely
+	if principal == fmt.Sprintf("arn:aws:iam::%s:root", accountID) {
+		return "NONE", ""
+	}
+
+	// Check if this is an admin role with kms:*
+	if hasKMSWildcard && isAdminRole(principal) {
+		// Admin roles with kms:* are expected - skip
+		return "NONE", ""
+	}
+
+	// Wildcard principal analysis
+	if principal == "*" {
+		return classifyWildcardPrincipalRisk(accountID, actions, cond)
+	}
+
+	// Specific principal analysis
+	return classifySpecificPrincipalRisk(principal, accountID, actions, hasKMSWildcard, cond)
+}
+
+// classifyWildcardPrincipalRisk handles Principal: "*" cases
+func classifyWildcardPrincipalRisk(accountID string, actions []string, cond ConditionInfo) (string, string) {
+	// No conditions at all - CRITICAL
+	if !cond.hasConditions {
+		return "CRITICAL", "Wildcard principal (*) with unrestricted access"
+	}
+
+	// Check for organization-wide access
+	if cond.hasPrincipalOrgID {
+		return "HIGH", "Wildcard principal with PrincipalOrgID condition - organization-wide access"
+	}
+
+	// Check for account-wide access
+	if cond.hasPrincipalAccount {
+		// Check if CreateGrant is in actions
+		hasCreateGrant := false
+		for _, a := range actions {
+			if strings.ToLower(a) == "kms:creategrant" {
+				hasCreateGrant = true
+				break
+			}
+		}
+		if hasCreateGrant {
+			return "CRITICAL", "Wildcard principal with PrincipalAccount condition AND CreateGrant - any principal in account can escalate"
+		}
+		return "HIGH", "Wildcard principal with PrincipalAccount condition - account-wide access"
+	}
+
+	// Check for role pattern (StringLike on PrincipalArn)
+	if cond.hasPrincipalArn && strings.Contains(cond.principalArnPattern, "*") {
+		return "HIGH", fmt.Sprintf("Wildcard principal with role pattern condition (%s) - new roles matching pattern can access", cond.principalArnPattern)
+	}
+
+	// Check for tag-based condition
+	if cond.hasPrincipalTag {
+		return "HIGH", "Wildcard principal with PrincipalTag condition - bypassable via iam:TagRole or sts:TagSession"
+	}
+
+	// Check for ViaService condition
+	if cond.hasViaService {
+		return "MEDIUM", "Wildcard principal with ViaService condition - any principal using the service can access"
+	}
+
+	// Check for CalledVia condition
+	if cond.hasCalledVia {
+		return "MEDIUM", "Wildcard principal with CalledVia condition - service chaining may allow access"
+	}
+
+	// Unknown condition type - flag as MEDIUM for review
+	return "MEDIUM", "Wildcard principal with conditions - review required"
+}
+
+// classifySpecificPrincipalRisk handles specific IAM principal cases
+func classifySpecificPrincipalRisk(principal, accountID string, actions []string, hasKMSWildcard bool, cond ConditionInfo) (string, string) {
+	isRole := strings.Contains(principal, ":role/")
+	isUser := strings.Contains(principal, ":user/")
+
+	// Check if this is kms:* (full KMS access) for non-admin
+	if hasKMSWildcard {
+		if isRole || isUser {
+			return "HIGH", fmt.Sprintf("Principal %s has kms:* (full KMS access including CreateGrant)", principal)
+		}
+	}
+
+	// Check for CreateGrant specifically
+	hasCreateGrant := false
+	for _, a := range actions {
+		if strings.ToLower(a) == "kms:creategrant" {
+			hasCreateGrant = true
+			break
+		}
+	}
+
+	if !hasCreateGrant {
+		return "NONE", ""
+	}
+
+	// CreateGrant with GrantIsForAWSResource=true is the SECURE pattern - INFO only
+	if cond.hasGrantIsForAWSResource && cond.grantIsForAWSResourceVal {
+		return "INFO", fmt.Sprintf("Principal %s has CreateGrant with GrantIsForAWSResource=true (secure pattern)", principal)
+	}
+
+	// CreateGrant with GrantIsForAWSResource=false is explicitly insecure
+	if cond.hasGrantIsForAWSResource && !cond.grantIsForAWSResourceVal {
+		return "CRITICAL", fmt.Sprintf("Principal %s has CreateGrant with GrantIsForAWSResource=false (explicitly allows arbitrary grants)", principal)
+	}
+
+	// CreateGrant without GrantIsForAWSResource condition
+	if isRole || isUser {
+		if !cond.hasConditions {
+			return "CRITICAL", fmt.Sprintf("Principal %s has CreateGrant without conditions - can grant to arbitrary principals", principal)
+		}
+		return "HIGH", fmt.Sprintf("Principal %s has CreateGrant with conditions but missing GrantIsForAWSResource", principal)
+	}
+
+	// Service principals are generally lower risk
+	if strings.HasSuffix(principal, ".amazonaws.com") {
+		return "LOW", fmt.Sprintf("Service principal %s has CreateGrant", principal)
+	}
+
+	return "MEDIUM", fmt.Sprintf("Principal %s has CreateGrant", principal)
 }
 
 // analyzeGrants examines existing grants for overly permissive configurations
 func analyzeGrants(grants []map[string]interface{}, accountID string) []GrantFinding {
 	var findings []GrantFinding
 
-	highRiskOps := map[string]bool{
+	cryptoOps := map[string]bool{
 		"Decrypt":                         true,
 		"Encrypt":                         true,
 		"GenerateDataKey":                 true,
 		"GenerateDataKeyWithoutPlaintext": true,
 		"ReEncryptFrom":                   true,
 		"ReEncryptTo":                     true,
+	}
+
+	delegationOps := map[string]bool{
+		"CreateGrant": true,
+		"RetireGrant": true,
 	}
 
 	for _, grant := range grants {
@@ -447,89 +739,83 @@ func analyzeGrants(grants []map[string]interface{}, accountID string) []GrantFin
 			}
 		}
 
-		hasConstraints := constraints != nil && len(constraints.(map[string]interface{})) > 0
-		isCrossAccount := !strings.Contains(granteePrincipal, accountID) && !strings.HasPrefix(granteePrincipal, "arn:aws:iam::"+accountID)
+		var hasConstraints bool
+		if constraints != nil {
+			if constraintMap, ok := constraints.(map[string]interface{}); ok {
+				hasConstraints = len(constraintMap) > 0
+			}
+		}
 
-		// Check for high-risk operations
-		var riskyOps []string
+		isCrossAccount := !strings.Contains(granteePrincipal, accountID) &&
+			!strings.HasPrefix(granteePrincipal, "arn:aws:iam::"+accountID)
+
+		// Categorize operations
+		var cryptoOperations []string
+		var delegationOperations []string
 		for _, op := range operations {
-			if highRiskOps[op] {
-				riskyOps = append(riskyOps, op)
+			if cryptoOps[op] {
+				cryptoOperations = append(cryptoOperations, op)
+			}
+			if delegationOps[op] {
+				delegationOperations = append(delegationOperations, op)
 			}
 		}
 
-		if len(riskyOps) == 0 {
-			continue
-		}
+		// Check for delegation operations (CreateGrant, RetireGrant)
+		if len(delegationOperations) > 0 {
+			severity := "HIGH"
+			description := fmt.Sprintf("Grant includes delegation operations %v - enables cascading privilege escalation", delegationOperations)
 
-		severity := "MEDIUM"
-		description := fmt.Sprintf("Grant allows %v operations", riskyOps)
-
-		if isCrossAccount {
-			severity = "HIGH"
-			description = fmt.Sprintf("Cross-account grant allows %v operations", riskyOps)
-		}
-
-		if !hasConstraints && len(riskyOps) >= 3 {
-			if severity == "MEDIUM" {
-				severity = "HIGH"
+			if isCrossAccount {
+				severity = "CRITICAL"
+				description = fmt.Sprintf("Cross-account grant with delegation operations %v", delegationOperations)
 			}
-			description = fmt.Sprintf("Unconstrained grant allows broad crypto operations: %v", riskyOps)
+
+			findings = append(findings, GrantFinding{
+				Severity:         severity,
+				GrantID:          grantID,
+				GranteePrincipal: granteePrincipal,
+				Operations:       delegationOperations,
+				HasConstraints:   hasConstraints,
+				IsCrossAccount:   isCrossAccount,
+				Description:      description,
+			})
 		}
 
-		findings = append(findings, GrantFinding{
-			Severity:         severity,
-			GrantID:          grantID,
-			GranteePrincipal: granteePrincipal,
-			Operations:       riskyOps,
-			HasConstraints:   hasConstraints,
-			IsCrossAccount:   isCrossAccount,
-			Description:      description,
-		})
+		// Check for crypto operations
+		if len(cryptoOperations) > 0 {
+			// Cross-account grants with crypto operations are HIGH/CRITICAL
+			if isCrossAccount {
+				findings = append(findings, GrantFinding{
+					Severity:         "CRITICAL",
+					GrantID:          grantID,
+					GranteePrincipal: granteePrincipal,
+					Operations:       cryptoOperations,
+					HasConstraints:   hasConstraints,
+					IsCrossAccount:   true,
+					Description:      fmt.Sprintf("Cross-account grant allows crypto operations %v", cryptoOperations),
+				})
+				continue
+			}
+
+			// Same-account grants: only flag if unconstrained AND broad
+			if !hasConstraints && len(cryptoOperations) >= 2 {
+				findings = append(findings, GrantFinding{
+					Severity:         "HIGH",
+					GrantID:          grantID,
+					GranteePrincipal: granteePrincipal,
+					Operations:       cryptoOperations,
+					HasConstraints:   false,
+					IsCrossAccount:   false,
+					Description:      fmt.Sprintf("Unconstrained grant allows broad crypto operations: %v", cryptoOperations),
+				})
+			}
+			// Constrained same-account grants with crypto ops are INFO (expected pattern)
+			// We don't add a finding for these - they're secure
+		}
 	}
 
 	return findings
-}
-
-// classifyPrincipalRisk determines risk level based on principal configuration
-func classifyPrincipalRisk(principal string, accountID string, hasConditions bool, actions []string) string {
-	// Root account is expected to have full access
-	if principal == fmt.Sprintf("arn:aws:iam::%s:root", accountID) {
-		return "NONE"
-	}
-
-	// Wildcard principal with account condition is HIGH risk
-	if principal == "*" {
-		if hasConditions {
-			return "HIGH" // Any principal in account can CreateGrant
-		}
-		return "CRITICAL" // Any principal anywhere can CreateGrant
-	}
-
-	// Check if actions include kms:* (full KMS access)
-	for _, action := range actions {
-		if action == "kms:*" || action == "*" {
-			if !hasConditions {
-				return "HIGH"
-			}
-			return "MEDIUM"
-		}
-	}
-
-	// Regular IAM principal with CreateGrant
-	if strings.Contains(principal, ":role/") || strings.Contains(principal, ":user/") {
-		if !hasConditions {
-			return "CRITICAL" // Can self-escalate
-		}
-		return "MEDIUM"
-	}
-
-	// Service principals are generally lower risk
-	if strings.HasSuffix(principal, ".amazonaws.com") {
-		return "LOW"
-	}
-
-	return "MEDIUM"
 }
 
 // classifyOverallRisk determines the overall risk level from all findings
@@ -539,10 +825,11 @@ func classifyOverallRisk(policyFindings []PolicyFinding, grantFindings []GrantFi
 
 	riskPriority := map[string]int{
 		"NONE":     0,
-		"LOW":      1,
-		"MEDIUM":   2,
-		"HIGH":     3,
-		"CRITICAL": 4,
+		"INFO":     1,
+		"LOW":      2,
+		"MEDIUM":   3,
+		"HIGH":     4,
+		"CRITICAL": 5,
 	}
 
 	for _, f := range policyFindings {

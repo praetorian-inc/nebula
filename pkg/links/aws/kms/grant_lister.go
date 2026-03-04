@@ -2,6 +2,7 @@ package kms
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 
@@ -9,8 +10,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
+	smithy "github.com/aws/smithy-go"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
+	"github.com/praetorian-inc/nebula/internal/message"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/base"
 	"github.com/praetorian-inc/nebula/pkg/types"
 )
@@ -38,12 +41,16 @@ func (l *KMSGrantLister) Metadata() *cfg.Metadata {
 func (l *KMSGrantLister) Process(resource types.EnrichedResourceDescription) error {
 	// Only process KMS keys
 	if resource.TypeName != "AWS::KMS::Key" {
+		slog.Debug("Skipping non-KMS key resource", "type", resource.TypeName, "id", resource.Identifier)
 		return nil
 	}
 
 	config, err := l.GetConfigWithRuntimeArgs(resource.Region)
 	if err != nil {
-		slog.Warn("Could not set up client config for KMS grant lister", "error", err)
+		slog.Error("Failed to create AWS config for KMS grant lister",
+			"region", resource.Region,
+			"keyId", resource.Identifier,
+			"error", err)
 		return nil
 	}
 
@@ -54,11 +61,17 @@ func (l *KMSGrantLister) Process(resource types.EnrichedResourceDescription) err
 	switch props := resource.Properties.(type) {
 	case string:
 		if err := json.Unmarshal([]byte(props), &propsMap); err != nil {
+			slog.Debug("Failed to parse properties JSON, using empty map",
+				"keyId", resource.Identifier,
+				"error", err)
 			propsMap = make(map[string]interface{})
 		}
 	case map[string]interface{}:
 		propsMap = props
 	default:
+		slog.Debug("Properties not a map or string, using empty map",
+			"keyId", resource.Identifier,
+			"type", resource.Properties)
 		propsMap = make(map[string]interface{})
 	}
 
@@ -79,13 +92,41 @@ func (l *KMSGrantLister) Process(resource types.EnrichedResourceDescription) err
 		KeyId: aws.String(keyID),
 	})
 	if err != nil {
-		slog.Warn("Failed to describe KMS key", "id", keyID, "error", err)
+		if isKMSAccessDeniedError(err) {
+			message.Warning("Access denied describing KMS key %s in %s - skipping grant enumeration",
+				keyID, resource.Region)
+			slog.Warn("Access denied for DescribeKey - likely restricted key policy",
+				"keyId", keyID,
+				"region", resource.Region,
+				"error", err)
+		} else if isKMSKeyNotFoundError(err) {
+			slog.Debug("KMS key not found, may have been deleted",
+				"keyId", keyID,
+				"region", resource.Region)
+		} else {
+			slog.Error("Failed to describe KMS key",
+				"keyId", keyID,
+				"region", resource.Region,
+				"error", err)
+		}
 		return nil
 	}
 
 	// Skip AWS managed keys (they cannot have custom grants)
 	if describeOutput.KeyMetadata.KeyManager == kmstypes.KeyManagerTypeAws {
-		slog.Debug("Skipping AWS managed key", "id", keyID)
+		slog.Debug("Skipping AWS managed key - cannot have custom grants",
+			"keyId", keyID,
+			"region", resource.Region)
+		return nil
+	}
+
+	// Skip disabled or pending deletion keys
+	keyState := describeOutput.KeyMetadata.KeyState
+	if keyState == kmstypes.KeyStateDisabled || keyState == kmstypes.KeyStatePendingDeletion {
+		slog.Debug("Skipping key in non-active state",
+			"keyId", keyID,
+			"state", keyState,
+			"region", resource.Region)
 		return nil
 	}
 
@@ -93,6 +134,8 @@ func (l *KMSGrantLister) Process(resource types.EnrichedResourceDescription) err
 	if keyArn == "" {
 		keyArn = aws.ToString(describeOutput.KeyMetadata.Arn)
 	}
+
+	// message.Info("Listing grants for KMS key %s in %s", keyID, resource.Region)
 
 	// List all grants on this key
 	return l.listAndSendGrants(client, keyID, keyArn, resource.Region, resource.AccountId)
@@ -102,26 +145,52 @@ func (l *KMSGrantLister) Process(resource types.EnrichedResourceDescription) err
 func (l *KMSGrantLister) listAndSendGrants(client *kms.Client, keyID, keyArn, region, accountID string) error {
 	paginator := kms.NewListGrantsPaginator(client, &kms.ListGrantsInput{
 		KeyId: aws.String(keyID),
+		Limit: aws.Int32(100), // Max allowed by AWS API to reduce requests
 	})
 
 	var grantCount int
+	var pageCount int
 	for paginator.HasMorePages() {
+		pageCount++
 		output, err := paginator.NextPage(l.Context())
 		if err != nil {
-			slog.Warn("Failed to list KMS grants", "keyId", keyID, "error", err)
+			if isKMSAccessDeniedError(err) {
+				message.Warning("Access denied listing grants for KMS key %s in %s", keyID, region)
+				slog.Warn("Access denied for ListGrants - requires kms:ListGrants permission",
+					"keyId", keyID,
+					"region", region,
+					"error", err)
+			} else {
+				slog.Error("Failed to list KMS grants",
+					"keyId", keyID,
+					"region", region,
+					"page", pageCount,
+					"error", err)
+			}
 			return nil
 		}
 
 		for _, grant := range output.Grants {
 			grantResource := l.buildGrantResource(grant, keyID, keyArn, region, accountID)
 			if err := l.Send(grantResource); err != nil {
-				slog.Warn("Failed to send KMS grant", "grantId", aws.ToString(grant.GrantId), "error", err)
+				slog.Error("Failed to send KMS grant resource",
+					"grantId", aws.ToString(grant.GrantId),
+					"keyId", keyID,
+					"error", err)
+				continue
 			}
 			grantCount++
 		}
 	}
 
-	slog.Debug("Listed KMS grants", "keyId", keyID, "count", grantCount)
+	if grantCount > 0 {
+		message.Info("Found %d grant(s) on KMS key %s in %s", grantCount, keyID, region)
+	}
+	slog.Debug("Completed grant enumeration",
+		"keyId", keyID,
+		"region", region,
+		"grantCount", grantCount,
+		"pages", pageCount)
 	return nil
 }
 
@@ -196,4 +265,45 @@ func extractAccountFromArn(arnStr string) string {
 		return parts[4]
 	}
 	return ""
+}
+
+// isKMSAccessDeniedError checks if the error is due to access denied (permission issue)
+func isKMSAccessDeniedError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for AWS API error
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		code := apiErr.ErrorCode()
+		return code == "AccessDeniedException" ||
+			code == "AccessDenied" ||
+			strings.Contains(code, "AccessDenied")
+	}
+
+	// Fallback to string matching
+	errorStr := err.Error()
+	return strings.Contains(errorStr, "AccessDenied") ||
+		strings.Contains(errorStr, "access denied") ||
+		strings.Contains(errorStr, "not authorized")
+}
+
+// isKMSKeyNotFoundError checks if the error indicates the key was not found
+func isKMSKeyNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		code := apiErr.ErrorCode()
+		return code == "NotFoundException" ||
+			code == "InvalidKeyId" ||
+			strings.HasPrefix(code, "InvalidKey")
+	}
+
+	errorStr := err.Error()
+	return strings.Contains(errorStr, "NotFoundException") ||
+		strings.Contains(errorStr, "does not exist")
 }

@@ -1,6 +1,7 @@
 package kms
 
 import (
+	"errors"
 	"testing"
 
 	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
@@ -326,4 +327,91 @@ func TestBuildGrantResource(t *testing.T) {
 // Helper function to create string pointers
 func strPtr(s string) *string {
 	return &s
+}
+
+func TestIsKMSAccessDeniedError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "Nil error",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "Generic error",
+			err:      errors.New("something went wrong"),
+			expected: false,
+		},
+		{
+			name:     "Access denied in message",
+			err:      errors.New("operation failed: AccessDeniedException: User is not authorized"),
+			expected: true,
+		},
+		{
+			name:     "access denied lowercase",
+			err:      errors.New("access denied to resource"),
+			expected: true,
+		},
+		{
+			name:     "not authorized message",
+			err:      errors.New("User is not authorized to perform this action"),
+			expected: true,
+		},
+		{
+			name:     "Network error",
+			err:      errors.New("connection timeout"),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isKMSAccessDeniedError(tt.err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestIsKMSKeyNotFoundError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "Nil error",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "Generic error",
+			err:      errors.New("something went wrong"),
+			expected: false,
+		},
+		{
+			name:     "NotFoundException in message",
+			err:      errors.New("NotFoundException: Key not found"),
+			expected: true,
+		},
+		{
+			name:     "Does not exist message",
+			err:      errors.New("The specified key does not exist"),
+			expected: true,
+		},
+		{
+			name:     "Access denied - should not match",
+			err:      errors.New("AccessDeniedException: Not authorized"),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isKMSKeyNotFoundError(tt.err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
 }

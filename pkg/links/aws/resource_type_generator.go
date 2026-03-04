@@ -3,6 +3,7 @@ package aws
 import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
+	"github.com/praetorian-inc/tabularium/pkg/model/model"
 )
 
 // AwsResourceTypeGeneratorLink generates resource types based on scan type
@@ -37,7 +38,7 @@ func (l *AwsResourceTypeGeneratorLink) Process(input any) error {
 	l.Logger.Info("Generating resource types", "scan_type", scanType, "count", len(resourceTypes))
 
 	for _, resourceType := range resourceTypes {
-		l.Send(resourceType)
+		l.Send(model.CloudResourceType(resourceType))
 	}
 
 	return nil

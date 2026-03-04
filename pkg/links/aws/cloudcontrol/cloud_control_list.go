@@ -169,7 +169,7 @@ func (a *AWSCloudControl) processError(resourceType, region string, err error) (
 		// Some resource types like AWS::KMS::Grant are not supported by CloudControl
 		// but can be listed via native APIs
 		if hasNativeAPIFallback(resourceType) {
-			slog.Info("CloudControl type not found, falling back to native API",
+			slog.Debug("CloudControl type not found, falling back to native API",
 				"type", resourceType, "region", region)
 			return nil, true, true // Signal to use fallback
 		}
@@ -272,159 +272,95 @@ func handleKMSFallback(a *AWSCloudControl, resourceType, region string, config a
 // This function handles partial access scenarios gracefully:
 // - ListKeys only requires kms:ListKeys permission
 // - DescribeKey may fail for individual keys with restrictive key policies
-// - Keys that cannot be described are still emitted with minimal properties (for AWS::KMS::Key only)
+// - Keys that cannot be described are skipped for AWS::KMS::ReplicaKey (cannot verify type)
 // - Both customer-managed and AWS-managed keys are included in the output
 //
 // IMPORTANT: This function filters keys based on resourceType to match CloudControl semantics:
 // - AWS::KMS::Key: emits single-region keys and multi-region PRIMARY keys
 // - AWS::KMS::ReplicaKey: emits only multi-region REPLICA keys
-// When DescribeKey fails, we cannot determine MultiRegionKeyType, so:
-// - For AWS::KMS::Key: emit with minimal properties (safe default, most keys are not replicas)
-// - For AWS::KMS::ReplicaKey: skip the key (cannot verify it's actually a replica)
 // See LAB-1354 for known limitation with partial fallback coverage.
 func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, accountId string) {
-	paginator := kms.NewListKeysPaginator(client, &kms.ListKeysInput{})
+	keys, _, skippedKeys := a.collectEligibleKMSKeys(client, region)
 
 	var keyCount int
-	var describeFailedCount int
 
-	for paginator.HasMorePages() {
-		output, err := paginator.NextPage(a.Context())
+	for _, key := range keys {
+		// Determine if this key is a multi-region replica
+		isReplica := false
+		if cfg := key.Metadata.MultiRegionConfiguration; cfg != nil {
+			isReplica = cfg.MultiRegionKeyType == kmstypes.MultiRegionKeyTypeReplica
+		}
+
+		// Filter based on requested resource type
+		// AWS::KMS::ReplicaKey should only include multi-region replicas
+		// AWS::KMS::Key should include everything except replicas
+		if resourceType == "AWS::KMS::ReplicaKey" && !isReplica {
+			continue
+		}
+		if resourceType == "AWS::KMS::Key" && isReplica {
+			continue
+		}
+
+		// Build properties with full metadata
+		properties := map[string]interface{}{
+			"KeyId": key.KeyID,
+			"Arn":   key.KeyArn,
+		}
+
+		properties["KeyState"] = string(key.Metadata.KeyState)
+		properties["KeyUsage"] = string(key.Metadata.KeyUsage)
+		properties["KeySpec"] = string(key.Metadata.KeySpec)
+		properties["Origin"] = string(key.Metadata.Origin)
+		properties["Enabled"] = key.Metadata.Enabled
+		properties["CreationDate"] = key.Metadata.CreationDate
+		if key.Metadata.Description != nil {
+			properties["Description"] = aws.ToString(key.Metadata.Description)
+		}
+		properties["MultiRegion"] = key.Metadata.MultiRegion
+		properties["KeyManager"] = string(key.Metadata.KeyManager)
+
+		// For multi-region keys, include configuration
+		if key.Metadata.MultiRegion != nil && *key.Metadata.MultiRegion {
+			if key.Metadata.MultiRegionConfiguration != nil {
+				properties["MultiRegionKeyType"] = string(key.Metadata.MultiRegionConfiguration.MultiRegionKeyType)
+				if key.Metadata.MultiRegionConfiguration.PrimaryKey != nil {
+					properties["PrimaryKeyArn"] = aws.ToString(key.Metadata.MultiRegionConfiguration.PrimaryKey.Arn)
+					properties["PrimaryKeyRegion"] = aws.ToString(key.Metadata.MultiRegionConfiguration.PrimaryKey.Region)
+				}
+			}
+		}
+
+		// Convert properties to JSON string (CloudControl format)
+		propsJSON, err := json.Marshal(properties)
 		if err != nil {
-			// Log with context about partial progress if any keys were collected
-			if keyCount > 0 {
-				slog.Error("Failed to list KMS keys via native API after partial success",
-					"region", region, "error", err, "keysCollectedBeforeFailure", keyCount)
-			} else {
-				slog.Error("Failed to list KMS keys via native API", "region", region, "error", err)
-			}
-			return
+			slog.Warn("Failed to marshal KMS key properties", "id", key.KeyID, "error", err)
+			continue
 		}
 
-		for _, key := range output.Keys {
-			keyID := aws.ToString(key.KeyId)
-			keyArnStr := aws.ToString(key.KeyArn)
-
-			// Get key metadata to build properties
-			describeOutput, err := client.DescribeKey(a.Context(), &kms.DescribeKeyInput{
-				KeyId: aws.String(keyID),
-			})
-
-			// If we can't describe the key, handle based on resource type
-			// This handles keys with restrictive key policies that deny DescribeKey
-			if err != nil {
-				describeFailedCount++
-
-				// For ReplicaKey requests, we cannot verify the key is actually a replica
-				// without DescribeKey metadata, so skip it to avoid misclassification
-				if resourceType == "AWS::KMS::ReplicaKey" {
-					slog.Debug("Cannot classify KMS key as ReplicaKey without DescribeKey metadata, skipping",
-						"keyId", keyID, "region", region, "error", err)
-					continue
-				}
-
-				// For AWS::KMS::Key, emit with minimal properties (most keys are not replicas)
-				slog.Debug("Cannot describe KMS key, emitting with minimal properties",
-					"keyId", keyID, "region", region, "error", err)
-
-				properties := map[string]interface{}{
-					"KeyId":             keyID,
-					"Arn":               keyArnStr,
-					"DescribeKeyFailed": true, // Flag to indicate incomplete metadata
-				}
-				propsJSON, marshalErr := json.Marshal(properties)
-				if marshalErr != nil {
-					slog.Warn("Failed to marshal minimal KMS key properties", "keyId", keyID, "error", marshalErr)
-					continue
-				}
-				erd := types.NewEnrichedResourceDescription(keyID, resourceType, region, accountId, string(propsJSON))
-				a.sendResource(region, &erd)
-				keyCount++
-				continue
-			}
-
-			if describeOutput.KeyMetadata == nil {
-				slog.Debug("DescribeKey returned nil metadata, skipping", "keyId", keyID)
-				continue
-			}
-
-			// Determine if this key is a multi-region replica
-			isReplica := false
-			if cfg := describeOutput.KeyMetadata.MultiRegionConfiguration; cfg != nil {
-				isReplica = cfg.MultiRegionKeyType == kmstypes.MultiRegionKeyTypeReplica
-			}
-
-			// Filter based on requested resource type
-			// AWS::KMS::ReplicaKey should only include multi-region replicas
-			// AWS::KMS::Key should include everything except replicas
-			if resourceType == "AWS::KMS::ReplicaKey" && !isReplica {
-				continue
-			}
-			if resourceType == "AWS::KMS::Key" && isReplica {
-				continue
-			}
-
-			// Build properties with full metadata
-			properties := map[string]interface{}{
-				"KeyId": keyID,
-				"Arn":   keyArnStr,
-			}
-
-			properties["KeyState"] = string(describeOutput.KeyMetadata.KeyState)
-			properties["KeyUsage"] = string(describeOutput.KeyMetadata.KeyUsage)
-			properties["KeySpec"] = string(describeOutput.KeyMetadata.KeySpec)
-			properties["Origin"] = string(describeOutput.KeyMetadata.Origin)
-			properties["Enabled"] = describeOutput.KeyMetadata.Enabled
-			properties["CreationDate"] = describeOutput.KeyMetadata.CreationDate
-			if describeOutput.KeyMetadata.Description != nil {
-				properties["Description"] = aws.ToString(describeOutput.KeyMetadata.Description)
-			}
-			properties["MultiRegion"] = describeOutput.KeyMetadata.MultiRegion
-			properties["KeyManager"] = string(describeOutput.KeyMetadata.KeyManager)
-
-			// For multi-region keys, include configuration
-			if describeOutput.KeyMetadata.MultiRegion != nil && *describeOutput.KeyMetadata.MultiRegion {
-				if describeOutput.KeyMetadata.MultiRegionConfiguration != nil {
-					properties["MultiRegionKeyType"] = string(describeOutput.KeyMetadata.MultiRegionConfiguration.MultiRegionKeyType)
-					if describeOutput.KeyMetadata.MultiRegionConfiguration.PrimaryKey != nil {
-						properties["PrimaryKeyArn"] = aws.ToString(describeOutput.KeyMetadata.MultiRegionConfiguration.PrimaryKey.Arn)
-						properties["PrimaryKeyRegion"] = aws.ToString(describeOutput.KeyMetadata.MultiRegionConfiguration.PrimaryKey.Region)
-					}
-				}
-			}
-
-			// Convert properties to JSON string (CloudControl format)
-			propsJSON, err := json.Marshal(properties)
-			if err != nil {
-				slog.Warn("Failed to marshal KMS key properties", "id", keyID, "error", err)
-				continue
-			}
-
-			// Parse ARN for region info
-			var erdRegion string
-			if parsedArn, err := arn.Parse(keyArnStr); err == nil {
-				erdRegion = parsedArn.Region
-			} else {
-				erdRegion = region
-			}
-
-			erd := types.NewEnrichedResourceDescription(
-				keyID,
-				resourceType,
-				erdRegion,
-				accountId,
-				string(propsJSON),
-			)
-			a.sendResource(region, &erd)
-			keyCount++
+		// Parse ARN for region info
+		var erdRegion string
+		if parsedArn, err := arn.Parse(key.KeyArn); err == nil {
+			erdRegion = parsedArn.Region
+		} else {
+			erdRegion = region
 		}
+
+		erd := types.NewEnrichedResourceDescription(
+			key.KeyID,
+			resourceType,
+			erdRegion,
+			accountId,
+			string(propsJSON),
+		)
+		a.sendResource(region, &erd)
+		keyCount++
 	}
 
 	// Log summary including partial access info
-	if describeFailedCount > 0 {
+	if skippedKeys > 0 {
 		slog.Info("Listed KMS keys via native API with partial access",
 			"region", region, "type", resourceType,
-			"totalKeys", keyCount, "describeKeyFailed", describeFailedCount)
+			"totalKeys", keyCount, "describeKeyFailed", skippedKeys)
 	} else {
 		slog.Debug("Listed KMS keys via native API", "region", region, "type", resourceType, "count", keyCount)
 	}
@@ -498,41 +434,46 @@ func (a *AWSCloudControl) listKMSAliases(client *kms.Client, region, accountId s
 		"region", region, "count", aliasCount, "skippedAwsManaged", skippedAwsManaged)
 }
 
-// listKMSGrants lists KMS grants using the native KMS API.
-// AWS::KMS::Grant is not supported by CloudControl, so we always use native API.
-// This function first lists all KMS keys, then enumerates grants on each key.
+// kmsKeyInfo holds key information collected during key enumeration
+type kmsKeyInfo struct {
+	KeyID    string
+	KeyArn   string
+	Metadata *kmstypes.KeyMetadata
+}
+
+// collectEligibleKMSKeys lists all KMS keys and returns customer-managed, enabled keys
+// with their metadata. This function is reused by both listKMSKeys and listKMSGrants
+// to avoid duplicate API calls.
 //
-// Grant enumeration skips:
-// - AWS-managed keys (cannot have custom grants)
-// - Disabled or pending deletion keys
-// - Keys where DescribeKey fails (restrictive key policies)
-func (a *AWSCloudControl) listKMSGrants(client *kms.Client, region, accountId string) {
-	// First, list all KMS keys
-	keyPaginator := kms.NewListKeysPaginator(client, &kms.ListKeysInput{})
+// Returns:
+// - keys: slice of eligible key info (customer-managed, not disabled/pending deletion)
+// - totalKeys: total number of keys seen
+// - skippedKeys: number of keys skipped (describe failed)
+func (a *AWSCloudControl) collectEligibleKMSKeys(client *kms.Client, region string) (keys []kmsKeyInfo, totalKeys, skippedKeys int) {
+	paginator := kms.NewListKeysPaginator(client, &kms.ListKeysInput{})
 
-	var totalKeyCount int
-	var totalGrantCount int
-	var skippedKeys int
-
-	for keyPaginator.HasMorePages() {
-		keyOutput, err := keyPaginator.NextPage(a.Context())
+	for paginator.HasMorePages() {
+		output, err := paginator.NextPage(a.Context())
 		if err != nil {
-			slog.Error("Failed to list KMS keys for grant enumeration",
-				"region", region, "error", err)
-			return
+			if totalKeys > 0 {
+				slog.Error("Failed to list KMS keys via native API after partial success",
+					"region", region, "error", err, "keysCollectedBeforeFailure", totalKeys)
+			} else {
+				slog.Error("Failed to list KMS keys via native API", "region", region, "error", err)
+			}
+			return keys, totalKeys, skippedKeys
 		}
 
-		for _, key := range keyOutput.Keys {
-			totalKeyCount++
+		for _, key := range output.Keys {
+			totalKeys++
 			keyID := aws.ToString(key.KeyId)
 			keyArnStr := aws.ToString(key.KeyArn)
 
-			// Describe the key to check if it's AWS managed or disabled
 			describeOutput, err := client.DescribeKey(a.Context(), &kms.DescribeKeyInput{
 				KeyId: aws.String(keyID),
 			})
 			if err != nil {
-				slog.Debug("Cannot describe KMS key for grant enumeration, skipping",
+				slog.Debug("Cannot describe KMS key, skipping",
 					"keyId", keyID, "region", region, "error", err)
 				skippedKeys++
 				continue
@@ -543,31 +484,57 @@ func (a *AWSCloudControl) listKMSGrants(client *kms.Client, region, accountId st
 				continue
 			}
 
-			// Skip AWS managed keys (they cannot have custom grants)
-			if describeOutput.KeyMetadata.KeyManager == kmstypes.KeyManagerTypeAws {
-				continue
-			}
-
-			// Skip disabled or pending deletion keys
-			keyState := describeOutput.KeyMetadata.KeyState
-			if keyState == kmstypes.KeyStateDisabled || keyState == kmstypes.KeyStatePendingDeletion {
-				continue
-			}
-
-			// List grants for this key
-			grantCount := a.listGrantsForKey(client, keyID, keyArnStr, region, accountId)
-			totalGrantCount += grantCount
+			keys = append(keys, kmsKeyInfo{
+				KeyID:    keyID,
+				KeyArn:   keyArnStr,
+				Metadata: describeOutput.KeyMetadata,
+			})
 		}
+	}
+
+	return keys, totalKeys, skippedKeys
+}
+
+// listKMSGrants lists KMS grants using the native KMS API.
+// AWS::KMS::Grant is not supported by CloudControl, so we always use native API.
+// This function reuses collectEligibleKMSKeys to get keys, then enumerates grants on each.
+//
+// Grant enumeration skips:
+// - AWS-managed keys (cannot have custom grants)
+// - Disabled or pending deletion keys
+// - Keys where DescribeKey fails (restrictive key policies)
+func (a *AWSCloudControl) listKMSGrants(client *kms.Client, region, accountId string) {
+	keys, totalKeys, skippedKeys := a.collectEligibleKMSKeys(client, region)
+
+	var totalGrantCount int
+	var eligibleKeyCount int
+
+	for _, key := range keys {
+		// Skip AWS managed keys (they cannot have custom grants)
+		if key.Metadata.KeyManager == kmstypes.KeyManagerTypeAws {
+			continue
+		}
+
+		// Skip disabled or pending deletion keys
+		keyState := key.Metadata.KeyState
+		if keyState == kmstypes.KeyStateDisabled || keyState == kmstypes.KeyStatePendingDeletion {
+			continue
+		}
+
+		eligibleKeyCount++
+		grantCount := a.listGrantsForKey(client, key.KeyID, key.KeyArn, region, accountId)
+		totalGrantCount += grantCount
 	}
 
 	if totalGrantCount > 0 {
 		message.Info("Found %d KMS grant(s) across %d key(s) in %s",
-			totalGrantCount, totalKeyCount-skippedKeys, region)
+			totalGrantCount, eligibleKeyCount, region)
 	}
 	slog.Debug("Listed KMS grants via native API",
 		"region", region,
-		"totalKeys", totalKeyCount,
+		"totalKeys", totalKeys,
 		"skippedKeys", skippedKeys,
+		"eligibleKeys", eligibleKeyCount,
 		"totalGrants", totalGrantCount)
 }
 
@@ -1125,7 +1092,7 @@ func (a *AWSCloudControl) SupportedResourceTypes() []model.CloudResourceType {
 		model.CloudResourceType("AWS::KinesisAnalyticsV2::Application"),
 		model.CloudResourceType("AWS::KinesisFirehose::DeliveryStream"),
 		model.CloudResourceType("AWS::KMS::Alias"),
-		model.CloudResourceType("AWS::KMS::Grant"),
+		model.CloudResourceType("AWS::KMS::Grant"), // Custom: not supported by CloudControl, uses native KMS API
 		model.CloudResourceType("AWS::KMS::Key"),
 		model.CloudResourceType("AWS::KMS::ReplicaKey"),
 		model.CloudResourceType("AWS::LakeFormation::DataCellsFilter"),

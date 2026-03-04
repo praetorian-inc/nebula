@@ -165,6 +165,14 @@ func (a *AWSCloudControl) processError(resourceType, region string, err error) (
 	errMsg := err.Error()
 	switch {
 	case strings.Contains(errMsg, "TypeNotFoundException"):
+		// Check if a native API fallback exists for this resource type
+		// Some resource types like AWS::KMS::Grant are not supported by CloudControl
+		// but can be listed via native APIs
+		if hasNativeAPIFallback(resourceType) {
+			slog.Info("CloudControl type not found, falling back to native API",
+				"type", resourceType, "region", region)
+			return nil, true, true // Signal to use fallback
+		}
 		return fmt.Errorf("%s is not available in region %s", resourceType, region), true, false
 
 	case strings.Contains(errMsg, "is not authorized to perform") || strings.Contains(errMsg, "AccessDeniedException"):
@@ -251,6 +259,8 @@ func handleKMSFallback(a *AWSCloudControl, resourceType, region string, config a
 		a.listKMSKeys(client, resourceType, region, accountId)
 	case "AWS::KMS::Alias":
 		a.listKMSAliases(client, region, accountId)
+	case "AWS::KMS::Grant":
+		a.listKMSGrants(client, region, accountId)
 	default:
 		slog.Warn("No KMS fallback implemented for resource type", "type", resourceType)
 	}
@@ -486,6 +496,173 @@ func (a *AWSCloudControl) listKMSAliases(client *kms.Client, region, accountId s
 
 	slog.Debug("Listed KMS aliases via native API",
 		"region", region, "count", aliasCount, "skippedAwsManaged", skippedAwsManaged)
+}
+
+// listKMSGrants lists KMS grants using the native KMS API.
+// AWS::KMS::Grant is not supported by CloudControl, so we always use native API.
+// This function first lists all KMS keys, then enumerates grants on each key.
+//
+// Grant enumeration skips:
+// - AWS-managed keys (cannot have custom grants)
+// - Disabled or pending deletion keys
+// - Keys where DescribeKey fails (restrictive key policies)
+func (a *AWSCloudControl) listKMSGrants(client *kms.Client, region, accountId string) {
+	// First, list all KMS keys
+	keyPaginator := kms.NewListKeysPaginator(client, &kms.ListKeysInput{})
+
+	var totalKeyCount int
+	var totalGrantCount int
+	var skippedKeys int
+
+	for keyPaginator.HasMorePages() {
+		keyOutput, err := keyPaginator.NextPage(a.Context())
+		if err != nil {
+			slog.Error("Failed to list KMS keys for grant enumeration",
+				"region", region, "error", err)
+			return
+		}
+
+		for _, key := range keyOutput.Keys {
+			totalKeyCount++
+			keyID := aws.ToString(key.KeyId)
+			keyArnStr := aws.ToString(key.KeyArn)
+
+			// Describe the key to check if it's AWS managed or disabled
+			describeOutput, err := client.DescribeKey(a.Context(), &kms.DescribeKeyInput{
+				KeyId: aws.String(keyID),
+			})
+			if err != nil {
+				slog.Debug("Cannot describe KMS key for grant enumeration, skipping",
+					"keyId", keyID, "region", region, "error", err)
+				skippedKeys++
+				continue
+			}
+
+			if describeOutput.KeyMetadata == nil {
+				skippedKeys++
+				continue
+			}
+
+			// Skip AWS managed keys (they cannot have custom grants)
+			if describeOutput.KeyMetadata.KeyManager == kmstypes.KeyManagerTypeAws {
+				continue
+			}
+
+			// Skip disabled or pending deletion keys
+			keyState := describeOutput.KeyMetadata.KeyState
+			if keyState == kmstypes.KeyStateDisabled || keyState == kmstypes.KeyStatePendingDeletion {
+				continue
+			}
+
+			// List grants for this key
+			grantCount := a.listGrantsForKey(client, keyID, keyArnStr, region, accountId)
+			totalGrantCount += grantCount
+		}
+	}
+
+	if totalGrantCount > 0 {
+		message.Info("Found %d KMS grant(s) across %d key(s) in %s",
+			totalGrantCount, totalKeyCount-skippedKeys, region)
+	}
+	slog.Debug("Listed KMS grants via native API",
+		"region", region,
+		"totalKeys", totalKeyCount,
+		"skippedKeys", skippedKeys,
+		"totalGrants", totalGrantCount)
+}
+
+// listGrantsForKey lists all grants for a specific KMS key
+func (a *AWSCloudControl) listGrantsForKey(client *kms.Client, keyID, keyArn, region, accountId string) int {
+	grantPaginator := kms.NewListGrantsPaginator(client, &kms.ListGrantsInput{
+		KeyId: aws.String(keyID),
+		Limit: aws.Int32(100), // Max allowed by AWS API to reduce requests
+	})
+
+	var grantCount int
+
+	for grantPaginator.HasMorePages() {
+		grantOutput, err := grantPaginator.NextPage(a.Context())
+		if err != nil {
+			// Access denied is common for keys with restrictive policies
+			if strings.Contains(err.Error(), "AccessDenied") {
+				slog.Debug("Access denied listing grants for KMS key",
+					"keyId", keyID, "region", region)
+			} else {
+				slog.Warn("Failed to list grants for KMS key",
+					"keyId", keyID, "region", region, "error", err)
+			}
+			return grantCount
+		}
+
+		for _, grant := range grantOutput.Grants {
+			grantID := aws.ToString(grant.GrantId)
+
+			// Build grant properties
+			properties := map[string]interface{}{
+				"GrantId":          grantID,
+				"KeyId":            keyID,
+				"KeyArn":           keyArn,
+				"GranteePrincipal": aws.ToString(grant.GranteePrincipal),
+				"Operations":       convertKMSGrantOperations(grant.Operations),
+			}
+
+			if grant.RetiringPrincipal != nil {
+				properties["RetiringPrincipal"] = aws.ToString(grant.RetiringPrincipal)
+			}
+			if grant.Name != nil {
+				properties["Name"] = aws.ToString(grant.Name)
+			}
+			if grant.IssuingAccount != nil {
+				properties["IssuingAccount"] = aws.ToString(grant.IssuingAccount)
+			}
+			if grant.CreationDate != nil {
+				properties["CreationDate"] = grant.CreationDate.String()
+			}
+			if grant.Constraints != nil {
+				properties["Constraints"] = convertKMSGrantConstraints(grant.Constraints)
+			}
+
+			propsJSON, err := json.Marshal(properties)
+			if err != nil {
+				slog.Warn("Failed to marshal KMS grant properties",
+					"grantId", grantID, "keyId", keyID, "error", err)
+				continue
+			}
+
+			erd := types.NewEnrichedResourceDescription(
+				grantID,
+				"AWS::KMS::Grant",
+				region,
+				accountId,
+				string(propsJSON),
+			)
+			a.sendResource(region, &erd)
+			grantCount++
+		}
+	}
+
+	return grantCount
+}
+
+// convertKMSGrantOperations converts KMS grant operations to string slice
+func convertKMSGrantOperations(ops []kmstypes.GrantOperation) []string {
+	var result []string
+	for _, op := range ops {
+		result = append(result, string(op))
+	}
+	return result
+}
+
+// convertKMSGrantConstraints converts grant constraints to a map
+func convertKMSGrantConstraints(c *kmstypes.GrantConstraints) map[string]interface{} {
+	result := make(map[string]interface{})
+	if c.EncryptionContextEquals != nil {
+		result["EncryptionContextEquals"] = c.EncryptionContextEquals
+	}
+	if c.EncryptionContextSubset != nil {
+		result["EncryptionContextSubset"] = c.EncryptionContextSubset
+	}
+	return result
 }
 
 func (a *AWSCloudControl) resourceDescriptionToERD(resource cctypes.ResourceDescription, rType, accountId, region string) *types.EnrichedResourceDescription {
@@ -948,6 +1125,7 @@ func (a *AWSCloudControl) SupportedResourceTypes() []model.CloudResourceType {
 		model.CloudResourceType("AWS::KinesisAnalyticsV2::Application"),
 		model.CloudResourceType("AWS::KinesisFirehose::DeliveryStream"),
 		model.CloudResourceType("AWS::KMS::Alias"),
+		model.CloudResourceType("AWS::KMS::Grant"),
 		model.CloudResourceType("AWS::KMS::Key"),
 		model.CloudResourceType("AWS::KMS::ReplicaKey"),
 		model.CloudResourceType("AWS::LakeFormation::DataCellsFilter"),

@@ -1,0 +1,27 @@
+name: Privesc Method 57 - CloudFormation CreateStackSet
+description: Creates CAN_PRIVESC relationship when a principal can pass roles to CloudFormation and create stack sets with instances
+impactedServices:
+  - IAM
+  - CloudFormation
+severity: High
+order: 154
+cypher: |
+  MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
+  WHERE principal.admin IS NULL
+    AND 'cloudformation.amazonaws.com' IN targetRole.trustedServices
+    AND EXISTS((principal)-[:CLOUDFORMATION_CREATESTACKSET]->())
+    AND EXISTS((principal)-[:CLOUDFORMATION_CREATESTACKINSTANCES]->())
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-57-CloudFormation-CreateStackSet",
+    privesc.requires = ["iam:PassRole", "cloudformation:CreateStackSet", "cloudformation:CreateStackInstances"],
+    privesc.service = "CloudFormation",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-57-CloudFormation-CreateStackSet"
+      THEN privesc.method + ",Method-57-CloudFormation-CreateStackSet"
+      ELSE privesc.method
+    END

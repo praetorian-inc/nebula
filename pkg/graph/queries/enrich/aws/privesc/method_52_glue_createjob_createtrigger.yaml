@@ -1,0 +1,27 @@
+name: Privesc Method 52 - Glue CreateJob + CreateTrigger
+description: Creates CAN_PRIVESC relationship when a principal can create Glue jobs with privileged service roles and trigger them via auto-start triggers
+impactedServices:
+  - IAM
+  - Glue
+severity: High
+order: 149
+cypher: |
+  MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
+  WHERE principal.admin IS NULL
+    AND 'glue.amazonaws.com' IN targetRole.trustedServices
+    AND EXISTS((principal)-[:GLUE_CREATEJOB]->())
+    AND EXISTS((principal)-[:GLUE_CREATETRIGGER]->())
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-52-Glue-CreateJob-CreateTrigger",
+    privesc.requires = ["iam:PassRole", "glue:CreateJob", "glue:CreateTrigger"],
+    privesc.service = "Glue",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-52-Glue-CreateJob-CreateTrigger"
+      THEN privesc.method + ",Method-52-Glue-CreateJob-CreateTrigger"
+      ELSE privesc.method
+    END

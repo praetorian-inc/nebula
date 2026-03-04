@@ -1,0 +1,42 @@
+name: Privesc Method 55 - Lambda UpdateFunctionCode + AddPermission
+description: Creates CAN_PRIVESC relationship when a principal can update Lambda function code AND grant invoke access to an external principal via the function's resource-based policy
+impactedServices:
+  - Lambda
+severity: High
+order: 152
+cypher: |
+  MATCH (principal)-[:LAMBDA_UPDATEFUNCTIONCODE]->(lambda:AWS_Lambda_Function)
+  WHERE principal.admin IS NULL
+    AND EXISTS((principal)-[:LAMBDA_ADDPERMISSION]->(lambda))
+
+  // Extract Role from top-level property or from _raw_properties JSON
+  WITH principal, lambda,
+    CASE
+      WHEN lambda.Role IS NOT NULL THEN lambda.Role
+      WHEN lambda._raw_properties IS NOT NULL THEN apoc.convert.fromJsonMap(lambda._raw_properties).Role
+      ELSE NULL
+    END AS roleArn
+  WHERE roleArn IS NOT NULL
+
+  // Match the actual role by ARN
+  MATCH (attachedRole:AWS_IAM_Role {arn: roleArn})
+
+  // Create the privesc relationship to the Lambda's attached role
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(attachedRole)
+  ON CREATE SET
+    privesc.method = "Method-55-Lambda-UpdateCode-AddPermission",
+    privesc.requires = ["lambda:UpdateFunctionCode", "lambda:AddPermission"],
+    privesc.service = "Lambda",
+    privesc.targetType = "Role",
+    privesc.lambdaArn = lambda.arn
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-55-Lambda-UpdateCode-AddPermission"
+      THEN privesc.method + ",Method-55-Lambda-UpdateCode-AddPermission"
+      ELSE privesc.method
+    END,
+    privesc.lambdaArn = CASE
+      WHEN privesc.lambdaArn IS NULL THEN lambda.arn
+      WHEN NOT privesc.lambdaArn CONTAINS lambda.arn THEN privesc.lambdaArn + "," + lambda.arn
+      ELSE privesc.lambdaArn
+    END

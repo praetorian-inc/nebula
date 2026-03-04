@@ -8,8 +8,8 @@ import (
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/base"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/cloudcontrol"
-	"github.com/praetorian-inc/nebula/pkg/links/aws/lambda"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/cognito"
+	"github.com/praetorian-inc/nebula/pkg/links/aws/lambda"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	"github.com/praetorian-inc/nebula/pkg/types"
 	"github.com/praetorian-inc/tabularium/pkg/model/model"
@@ -17,9 +17,9 @@ import (
 
 type AwsPublicResources struct {
 	*base.AwsReconLink
-	resourceMap     map[string]func() chain.Chain
-	processedS3     map[string]bool // Track processed S3 buckets to avoid duplicates
-	processedS3Mu   sync.RWMutex    // Protect concurrent access to processedS3
+	resourceMap   map[string]func() chain.Chain
+	processedS3   map[string]bool // Track processed S3 buckets to avoid duplicates
+	processedS3Mu sync.RWMutex    // Protect concurrent access to processedS3
 }
 
 func NewAwsPublicResources(configs ...cfg.Config) chain.Link {
@@ -58,7 +58,7 @@ func (a *AwsPublicResources) Process(resource *types.EnrichedResourceDescription
 	if resource.TypeName == "AWS::S3::Bucket" {
 		// Create unique key using account_id:bucket_name
 		bucketKey := resource.AccountId + ":" + resource.Identifier
-		
+
 		a.processedS3Mu.Lock()
 		if a.processedS3[bucketKey] {
 			a.processedS3Mu.Unlock()
@@ -67,7 +67,7 @@ func (a *AwsPublicResources) Process(resource *types.EnrichedResourceDescription
 		}
 		a.processedS3[bucketKey] = true
 		a.processedS3Mu.Unlock()
-		
+
 		slog.Debug("Processing S3 bucket for first time", "bucket", resource.Identifier, "account", resource.AccountId)
 	}
 

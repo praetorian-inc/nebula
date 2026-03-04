@@ -1,0 +1,36 @@
+name: Privesc Method 64 - SageMaker Lifecycle Config Injection
+description: Creates CAN_PRIVESC relationship when a principal can create a lifecycle config, attach it to an existing SageMaker notebook instance, and restart it. The malicious script executes with the notebook's execution role.
+impactedServices:
+  - SageMaker
+severity: High
+order: 161
+cypher: |
+  MATCH (principal)-[:SAGEMAKER_UPDATENOTEBOOKINSTANCE]->(notebook:AWS_SageMaker_NotebookInstance)
+  WHERE principal.admin IS NULL
+    AND notebook.Role IS NOT NULL
+    AND EXISTS((principal)-[:SAGEMAKER_CREATENOTEBOOKINSTANCELIFECYCLECONFIG]->())
+    AND EXISTS((principal)-[:SAGEMAKER_STOPNOTEBOOKINSTANCE]->(notebook))
+    AND EXISTS((principal)-[:SAGEMAKER_STARTNOTEBOOKINSTANCE]->(notebook))
+
+  // Match the actual role by ARN
+  MATCH (executionRole:AWS_IAM_Role {arn: notebook.Role})
+
+  // Create the privesc relationship to the notebook's execution role
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(executionRole)
+  ON CREATE SET
+    privesc.method = "Method-64-SageMaker-Lifecycle-Config-Injection",
+    privesc.requires = ["sagemaker:CreateNotebookInstanceLifecycleConfig", "sagemaker:StopNotebookInstance", "sagemaker:UpdateNotebookInstance", "sagemaker:StartNotebookInstance"],
+    privesc.service = "SageMaker",
+    privesc.targetType = "Role",
+    privesc.notebookName = notebook.NotebookInstanceName
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-64-SageMaker-Lifecycle-Config-Injection"
+      THEN privesc.method + ",Method-64-SageMaker-Lifecycle-Config-Injection"
+      ELSE privesc.method
+    END,
+    privesc.notebookName = CASE
+      WHEN privesc.notebookName IS NULL THEN notebook.NotebookInstanceName
+      WHEN NOT privesc.notebookName CONTAINS notebook.NotebookInstanceName THEN privesc.notebookName + "," + notebook.NotebookInstanceName
+      ELSE privesc.notebookName
+    END

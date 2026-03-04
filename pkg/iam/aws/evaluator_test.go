@@ -1745,11 +1745,11 @@ func TestPolicyEvaluator_CrossAccountAssumeRole_TrustPolicyValidation(t *testing
 
 func TestPolicyEvaluator_SSMDocumentRestrictions(t *testing.T) {
 	tests := []struct {
-		name                      string
-		action                    string
-		identityStatements        *types.PolicyStatementList
-		wantDocumentRestrictions  []string
-		wantAllowed               bool
+		name                     string
+		action                   string
+		identityStatements       *types.PolicyStatementList
+		wantDocumentRestrictions []string
+		wantAllowed              bool
 	}{
 		{
 			name:   "SSM SendCommand with wildcard document (HIGH RISK)",

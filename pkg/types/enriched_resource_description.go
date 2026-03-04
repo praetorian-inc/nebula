@@ -321,10 +321,10 @@ func (e *EnrichedResourceDescription) ToAWSResource() (*model.AWSResource, error
 
 	// Create AWSResource using existing fields
 	awsResource, err := model.NewAWSResource(
-		e.Arn.String(),      // ARN as name
-		e.AccountId,         // account reference
-		resourceType,        // resource type
-		properties,          // properties map
+		e.Arn.String(), // ARN as name
+		e.AccountId,    // account reference
+		resourceType,   // resource type
+		properties,     // properties map
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create AWSResource: %w", err)
@@ -366,11 +366,54 @@ func (e *EnrichedResourceDescription) GetRoleArn() string {
 		if roleArn, ok := props["RoleARN"].(string); ok {
 			return roleArn
 		}
+	case "AWS::CloudFormation::StackSet":
+		if roleArn, ok := props["AdministrationRoleARN"].(string); ok {
+			return roleArn
+		}
 	case "AWS::CodeBuild::Project":
 		if role, ok := props["Role"].(string); ok {
 			return role
 		}
 	case "AWS::SageMaker::NotebookInstance":
+		if role, ok := props["Role"].(string); ok {
+			return role
+		}
+	case "AWS::ECS::TaskDefinition":
+		if taskRoleArn, ok := props["TaskRoleArn"].(string); ok {
+			return taskRoleArn
+		}
+	case "AWS::AppRunner::Service":
+		// Try nested InstanceConfiguration.InstanceRoleArn first (CloudControl format)
+		if instanceConfig, ok := props["InstanceConfiguration"].(map[string]any); ok {
+			if instanceRoleArn, ok := instanceConfig["InstanceRoleArn"].(string); ok {
+				return instanceRoleArn
+			}
+		}
+		// Fallback to flat property
+		if instanceRoleArn, ok := props["InstanceRoleArn"].(string); ok {
+			return instanceRoleArn
+		}
+	case "AWS::EC2::LaunchTemplate":
+		// LaunchTemplateData contains nested IamInstanceProfile
+		if ltData, ok := props["LaunchTemplateData"].(map[string]any); ok {
+			if iamProfile, ok := ltData["IamInstanceProfile"].(map[string]any); ok {
+				// Prefer resolved role ARN (set by custom gather function)
+				if resolvedRoleArn, ok := iamProfile["ResolvedRoleArn"].(string); ok {
+					return resolvedRoleArn
+				}
+				if profileArn, ok := iamProfile["Arn"].(string); ok {
+					return profileArn
+				}
+				if profileName, ok := iamProfile["Name"].(string); ok {
+					return profileName
+				}
+			}
+		}
+	case "AWS::Bedrock::CodeInterpreter":
+		if roleArn, ok := props["ExecutionRoleArn"].(string); ok {
+			return roleArn
+		}
+	case "AWS::Glue::Job":
 		if role, ok := props["Role"].(string); ok {
 			return role
 		}

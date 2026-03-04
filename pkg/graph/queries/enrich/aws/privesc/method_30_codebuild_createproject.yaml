@@ -10,8 +10,7 @@ cypher: |
   WHERE principal.admin IS NULL
     AND 'codebuild.amazonaws.com' IN targetRole.trustedServices
     AND EXISTS((principal)-[:CODEBUILD_CREATEPROJECT]->())
-    AND (EXISTS((principal)-[:CODEBUILD_STARTBUILD]->())
-         OR EXISTS((principal)-[:CODEBUILD_STARTBUILDBATCH]->()))
+    AND EXISTS((principal)-[:CODEBUILD_STARTBUILD]->())
 
   // Create the privesc relationship
   MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)

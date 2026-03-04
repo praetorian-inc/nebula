@@ -8,7 +8,7 @@ order: 138
 cypher: |
   MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
   WHERE principal.admin IS NULL
-    AND 'bedrock.amazonaws.com' IN targetRole.trustedServices
+    AND 'bedrock-agentcore.amazonaws.com' IN targetRole.trustedServices
     AND EXISTS((principal)-[:`BEDROCK-AGENTCORE_CREATECODEINTERPRETER`]->())
     AND EXISTS((principal)-[:`BEDROCK-AGENTCORE_STARTCODEINTERPRETERSESSION`]->())
     AND EXISTS((principal)-[:`BEDROCK-AGENTCORE_INVOKECODEINTERPRETER`]->())

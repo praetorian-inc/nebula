@@ -104,6 +104,7 @@ func initializeResourceCache(wg *sync.WaitGroup, pd *PolicyData) {
 func addServicesToResourceCache() {
 	// List of common AWS services
 	commonServices := []string{
+		"tasks.apprunner.amazonaws.com",
 		"bedrock-agentcore.amazonaws.com",
 		"s3.amazonaws.com",
 		"lambda.amazonaws.com",

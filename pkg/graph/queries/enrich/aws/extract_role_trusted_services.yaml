@@ -9,7 +9,7 @@ cypher: |
   WHERE role.assumeRolePolicyDoc IS NOT NULL
   WITH role,
     [service IN [
-      'bedrock.amazonaws.com',
+      'bedrock-agentcore.amazonaws.com',
       'ec2.amazonaws.com',
       'lambda.amazonaws.com',
       'glue.amazonaws.com',
@@ -21,6 +21,7 @@ cypher: |
       'eks.amazonaws.com',
       'ecs.amazonaws.com',
       'states.amazonaws.com',
+      'tasks.apprunner.amazonaws.com',
       'ssm.amazonaws.com'
     ] WHERE role.assumeRolePolicyDoc CONTAINS service] AS trustedServices
   SET role.trustedServices = CASE

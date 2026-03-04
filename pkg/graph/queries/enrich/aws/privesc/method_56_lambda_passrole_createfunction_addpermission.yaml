@@ -1,0 +1,27 @@
+name: Privesc Method 56 - Lambda PassRole CreateFunction AddPermission
+description: Creates CAN_PRIVESC relationship when a principal can pass roles to Lambda, create functions, and grant invoke access via resource-based policy
+impactedServices:
+  - IAM
+  - Lambda
+severity: High
+order: 153
+cypher: |
+  MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
+  WHERE principal.admin IS NULL
+    AND 'lambda.amazonaws.com' IN targetRole.trustedServices
+    AND EXISTS((principal)-[:LAMBDA_CREATEFUNCTION]->())
+    AND EXISTS((principal)-[:LAMBDA_ADDPERMISSION]->())
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-56-Lambda-PassRole-CreateFunction-AddPermission",
+    privesc.requires = ["iam:PassRole", "lambda:CreateFunction", "lambda:AddPermission"],
+    privesc.service = "Lambda",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-56-Lambda-PassRole-CreateFunction-AddPermission"
+      THEN privesc.method + ",Method-56-Lambda-PassRole-CreateFunction-AddPermission"
+      ELSE privesc.method
+    END

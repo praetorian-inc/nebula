@@ -8,9 +8,9 @@ import (
 
 func TestCDKRoleInfo_BucketName(t *testing.T) {
 	tests := []struct {
-		name      string
-		roleInfo  CDKRoleInfo
-		expected  string
+		name     string
+		roleInfo CDKRoleInfo
+		expected string
 	}{
 		{
 			name: "default qualifier",
@@ -25,7 +25,7 @@ func TestCDKRoleInfo_BucketName(t *testing.T) {
 			name: "custom qualifier",
 			roleInfo: CDKRoleInfo{
 				Qualifier: "custom123",
-				AccountID: "987654321098", 
+				AccountID: "987654321098",
 				Region:    "us-west-2",
 			},
 			expected: "cdk-custom123-assets-987654321098-us-west-2",
@@ -75,7 +75,7 @@ func TestCDKRoleInfo_RoleNamingConvention(t *testing.T) {
 				AccountID: tt.accountID,
 				Region:    tt.region,
 			}
-			
+
 			// Verify the role name follows CDK naming convention
 			expectedRoleName := tt.expected
 			roleInfo.RoleName = expectedRoleName
@@ -88,10 +88,10 @@ func TestCDKRoleDetector_DefaultParams(t *testing.T) {
 	// Test that the CDK role detector has the expected default parameters
 	detector := &AwsCdkRoleDetector{}
 	params := detector.Params()
-	
+
 	// Should include base AWS parameters plus CDK-specific ones
 	assert.NotEmpty(t, params, "should have parameters defined")
-	
+
 	// Look for CDK-specific parameters
 	var hasCdkQualifiers, hasCdkCheckAllRegions bool
 	for _, param := range params {
@@ -102,7 +102,7 @@ func TestCDKRoleDetector_DefaultParams(t *testing.T) {
 			hasCdkCheckAllRegions = true
 		}
 	}
-	
+
 	assert.True(t, hasCdkQualifiers, "should have cdk-qualifiers parameter")
 	assert.True(t, hasCdkCheckAllRegions, "should have cdk-check-all-regions parameter")
 }
@@ -112,10 +112,10 @@ func TestCDKRoleTypes(t *testing.T) {
 		"cfn-exec-role",
 		"file-publishing-role",
 		"image-publishing-role",
-		"lookup-role", 
+		"lookup-role",
 		"deploy-role",
 	}
-	
+
 	// These are the role types that should be detected by the CDK role detector
 	for _, roleType := range expectedRoleTypes {
 		assert.NotEmpty(t, roleType, "role type should not be empty")
@@ -165,11 +165,11 @@ func TestCDKRoleInfo_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			isValid := tt.roleInfo.AccountID != "" && 
-				tt.roleInfo.Region != "" && 
+			isValid := tt.roleInfo.AccountID != "" &&
+				tt.roleInfo.Region != "" &&
 				tt.roleInfo.Qualifier != "" &&
 				tt.roleInfo.RoleType != ""
-			
+
 			assert.Equal(t, tt.isValid, isValid)
 		})
 	}

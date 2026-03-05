@@ -25,6 +25,7 @@ recon commands for aws
 * [nebula aws recon find-secrets](nebula_aws_recon_find-secrets.md)	 - Enumerate AWS resources and find secrets using NoseyParker
 * [nebula aws recon find-secrets-resource](nebula_aws_recon_find-secrets-resource.md)	 - Enumerate AWS resources and find secrets using NoseyParker for a specific resource type
 * [nebula aws recon get-console](nebula_aws_recon_get-console.md)	 - Generate a federated sign-in URL for the AWS Console using temporary credentials
+* [nebula aws recon kms-grants](nebula_aws_recon_kms-grants.md)	 - List KMS grants in an AWS account. Lists KMS keys first, then enumerates grants on each key.
 * [nebula aws recon list](nebula_aws_recon_list.md)	 - List resources in an AWS account using Cloud Control API.
 * [nebula aws recon list-all](nebula_aws_recon_list-all.md)	 - List resources in an AWS account using CloudControl API. Supports 'full' scan for all resources or 'summary' scan for key services.
 * [nebula aws recon org-policies](nebula_aws_recon_org-policies.md)	 - Get SCPs and RCPs of an AWS organization and the targets to which they are attached.

@@ -48,6 +48,6 @@ var AwsListKMSGrants = chain.NewModule(
 	cfg.NewParam[string]("module-name", "name of the module for dynamic file naming"),
 ).WithConfigs(
 	cfg.WithArg("module-name", "kms-grants"),
-	// Default to listing KMS keys (grants are enumerated from keys)
-	cfg.WithArg("resource-type", []string{"AWS::KMS::Key"}),
+	// Default to listing KMS keys and replica keys (grants are enumerated from keys)
+	cfg.WithArg("resource-type", []string{"AWS::KMS::Key", "AWS::KMS::ReplicaKey"}),
 )

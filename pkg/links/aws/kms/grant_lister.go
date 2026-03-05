@@ -39,8 +39,8 @@ func (l *KMSGrantLister) Metadata() *cfg.Metadata {
 }
 
 func (l *KMSGrantLister) Process(resource types.EnrichedResourceDescription) error {
-	// Only process KMS keys
-	if resource.TypeName != "AWS::KMS::Key" {
+	// Only process KMS keys and replica keys
+	if resource.TypeName != "AWS::KMS::Key" && resource.TypeName != "AWS::KMS::ReplicaKey" {
 		slog.Debug("Skipping non-KMS key resource", "type", resource.TypeName, "id", resource.Identifier)
 		return nil
 	}
@@ -204,7 +204,7 @@ func (l *KMSGrantLister) buildGrantResource(grant kmstypes.GrantListEntry, keyID
 		"KeyId":            keyID,
 		"KeyArn":           keyArn,
 		"GranteePrincipal": aws.ToString(grant.GranteePrincipal),
-		"Operations":       convertGrantOperations(grant.Operations),
+		"Operations":       ConvertGrantOperations(grant.Operations),
 	}
 
 	if grant.RetiringPrincipal != nil {
@@ -220,7 +220,7 @@ func (l *KMSGrantLister) buildGrantResource(grant kmstypes.GrantListEntry, keyID
 		props["CreationDate"] = grant.CreationDate.String()
 	}
 	if grant.Constraints != nil {
-		props["Constraints"] = convertGrantConstraints(grant.Constraints)
+		props["Constraints"] = ConvertGrantConstraints(grant.Constraints)
 	}
 
 	// Parse key ARN for the resource
@@ -235,27 +235,6 @@ func (l *KMSGrantLister) buildGrantResource(grant kmstypes.GrantListEntry, keyID
 		Arn:        parsedArn, // Use key ARN as base
 		// Store the full grant identifier in properties for reference
 	}
-}
-
-// convertGrantOperations converts KMS grant operations to string slice
-func convertGrantOperations(ops []kmstypes.GrantOperation) []string {
-	var result []string
-	for _, op := range ops {
-		result = append(result, string(op))
-	}
-	return result
-}
-
-// convertGrantConstraints converts grant constraints to a map
-func convertGrantConstraints(c *kmstypes.GrantConstraints) map[string]interface{} {
-	result := make(map[string]interface{})
-	if c.EncryptionContextEquals != nil {
-		result["EncryptionContextEquals"] = c.EncryptionContextEquals
-	}
-	if c.EncryptionContextSubset != nil {
-		result["EncryptionContextSubset"] = c.EncryptionContextSubset
-	}
-	return result
 }
 
 // extractAccountFromArn extracts the AWS account ID from an ARN string

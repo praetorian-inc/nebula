@@ -441,12 +441,13 @@ type kmsKeyInfo struct {
 	Metadata *kmstypes.KeyMetadata
 }
 
-// collectEligibleKMSKeys lists all KMS keys and returns customer-managed, enabled keys
-// with their metadata. This function is reused by both listKMSKeys and listKMSGrants
-// to avoid duplicate API calls.
+// collectEligibleKMSKeys lists all KMS keys and returns keys with their metadata.
+// This function is reused by both listKMSKeys and listKMSGrants to avoid duplicate API calls.
+// Note: This returns ALL keys with metadata; filtering by key manager type (AWS vs customer)
+// and key state (enabled, disabled, pending deletion) is done by callers.
 //
 // Returns:
-// - keys: slice of eligible key info (customer-managed, not disabled/pending deletion)
+// - keys: slice of key info with metadata (caller must filter as needed)
 // - totalKeys: total number of keys seen
 // - skippedKeys: number of keys skipped (describe failed)
 func (a *AWSCloudControl) collectEligibleKMSKeys(client *kms.Client, region string) (keys []kmsKeyInfo, totalKeys, skippedKeys int) {

@@ -59,7 +59,7 @@ func TestConvertGrantOperations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := convertGrantOperations(tt.input)
+			result := ConvertGrantOperations(tt.input)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -71,11 +71,6 @@ func TestConvertGrantConstraints(t *testing.T) {
 		input    *kmstypes.GrantConstraints
 		expected map[string]interface{}
 	}{
-		{
-			name:     "Nil constraints",
-			input:    nil,
-			expected: nil,
-		},
 		{
 			name:     "Empty constraints",
 			input:    &kmstypes.GrantConstraints{},
@@ -132,12 +127,7 @@ func TestConvertGrantConstraints(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.input == nil {
-				// convertGrantConstraints is not called with nil in actual code
-				// but we test nil handling anyway
-				return
-			}
-			result := convertGrantConstraints(tt.input)
+			result := ConvertGrantConstraints(tt.input)
 			assert.Equal(t, tt.expected, result)
 		})
 	}

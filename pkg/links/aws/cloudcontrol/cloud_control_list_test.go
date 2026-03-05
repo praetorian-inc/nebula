@@ -661,11 +661,6 @@ func TestConvertKMSGrantConstraints(t *testing.T) {
 		expected map[string]interface{}
 	}{
 		{
-			name:     "Nil constraints",
-			input:    nil,
-			expected: nil,
-		},
-		{
 			name:     "Empty constraints",
 			input:    &kmstypes.GrantConstraints{},
 			expected: map[string]interface{}{},
@@ -721,10 +716,6 @@ func TestConvertKMSGrantConstraints(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.input == nil {
-				// convertKMSGrantConstraints is not called with nil in actual code
-				return
-			}
 			result := convertKMSGrantConstraints(tt.input)
 			assert.Equal(t, tt.expected, result)
 		})

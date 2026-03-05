@@ -534,6 +534,7 @@ func (l *AwsResourceTypeGeneratorLink) getFullResourceTypes() []string {
 		"AWS::KinesisAnalyticsV2::Application",
 		"AWS::KinesisFirehose::DeliveryStream",
 		"AWS::KMS::Alias",
+		"AWS::KMS::Grant",
 		"AWS::KMS::Key",
 		"AWS::KMS::ReplicaKey",
 		"AWS::LakeFormation::DataCellsFilter",

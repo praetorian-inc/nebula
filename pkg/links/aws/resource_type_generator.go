@@ -90,6 +90,8 @@ func (l *AwsResourceTypeGeneratorLink) getSummaryResourceTypes() []string {
 		"AWS::IAM::User",
 		"AWS::IAM::Group",
 		"AWS::Kinesis::Stream",
+		"AWS::KMS::Grant",
+		"AWS::KMS::Key",
 		"AWS::Lambda::Function",
 		"AWS::Lightsail::Instance",
 		"AWS::Lightsail::Container",

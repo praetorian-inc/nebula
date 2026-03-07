@@ -2,6 +2,7 @@ package iam
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resourcegraph/armresourcegraph"
 	"github.com/praetorian-inc/nebula/internal/message"
@@ -25,6 +26,8 @@ func (l *SDKComprehensiveCollectorLink) processSubscriptionsOptimizedSDK(
 	batchStart := l.logCollectionStart("Batched Resource Graph Collection")
 	batchedResources, batchedResourceGroups := l.collectAllResourcesWithBatching(subscriptionIDs)
 	l.logCollectionEnd("Batched Resource Graph Collection", batchStart, len(batchedResources)+len(batchedResourceGroups))
+	l.writeCheckpoint("18-resources-batched.json", batchedResources)
+	l.writeCheckpoint("19-resource-groups-batched.json", batchedResourceGroups)
 
 	// OPTIMIZATION 2: Process subscriptions in parallel for individual collections
 	type subResult struct {
@@ -227,6 +230,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllAzureRMDataOptimizedSDK(subscr
 		azurermData["tenantRoleAssignments"] = tenantRoleAssignments
 		totalRoleAssignments := len(subscriptionRoleAssignments) + len(resourceGroupRoleAssignments) + len(resourceLevelRoleAssignments) + len(managementGroupRoleAssignments) + len(tenantRoleAssignments)
 		l.logCollectionEnd("role assignments - " + subscriptionID, startTime, totalRoleAssignments)
+		l.writeCheckpoint(fmt.Sprintf("20-role-assignments-%s.json", subscriptionID[:8]), azurermData)
 	}
 
 	// Collection 2: Role Definitions via Authorization SDK (unchanged)
@@ -239,10 +243,15 @@ func (l *SDKComprehensiveCollectorLink) collectAllAzureRMDataOptimizedSDK(subscr
 	} else {
 		azurermData["azureRoleDefinitions"] = roleDefinitions
 		l.logCollectionEnd("role definitions - " + subscriptionID, startTime, len(roleDefinitions))
+		l.writeCheckpoint(fmt.Sprintf("21-role-definitions-%s.json", subscriptionID[:8]), roleDefinitions)
 	}
 
 	// Skip Key Vault access policies collection for now (as in original)
 	azurermData["keyVaultAccessPolicies"] = []interface{}{}
+
+	// Apply deduplication to RBAC assignments (matching HTTP version behavior)
+	l.deduplicateRBACAssignments(azurermData)
+	l.writeCheckpoint(fmt.Sprintf("22-rbac-deduplicated-%s.json", subscriptionID[:8]), azurermData)
 
 	// Calculate total resource counts for final summary
 	totalItems := len(preCollectedResources) + len(preCollectedResourceGroups) + len(roleDefinitions)
@@ -313,6 +322,19 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDKOptimized() (map[s
 		close(resultChan)
 	}()
 
+	// Checkpoint ordering for parallel collections
+	checkpointNames := map[string]string{
+		"users":                      "01-users.json",
+		"groups":                     "02-groups.json",
+		"servicePrincipals":          "03-service-principals.json",
+		"applications":               "04-applications.json",
+		"devices":                    "05-devices.json",
+		"directoryRoles":             "06-directory-roles.json",
+		"roleDefinitions":            "07-role-definitions-entra.json",
+		"conditionalAccessPolicies":  "08-conditional-access.json",
+		"oauth2PermissionGrants":     "09-oauth2-permission-grants.json",
+	}
+
 	// Collect results from parallel operations
 	for result := range resultChan {
 		if result.err != nil {
@@ -321,6 +343,9 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDKOptimized() (map[s
 		} else {
 			azureADData[result.name] = result.data
 			l.Logger.Info("Completed parallel collection", "type", result.name, "items", len(result.data))
+			if cpName, ok := checkpointNames[result.name]; ok {
+				l.writeCheckpoint(cpName, result.data)
+			}
 		}
 	}
 
@@ -335,11 +360,16 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDKOptimized() (map[s
 	} else {
 		azureADData["directoryRoleAssignments"] = directoryRoleAssignments
 		l.logCollectionEnd("directoryRoleAssignments (batched)", startTime, len(directoryRoleAssignments))
+		l.writeCheckpoint("10-directory-role-assignments.json", directoryRoleAssignments)
 	}
 
 	// Collection: Group Memberships (depends on groups - BATCHED)
 	startTime = l.logCollectionStart("groupMemberships (batched)")
-	groupMemberships, err := l.collectAllGroupMembershipsWithPagination(ctx)
+	var preGroups []interface{}
+	if g, ok := azureADData["groups"].([]interface{}); ok {
+		preGroups = g
+	}
+	groupMemberships, err := l.collectAllGroupMembershipsWithPagination(ctx, preGroups)
 	if err != nil {
 		l.Logger.Error("Failed to collect group memberships via SDK", "error", err)
 		azureADData["groupMemberships"] = []interface{}{}
@@ -347,11 +377,16 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDKOptimized() (map[s
 	} else {
 		azureADData["groupMemberships"] = groupMemberships
 		l.logCollectionEnd("groupMemberships (batched)", startTime, len(groupMemberships))
+		l.writeCheckpoint("11-group-memberships.json", groupMemberships)
 	}
 
 	// Collection: App role assignments (depends on service principals - BATCHED)
 	startTime = l.logCollectionStart("appRoleAssignments (batched)")
-	appRoleAssignments, err := l.collectAllAppRoleAssignmentsWithPagination(ctx)
+	var preSPs []interface{}
+	if s, ok := azureADData["servicePrincipals"].([]interface{}); ok {
+		preSPs = s
+	}
+	appRoleAssignments, err := l.collectAllAppRoleAssignmentsWithPagination(ctx, preSPs)
 	if err != nil {
 		l.Logger.Error("Failed to collect app role assignments via SDK", "error", err)
 		azureADData["appRoleAssignments"] = []interface{}{}
@@ -359,7 +394,85 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDKOptimized() (map[s
 	} else {
 		azureADData["appRoleAssignments"] = appRoleAssignments
 		l.logCollectionEnd("appRoleAssignments (batched)", startTime, len(appRoleAssignments))
+		l.writeCheckpoint("12-app-role-assignments.json", appRoleAssignments)
 	}
+
+	// SP Directory Roles: Filter from existing directoryRoleAssignments (instant, replaces 9.5min scan)
+	startTime = l.logCollectionStart("spDirectoryRoles (filtered)")
+	if dirRoles, ok := azureADData["directoryRoleAssignments"].([]interface{}); ok {
+		if sps, ok := azureADData["servicePrincipals"].([]interface{}); ok {
+			spDirRoles := l.filterSPDirectoryRolesFromExisting(dirRoles, sps)
+			if len(spDirRoles) > 0 {
+				existing := azureADData["directoryRoleAssignments"].([]interface{})
+				seen := make(map[string]bool)
+				for _, a := range existing {
+					if m, ok := a.(map[string]interface{}); ok {
+						key := fmt.Sprintf("%v-%v", m["principalId"], m["roleId"])
+						seen[key] = true
+					}
+				}
+				added := 0
+				for _, a := range spDirRoles {
+					if m, ok := a.(map[string]interface{}); ok {
+						key := fmt.Sprintf("%v-%v", m["principalId"], m["roleId"])
+						if !seen[key] {
+							existing = append(existing, a)
+							seen[key] = true
+							added++
+						}
+					}
+				}
+				azureADData["directoryRoleAssignments"] = existing
+				l.Logger.Info("Merged SP directory role assignments", "new_from_filter", added, "total", len(existing))
+			}
+		}
+	}
+	l.logCollectionEnd("spDirectoryRoles (filtered)", startTime, 0)
+	l.writeCheckpoint("13-sp-directory-roles.json", azureADData["directoryRoleAssignments"])
+
+	// Group Ownership
+	startTime = l.logCollectionStart("groupOwnership")
+	groupOwnership, err := l.collectGroupOwnershipSDK(ctx)
+	if err != nil {
+		l.Logger.Error("Failed to collect group ownership via SDK", "error", err)
+		azureADData["groupOwnership"] = []interface{}{}
+		l.logCollectionEnd("groupOwnership", startTime, 0)
+	} else {
+		azureADData["groupOwnership"] = groupOwnership
+		l.logCollectionEnd("groupOwnership", startTime, len(groupOwnership))
+		l.writeCheckpoint("14a-group-ownership.json", groupOwnership)
+	}
+
+	// Service Principal Ownership
+	startTime = l.logCollectionStart("servicePrincipalOwnership")
+	spOwnership, err := l.collectServicePrincipalOwnershipSDK(ctx)
+	if err != nil {
+		l.Logger.Error("Failed to collect service principal ownership via SDK", "error", err)
+		azureADData["servicePrincipalOwnership"] = []interface{}{}
+		l.logCollectionEnd("servicePrincipalOwnership", startTime, 0)
+	} else {
+		azureADData["servicePrincipalOwnership"] = spOwnership
+		l.logCollectionEnd("servicePrincipalOwnership", startTime, len(spOwnership))
+		l.writeCheckpoint("14b-sp-ownership.json", spOwnership)
+	}
+
+	// Application Ownership
+	startTime = l.logCollectionStart("applicationOwnership")
+	appOwnership, err := l.collectApplicationOwnershipSDK(ctx)
+	if err != nil {
+		l.Logger.Error("Failed to collect application ownership via SDK", "error", err)
+		azureADData["applicationOwnership"] = []interface{}{}
+		l.logCollectionEnd("applicationOwnership", startTime, 0)
+	} else {
+		azureADData["applicationOwnership"] = appOwnership
+		l.logCollectionEnd("applicationOwnership", startTime, len(appOwnership))
+		l.writeCheckpoint("14c-app-ownership.json", appOwnership)
+	}
+
+	// Credential Enrichment
+	l.Logger.Info("Enriching applications with credential metadata")
+	l.enrichApplicationsWithCredentialMetadataSDK(azureADData)
+	l.writeCheckpoint("14-credential-enrichment.json", azureADData["applications"])
 
 	// Calculate total resource counts for final summary
 	var totalItems int

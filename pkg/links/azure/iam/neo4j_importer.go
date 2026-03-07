@@ -430,25 +430,35 @@ func (l *Neo4jImporterLink) createIdentityResources() int {
 		for _, user := range users {
 			if userMap, ok := user.(map[string]interface{}); ok {
 				resourceNode := map[string]interface{}{
-					"id": l.normalizeResourceId(l.getStringValue(userMap, "id")),
-					"resourceType": "Microsoft.DirectoryServices/users",
-					"displayName": l.getStringValue(userMap, "displayName"),
+					"id":                l.normalizeResourceId(l.getStringValue(userMap, "id")),
+					"resourceType":      "Microsoft.DirectoryServices/users",
+					"displayName":       l.getStringValue(userMap, "displayName"),
 					"userPrincipalName": l.getStringValue(userMap, "userPrincipalName"),
-					"mail": l.getStringValue(userMap, "mail"),
-					"userType": l.getStringValue(userMap, "userType"),
+					"userType":          l.getStringValue(userMap, "userType"),
 				}
+				// Optional string fields — only set when non-empty to avoid storing ""
+				l.setIfNotEmpty(resourceNode, "mail", userMap, "mail")
+				l.setIfNotEmpty(resourceNode, "department", userMap, "department")
+				l.setIfNotEmpty(resourceNode, "jobTitle", userMap, "jobTitle")
+				l.setIfNotEmpty(resourceNode, "givenName", userMap, "givenName")
+				l.setIfNotEmpty(resourceNode, "surname", userMap, "surname")
 				if accountEnabled, ok := userMap["accountEnabled"].(bool); ok {
 					resourceNode["accountEnabled"] = accountEnabled
 				}
+				if onPremisesSyncEnabled, ok := userMap["onPremisesSyncEnabled"].(bool); ok {
+					resourceNode["onPremisesSyncEnabled"] = onPremisesSyncEnabled
+				}
 
-				// Add metadata with user attributes
 				metadata := map[string]interface{}{
-					"email": l.getStringValue(userMap, "mail"),
+					"email":             l.getStringValue(userMap, "mail"),
 					"userPrincipalName": l.getStringValue(userMap, "userPrincipalName"),
-					"userType": l.getStringValue(userMap, "userType"),
+					"userType":          l.getStringValue(userMap, "userType"),
 				}
 				if accountEnabled, ok := userMap["accountEnabled"].(bool); ok {
 					metadata["accountEnabled"] = accountEnabled
+				}
+				if onPremisesSyncEnabled, ok := userMap["onPremisesSyncEnabled"].(bool); ok {
+					metadata["onPremisesSyncEnabled"] = onPremisesSyncEnabled
 				}
 				resourceNode["metadata"] = l.toJSONString(metadata)
 				userNodes = append(userNodes, resourceNode)
@@ -470,25 +480,40 @@ func (l *Neo4jImporterLink) createIdentityResources() int {
 				resourceNode := map[string]interface{}{
 					"id": l.normalizeResourceId(l.getStringValue(groupMap, "id")),
 					"resourceType": "Microsoft.DirectoryServices/groups",
-					"displayName": l.getStringValue(groupMap, "displayName"),
-					"description": l.getStringValue(groupMap, "description"),
+					"displayName":  l.getStringValue(groupMap, "displayName"),
 				}
+				// Optional string fields — only set when non-empty
+				l.setIfNotEmpty(resourceNode, "description", groupMap, "description")
+				l.setIfNotEmpty(resourceNode, "visibility", groupMap, "visibility")
+				l.setIfNotEmpty(resourceNode, "membershipRule", groupMap, "membershipRule")
 				if securityEnabled, ok := groupMap["securityEnabled"].(bool); ok {
 					resourceNode["securityEnabled"] = securityEnabled
 				}
 				if mailEnabled, ok := groupMap["mailEnabled"].(bool); ok {
 					resourceNode["mailEnabled"] = mailEnabled
 				}
+				if isAssignableToRole, ok := groupMap["isAssignableToRole"].(bool); ok {
+					resourceNode["isAssignableToRole"] = isAssignableToRole
+				}
+				if onPremisesSyncEnabled, ok := groupMap["onPremisesSyncEnabled"].(bool); ok {
+					resourceNode["onPremisesSyncEnabled"] = onPremisesSyncEnabled
+				}
 
-				// Add metadata with group attributes
 				groupMetadata := map[string]interface{}{
 					"description": l.getStringValue(groupMap, "description"),
+					"visibility":  l.getStringValue(groupMap, "visibility"),
 				}
 				if securityEnabled, ok := groupMap["securityEnabled"].(bool); ok {
 					groupMetadata["securityEnabled"] = securityEnabled
 				}
 				if mailEnabled, ok := groupMap["mailEnabled"].(bool); ok {
 					groupMetadata["mailEnabled"] = mailEnabled
+				}
+				if isAssignableToRole, ok := groupMap["isAssignableToRole"].(bool); ok {
+					groupMetadata["isAssignableToRole"] = isAssignableToRole
+				}
+				if onPremisesSyncEnabled, ok := groupMap["onPremisesSyncEnabled"].(bool); ok {
+					groupMetadata["onPremisesSyncEnabled"] = onPremisesSyncEnabled
 				}
 				// Handle groupTypes array if present
 				if groupTypes, ok := groupMap["groupTypes"].([]interface{}); ok && len(groupTypes) > 0 {
@@ -520,20 +545,29 @@ func (l *Neo4jImporterLink) createIdentityResources() int {
 		for _, sp := range servicePrincipals {
 			if spMap, ok := sp.(map[string]interface{}); ok {
 				resourceNode := map[string]interface{}{
-					"id": l.normalizeResourceId(l.getStringValue(spMap, "id")),
-					"resourceType": "Microsoft.DirectoryServices/servicePrincipals",
-					"displayName": l.getStringValue(spMap, "displayName"),
-					"appId": l.getStringValue(spMap, "appId"),
-					"servicePrincipalType": l.getStringValue(spMap, "servicePrincipalType"),
+					"id":                                l.normalizeResourceId(l.getStringValue(spMap, "id")),
+					"resourceType":                      "Microsoft.DirectoryServices/servicePrincipals",
+					"displayName":                       l.getStringValue(spMap, "displayName"),
+					"appId":                             l.getStringValue(spMap, "appId"),
+					"servicePrincipalType":               l.getStringValue(spMap, "servicePrincipalType"),
+					"appOwnerOrganizationId":             l.getStringValue(spMap, "appOwnerOrganizationId"),
+					"credentialSummary_hasCredentials":   l.getBoolValue(spMap, "credentialSummary_hasCredentials"),
+					"credentialSummary_totalCredentials": l.getIntValue(spMap, "credentialSummary_totalCredentials"),
 				}
 				if accountEnabled, ok := spMap["accountEnabled"].(bool); ok {
 					resourceNode["accountEnabled"] = accountEnabled
 				}
+				if credentialSummary, ok := spMap["credentialSummary_passwordCredentials"]; ok {
+					resourceNode["credentialSummary_passwordCredentials"] = func() string { b, _ := json.Marshal(credentialSummary); return string(b) }()
+				}
+				if keyCredentials, ok := spMap["credentialSummary_keyCredentials"]; ok {
+					resourceNode["credentialSummary_keyCredentials"] = func() string { b, _ := json.Marshal(keyCredentials); return string(b) }()
+				}
 
-				// Add metadata with service principal attributes
 				spMetadata := map[string]interface{}{
-					"appId": l.getStringValue(spMap, "appId"),
-					"servicePrincipalType": l.getStringValue(spMap, "servicePrincipalType"),
+					"appId":                  l.getStringValue(spMap, "appId"),
+					"servicePrincipalType":   l.getStringValue(spMap, "servicePrincipalType"),
+					"appOwnerOrganizationId": l.getStringValue(spMap, "appOwnerOrganizationId"),
 				}
 				if accountEnabled, ok := spMap["accountEnabled"].(bool); ok {
 					spMetadata["accountEnabled"] = accountEnabled
@@ -567,10 +601,10 @@ func (l *Neo4jImporterLink) createIdentityResources() int {
 
 				// Add credential metadata if present
 				if credentialSummary, ok := appMap["credentialSummary_passwordCredentials"]; ok {
-					resourceNode["credentialSummary_passwordCredentials"] = credentialSummary
+					resourceNode["credentialSummary_passwordCredentials"] = func() string { b, _ := json.Marshal(credentialSummary); return string(b) }()
 				}
 				if keyCredentials, ok := appMap["credentialSummary_keyCredentials"]; ok {
-					resourceNode["credentialSummary_keyCredentials"] = keyCredentials
+					resourceNode["credentialSummary_keyCredentials"] = func() string { b, _ := json.Marshal(keyCredentials); return string(b) }()
 				}
 
 				// Add metadata with application attributes
@@ -586,6 +620,88 @@ func (l *Neo4jImporterLink) createIdentityResources() int {
 		if created := l.createResourceNodesBatch(session, ctx, appNodes, []string{"Resource", "Identity"}); created > 0 {
 			totalCreated += created
 			message.Info("Created Application resource nodes", "count", created)
+		}
+	}
+
+	// Create Devices as Resource nodes
+	devices := l.getArrayValue(azureAD, "devices")
+	if len(devices) > 0 {
+		deviceNodes := make([]map[string]interface{}, 0)
+		for _, device := range devices {
+			if deviceMap, ok := device.(map[string]interface{}); ok {
+				resourceNode := map[string]interface{}{
+					"id":           l.normalizeResourceId(l.getStringValue(deviceMap, "id")),
+					"resourceType": "Microsoft.DirectoryServices/devices",
+					"displayName":  l.getStringValue(deviceMap, "displayName"),
+					"deviceId":     l.getStringValue(deviceMap, "deviceId"),
+				}
+				if accountEnabled, ok := deviceMap["accountEnabled"].(bool); ok {
+					resourceNode["accountEnabled"] = accountEnabled
+				}
+
+				deviceMetadata := map[string]interface{}{
+					"deviceId":               l.getStringValue(deviceMap, "deviceId"),
+					"operatingSystem":        l.getStringValue(deviceMap, "operatingSystem"),
+					"operatingSystemVersion": l.getStringValue(deviceMap, "operatingSystemVersion"),
+				}
+				if isCompliant, ok := deviceMap["isCompliant"].(bool); ok {
+					deviceMetadata["isCompliant"] = isCompliant
+				}
+				if isManaged, ok := deviceMap["isManaged"].(bool); ok {
+					deviceMetadata["isManaged"] = isManaged
+				}
+				if trustType, ok := deviceMap["trustType"].(string); ok {
+					deviceMetadata["trustType"] = trustType
+					resourceNode["trustType"] = trustType
+				}
+				deviceMetadata["approximateLastSignInDateTime"] = l.getStringValue(deviceMap, "approximateLastSignInDateTime")
+				resourceNode["metadata"] = l.toJSONString(deviceMetadata)
+				deviceNodes = append(deviceNodes, resourceNode)
+			}
+		}
+
+		if created := l.createResourceNodesBatch(session, ctx, deviceNodes, []string{"Resource", "Identity", "Device"}); created > 0 {
+			totalCreated += created
+			message.Info("Created Device resource nodes", "count", created)
+		}
+	}
+
+	// Create Conditional Access Policies as Resource nodes
+	caPolicies := l.getArrayValue(azureAD, "conditionalAccessPolicies")
+	if len(caPolicies) > 0 {
+		caNodes := make([]map[string]interface{}, 0)
+		for _, policy := range caPolicies {
+			if policyMap, ok := policy.(map[string]interface{}); ok {
+				state := l.getStringValue(policyMap, "state")
+				resourceNode := map[string]interface{}{
+					"id":           l.normalizeResourceId(l.getStringValue(policyMap, "id")),
+					"resourceType": "Microsoft.DirectoryServices/conditionalAccessPolicies",
+					"displayName":  l.getStringValue(policyMap, "displayName"),
+					"state":        state,
+				}
+
+				caMetadata := map[string]interface{}{
+					"description":     l.getStringValue(policyMap, "description"),
+					"state":           state,
+					"createdDateTime": l.getStringValue(policyMap, "createdDateTime"),
+				}
+				if conditions, ok := policyMap["conditions"]; ok {
+					caMetadata["conditions"] = conditions
+				}
+				if grantControls, ok := policyMap["grantControls"]; ok {
+					caMetadata["grantControls"] = grantControls
+				}
+				if sessionControls, ok := policyMap["sessionControls"]; ok {
+					caMetadata["sessionControls"] = sessionControls
+				}
+				resourceNode["metadata"] = l.toJSONString(caMetadata)
+				caNodes = append(caNodes, resourceNode)
+			}
+		}
+
+		if created := l.createResourceNodesBatch(session, ctx, caNodes, []string{"Resource", "ConditionalAccessPolicy"}); created > 0 {
+			totalCreated += created
+			message.Info("Created Conditional Access Policy resource nodes", "count", created)
 		}
 	}
 
@@ -788,8 +904,15 @@ func (l *Neo4jImporterLink) createHierarchyResources() int {
 			// Filter for subscriptions in the management_groups array
 			if strings.ToLower(itemType) == "microsoft.resources/subscriptions" {
 				subscriptionId := l.getStringValue(itemMap, "name")
-				subscriptionName := l.getStringValue(itemMap, "name")
 				subscriptionFullId := l.getStringValue(itemMap, "id")
+
+				// The displayName is in properties.displayName, not in the top-level name field
+				subscriptionName := subscriptionId
+				if properties, ok := itemMap["properties"].(map[string]interface{}); ok {
+					if dn := l.getStringValue(properties, "displayName"); dn != "" {
+						subscriptionName = dn
+					}
+				}
 
 				if subscriptionId != "" && subscriptionFullId != "" {
 					// Create subscription metadata
@@ -833,15 +956,13 @@ func (l *Neo4jImporterLink) createHierarchyResources() int {
 						rgName := l.getStringValue(rgMap, "name")
 
 						if rgId != "" && rgName != "" {
-							// Normalize resource group name to lowercase for consistency
-							normalizedRgName := strings.ToLower(rgName)
 							normalizedRgId := l.normalizeResourceId(rgId)
 
 							// Use normalized ID for deduplication
 							if !seenResourceGroups[normalizedRgId] {
 								// Create resource group metadata
 								rgMetadata := map[string]interface{}{
-									"resourceGroupName": normalizedRgName,
+									"resourceGroupName": strings.ToLower(rgName),
 									"subscriptionId":    subscriptionId,
 									"location":          l.getStringValue(rgMap, "location"),
 								}
@@ -849,8 +970,8 @@ func (l *Neo4jImporterLink) createHierarchyResources() int {
 								resourceGroupNodes = append(resourceGroupNodes, map[string]interface{}{
 									"id":                normalizedRgId,
 									"resourceType":      "Microsoft.Resources/resourceGroups",
-									"displayName":       normalizedRgName,
-									"resourceGroupName": normalizedRgName,
+									"displayName":       rgName, // preserve original case for display
+									"resourceGroupName": strings.ToLower(rgName), // lowercase for matching
 									"subscriptionId":    subscriptionId,
 									"location":          l.getStringValue(rgMap, "location"),
 									"metadata":          l.toJSONString(rgMetadata),
@@ -996,8 +1117,34 @@ func (l *Neo4jImporterLink) createAzureResourceNodes() int {
 	return totalCreated
 }
 
-// createResourceNodesBatch creates a batch of Resource nodes with the given labels
+// createResourceNodesBatch creates a batch of Resource nodes with the given labels.
+// Large batches are automatically chunked to avoid Neo4j transaction memory limits.
 func (l *Neo4jImporterLink) createResourceNodesBatch(session neo4j.SessionWithContext, ctx context.Context, resourceNodes []map[string]interface{}, labels []string) int {
+	if len(resourceNodes) == 0 {
+		return 0
+	}
+
+	const chunkSize = 50000
+	if len(resourceNodes) > chunkSize {
+		totalCreated := 0
+		for i := 0; i < len(resourceNodes); i += chunkSize {
+			end := i + chunkSize
+			if end > len(resourceNodes) {
+				end = len(resourceNodes)
+			}
+			chunk := resourceNodes[i:end]
+			created := l.createResourceNodesBatchChunk(session, ctx, chunk, labels)
+			totalCreated += created
+			message.Info("Batch chunk progress", "labels", strings.Join(labels, ":"), "chunk", fmt.Sprintf("%d-%d", i, end), "created", created)
+		}
+		return totalCreated
+	}
+
+	return l.createResourceNodesBatchChunk(session, ctx, resourceNodes, labels)
+}
+
+// createResourceNodesBatchChunk creates a single chunk of Resource nodes (called by createResourceNodesBatch)
+func (l *Neo4jImporterLink) createResourceNodesBatchChunk(session neo4j.SessionWithContext, ctx context.Context, resourceNodes []map[string]interface{}, labels []string) int {
 	if len(resourceNodes) == 0 {
 		return 0
 	}
@@ -1022,11 +1169,38 @@ func (l *Neo4jImporterLink) createResourceNodesBatch(session neo4j.SessionWithCo
 			r.accountEnabled = resource.accountEnabled,
 			r.identityType = resource.identityType,
 			r.identityPrincipalId = resource.identityPrincipalId,
-			r.userAssignedIdentities = resource.userAssignedIdentities
+			r.userAssignedIdentities = resource.userAssignedIdentities,
+			r.userType = resource.userType,
+			r.mail = resource.mail,
+			r.description = resource.description,
+			r.securityEnabled = resource.securityEnabled,
+			r.mailEnabled = resource.mailEnabled,
+			r.credentialSummary_hasCredentials = resource.credentialSummary_hasCredentials,
+			r.credentialSummary_totalCredentials = resource.credentialSummary_totalCredentials,
+			r.credentialSummary_passwordCredentials = resource.credentialSummary_passwordCredentials,
+			r.credentialSummary_keyCredentials = resource.credentialSummary_keyCredentials,
+			r.department = resource.department,
+			r.jobTitle = resource.jobTitle,
+			r.givenName = resource.givenName,
+			r.surname = resource.surname,
+			r.membershipRule = resource.membershipRule,
+			r.isAssignableToRole = resource.isAssignableToRole,
+			r.onPremisesSyncEnabled = resource.onPremisesSyncEnabled,
+			r.visibility = resource.visibility,
+			r.deviceId = resource.deviceId,
+			r.resourceGroupName = resource.resourceGroupName
 		ON MATCH SET
 			r.displayName = resource.displayName,
 			r.metadata = COALESCE(resource.metadata, '{}'),
-			r.accountEnabled = resource.accountEnabled
+			r.accountEnabled = resource.accountEnabled,
+			r.userType = resource.userType,
+			r.mail = resource.mail,
+			r.credentialSummary_hasCredentials = resource.credentialSummary_hasCredentials,
+			r.credentialSummary_totalCredentials = resource.credentialSummary_totalCredentials,
+			r.credentialSummary_passwordCredentials = resource.credentialSummary_passwordCredentials,
+			r.credentialSummary_keyCredentials = resource.credentialSummary_keyCredentials,
+			r.department = resource.department,
+			r.jobTitle = resource.jobTitle
 	`, labelString)
 
 	result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
@@ -1922,6 +2096,9 @@ func (l *Neo4jImporterLink) createPIMEnrichedPermissionEdges() bool {
 	// Process eligible PIM assignments
 	pimEdgesMarked := 0
 	pimEdgesCreated := 0
+	pimDroppedNoPrincipal := 0
+	pimDroppedNoRole := 0
+	pimDroppedMissingFields := 0
 
 	for _, assignment := range eligiblePIMAssignments {
 		assignmentMap, ok := assignment.(map[string]interface{})
@@ -1937,11 +2114,13 @@ func (l *Neo4jImporterLink) createPIMEnrichedPermissionEdges() bool {
 			subject := l.getMapValue(assignmentMap, "subject")
 			if subject == nil {
 				l.Logger.Debug("Skipping PIM assignment: missing principalId and subject")
+				pimDroppedNoPrincipal++
 				continue
 			}
 			principalId = l.getStringValue(subject, "id")
 			if principalId == "" {
 				l.Logger.Debug("Skipping PIM assignment: empty principalId in subject")
+				pimDroppedNoPrincipal++
 				continue
 			}
 		}
@@ -1963,21 +2142,25 @@ func (l *Neo4jImporterLink) createPIMEnrichedPermissionEdges() bool {
 			roleDefinition := l.getMapValue(assignmentMap, "roleDefinition")
 			if roleDefinition == nil {
 				l.Logger.Debug("Skipping PIM assignment: missing roleDefinitionId and roleDefinition", "principalId", principalId)
+				pimDroppedNoRole++
 				continue
 			}
 			roleTemplateId = l.getStringValue(roleDefinition, "templateId")
 		}
 
-		// Extract role name (both formats use displayName at top level or nested)
-		roleName := l.getStringValue(assignmentMap, "displayName")
+		// Extract role name — SDK format uses roleDefinitionDisplayName, legacy uses displayName
+		roleName := l.getStringValue(assignmentMap, "roleDefinitionDisplayName")
 		if roleName == "" {
-			roleDefinition := l.getMapValue(assignmentMap, "roleDefinition")
-			if roleDefinition != nil {
+			roleName = l.getStringValue(assignmentMap, "displayName")
+		}
+		if roleName == "" {
+			if roleDefinition := l.getMapValue(assignmentMap, "roleDefinition"); roleDefinition != nil {
 				roleName = l.getStringValue(roleDefinition, "displayName")
 			}
 		}
 
 		if principalId == "" || roleTemplateId == "" || roleName == "" {
+			pimDroppedMissingFields++
 			continue
 		}
 
@@ -2071,7 +2254,17 @@ func (l *Neo4jImporterLink) createPIMEnrichedPermissionEdges() bool {
 		}
 	}
 
-	message.Info("Processed eligible PIM: %d edges marked, %d edges created", pimEdgesMarked, pimEdgesCreated)
+	totalPIMDropped := pimDroppedNoPrincipal + pimDroppedNoRole + pimDroppedMissingFields
+	if totalPIMDropped > 0 {
+		l.Logger.Info("PIM processing summary",
+			"total_input", len(eligiblePIMAssignments),
+			"edges_marked", pimEdgesMarked,
+			"edges_created", pimEdgesCreated,
+			"dropped_no_principal", pimDroppedNoPrincipal,
+			"dropped_no_role", pimDroppedNoRole,
+			"dropped_missing_fields", pimDroppedMissingFields)
+	}
+	message.Info("Processed eligible PIM: %d edges marked, %d edges created (dropped: %d)", pimEdgesMarked, pimEdgesCreated, totalPIMDropped)
 
 	// Mark remaining Entra ID HAS_PERMISSION edges as "Permanent" (not PIM-eligible)
 	cypherMarkPermanent := `
@@ -2218,6 +2411,34 @@ func (l *Neo4jImporterLink) createRBACPermissionEdges() bool {
 		}
 	}
 
+	// Process management group/tenant RBAC assignments from top-level key
+	if mgRBACData := l.getArrayValue(l.consolidatedData, "management_group_rbac"); len(mgRBACData) > 0 {
+		// Group by scope type for processing
+		var mgAssignments, tenantAssignments []interface{}
+		for _, assignment := range mgRBACData {
+			if assignmentMap, ok := assignment.(map[string]interface{}); ok {
+				scope := normalizeScope(l.getStringValue(assignmentMap, "scope"))
+				if strings.HasPrefix(scope, "/providers/microsoft.management/managementgroups/") {
+					mgAssignments = append(mgAssignments, assignment)
+				} else {
+					tenantAssignments = append(tenantAssignments, assignment)
+				}
+			}
+		}
+		if len(mgAssignments) > 0 {
+			scopePermissions := l.processScopedRBACAssignments(mgAssignments, "managementGroup")
+			permissions = append(permissions, scopePermissions...)
+			totalAssignments += len(mgAssignments)
+			l.Logger.Info("Found management group RBAC assignments from MG/tenant collection", "count", len(mgAssignments))
+		}
+		if len(tenantAssignments) > 0 {
+			scopePermissions := l.processScopedRBACAssignments(tenantAssignments, "tenant")
+			permissions = append(permissions, scopePermissions...)
+			totalAssignments += len(tenantAssignments)
+			l.Logger.Info("Found tenant-level RBAC assignments from MG/tenant collection", "count", len(tenantAssignments))
+		}
+	}
+
 	if totalAssignments == 0 {
 		message.Info("No Azure RBAC role assignments found")
 		return false
@@ -2297,7 +2518,11 @@ func (l *Neo4jImporterLink) createRBACPermissionEdges() bool {
 	currentCount := l.edgeCounts["HAS_PERMISSION"]
 	l.edgeCounts["HAS_PERMISSION"] = currentCount + totalEdgesCreated
 
-	message.Info("Created %d total RBAC HAS_PERMISSION edges", totalEdgesCreated)
+	l.Logger.Info("RBAC edge creation summary",
+		"total_input_assignments", totalAssignments,
+		"permissions_resolved", len(permissions),
+		"edges_created", totalEdgesCreated)
+	message.Info("Created %d total RBAC HAS_PERMISSION edges (from %d input assignments, %d resolved permissions)", totalEdgesCreated, totalAssignments, len(permissions))
 	return totalEdgesCreated > 0
 }
 
@@ -3047,6 +3272,10 @@ func (l *Neo4jImporterLink) processScopedRBACAssignments(assignments []interface
 	l.Logger.Debug("*** ENTERING processScopedRBACAssignments ***", "assignmentCount", len(assignments), "scopeType", scopeType)
 	var permissions []map[string]interface{}
 
+	droppedMissingFields := 0
+	droppedScopeParse := 0
+	droppedRoleResolve := 0
+
 	for _, assignment := range assignments {
 		assignmentMap, ok := assignment.(map[string]interface{})
 		if !ok {
@@ -3061,19 +3290,21 @@ func (l *Neo4jImporterLink) processScopedRBACAssignments(assignments []interface
 			// SDK collector format with direct fields
 			principalId = directPrincipalId
 			roleDefinitionId = l.getStringValue(assignmentMap, "roleDefinitionId")
-			scope = l.getStringValue(assignmentMap, "scope")
+			scope = normalizeScope(l.getStringValue(assignmentMap, "scope"))
 			principalType = l.getStringValue(assignmentMap, "principalType")
 		} else if properties := l.getMapValue(assignmentMap, "properties"); properties != nil {
 			// Azure REST API format with properties wrapper
 			principalId = l.getStringValue(properties, "principalId")
 			roleDefinitionId = l.getStringValue(properties, "roleDefinitionId")
-			scope = l.getStringValue(properties, "scope")
+			scope = normalizeScope(l.getStringValue(properties, "scope"))
 			principalType = l.getStringValue(properties, "principalType")
 		} else {
+			droppedMissingFields++
 			continue
 		}
 
 		if principalId == "" || roleDefinitionId == "" || scope == "" {
+			droppedMissingFields++
 			continue
 		}
 
@@ -3081,6 +3312,7 @@ func (l *Neo4jImporterLink) processScopedRBACAssignments(assignments []interface
 		targetResourceType, targetResourceId := l.parseAssignmentScope(scope)
 		if targetResourceType == "" || targetResourceId == "" {
 			l.Logger.Debug("Could not parse assignment scope - skipping", "scope", scope)
+			droppedScopeParse++
 			continue
 		}
 
@@ -3100,13 +3332,25 @@ func (l *Neo4jImporterLink) processScopedRBACAssignments(assignments []interface
 				"targetResourceType": targetResourceType,
 				"grantedAt":          scopeType,
 				"roleDefinitionId":   roleDefinitionId,
-				"roleName":          roleName, // Store role name for escalation matching
+				"roleName":           roleName, // Store role name for escalation matching
 				"principalType":      principalType,
 				"source":             "Azure RBAC",
 			})
 		} else {
+			droppedRoleResolve++
 			l.Logger.Debug("Could not get role name - skipping role assignment", "roleDefinitionId", roleDefinitionId, "principalId", principalId)
 		}
+	}
+
+	totalDropped := droppedMissingFields + droppedScopeParse + droppedRoleResolve
+	if totalDropped > 0 {
+		l.Logger.Info("RBAC processing summary",
+			"scopeType", scopeType,
+			"total_input", len(assignments),
+			"edges_created", len(permissions),
+			"dropped_missing_fields", droppedMissingFields,
+			"dropped_scope_parse", droppedScopeParse,
+			"dropped_role_resolve", droppedRoleResolve)
 	}
 
 	return permissions
@@ -3114,12 +3358,15 @@ func (l *Neo4jImporterLink) processScopedRBACAssignments(assignments []interface
 
 // parseAssignmentScope parses an Azure RBAC assignment scope to determine the target resource
 func (l *Neo4jImporterLink) parseAssignmentScope(scope string) (resourceType, resourceId string) {
+	// Normalize scope at entry — all comparisons below use lowercase
+	scope = normalizeScope(scope)
+
 	// Handle different Azure scope formats:
 	// /subscriptions/{subscription-id}
-	// /subscriptions/{subscription-id}/resourceGroups/{resource-group-name}
-	// /subscriptions/{subscription-id}/resourceGroups/{resource-group-name}/providers/{resource-provider}/{resource-type}/{resource-name}
+	// /subscriptions/{subscription-id}/resourcegroups/{resource-group-name}
+	// /subscriptions/{subscription-id}/resourcegroups/{resource-group-name}/providers/{resource-provider}/{resource-type}/{resource-name}
 	// /subscriptions/{subscription-id}/providers/{resource-provider}/{resource-type}/{resource-name}
-	// /providers/Microsoft.Management/managementGroups/{management-group-id}
+	// /providers/microsoft.management/managementgroups/{management-group-id}
 	// / (tenant root)
 
 	// Handle tenant root scope - map to Tenant Root Management Group
@@ -3146,19 +3393,19 @@ func (l *Neo4jImporterLink) parseAssignmentScope(scope string) (resourceType, re
 	}
 
 	// Check if it's a management group scope
-	// Format: /providers/Microsoft.Management/managementGroups/{management-group-id}
-	if len(parts) >= 4 && parts[0] == "providers" && parts[1] == "Microsoft.Management" && parts[2] == "managementGroups" {
+	// Format: /providers/microsoft.management/managementgroups/{management-group-id}
+	if len(parts) >= 4 && parts[0] == "providers" && parts[1] == "microsoft.management" && parts[2] == "managementgroups" {
 		managementGroupId := parts[3]
 		return "ManagementGroup", l.normalizeResourceId(fmt.Sprintf("/providers/Microsoft.Management/managementGroups/%s", managementGroupId))
 	}
 
-	// Check if it's a subscription-level scope
+	// Check if it's a subscription-level scope (normalized to lowercase)
 	if len(parts) == 2 && parts[0] == "subscriptions" {
 		return "Microsoft.Resources/subscriptions", l.normalizeResourceId(fmt.Sprintf("/subscriptions/%s", parts[1]))
 	}
 
-	// Check if it's a resource group-level scope
-	if len(parts) == 4 && parts[0] == "subscriptions" && parts[2] == "resourceGroups" {
+	// Check if it's a resource group-level scope (normalized to lowercase)
+	if len(parts) == 4 && parts[0] == "subscriptions" && parts[2] == "resourcegroups" {
 		// For resource groups, we need to construct the resource ID
 		subscriptionId := parts[1]
 		resourceGroupName := parts[3]
@@ -3241,6 +3488,14 @@ func (l *Neo4jImporterLink) getStringValue(data map[string]interface{}, key stri
 		}
 	}
 	return ""
+}
+
+// setIfNotEmpty adds a string property to the node map only if the source value is non-empty.
+// This prevents storing empty strings in Neo4j for optional fields.
+func (l *Neo4jImporterLink) setIfNotEmpty(node map[string]interface{}, key string, source map[string]interface{}, sourceKey string) {
+	if val := l.getStringValue(source, sourceKey); val != "" {
+		node[key] = val
+	}
 }
 
 func (l *Neo4jImporterLink) getBoolValue(data map[string]interface{}, key string) bool {
@@ -3367,7 +3622,7 @@ func (l *Neo4jImporterLink) createGraphPermissionEdges() error {
 					beforeCount := len(allGraphPermissions)
 					allGraphPermissions = l.extractGraphPermissionsFromAzureAD(azureADMap, allGraphPermissions)
 					afterCount := len(allGraphPermissions)
-					l.Logger.Info(fmt.Sprintf("Extracted %d Graph permissions from subscription %s (added: %d, total: %d)", subscriptionID, afterCount-beforeCount, afterCount))
+					l.Logger.Info(fmt.Sprintf("Extracted Graph permissions from subscription %s (added: %d, total: %d)", subscriptionID, afterCount-beforeCount, afterCount))
 				}
 			}
 		}
@@ -3637,8 +3892,8 @@ func (l *Neo4jImporterLink) createApplicationOwnershipDirectEdges(applicationOwn
 		}
 
 		edge := map[string]interface{}{
-			"sourceId":    ownerID,
-			"targetId":    applicationID,
+			"sourceId":    l.normalizeResourceId(ownerID),
+			"targetId":    l.normalizeResourceId(applicationID),
 			"source":      "ApplicationOwnership",
 			"createdAt":   currentTime,
 		}
@@ -3723,8 +3978,8 @@ func (l *Neo4jImporterLink) createGroupOwnershipDirectEdges(groupOwnership []int
 		}
 
 		edge := map[string]interface{}{
-			"sourceId":    ownerID,
-			"targetId":    groupID,
+			"sourceId":    l.normalizeResourceId(ownerID),
+			"targetId":    l.normalizeResourceId(groupID),
 			"source":      "GroupOwnership",
 			"createdAt":   currentTime,
 		}
@@ -3810,8 +4065,8 @@ func (l *Neo4jImporterLink) createServicePrincipalOwnershipDirectEdges(servicePr
 		}
 
 		edge := map[string]interface{}{
-			"sourceId":    ownerID,
-			"targetId":    servicePrincipalID,
+			"sourceId":    l.normalizeResourceId(ownerID),
+			"targetId":    l.normalizeResourceId(servicePrincipalID),
 			"source":      "ServicePrincipalOwnership",
 			"createdAt":   currentTime,
 		}
@@ -3937,9 +4192,12 @@ func (l *Neo4jImporterLink) createValidatedEscalationEdges() bool {
 		{"Resource_ToUserAssignedMI", l.getValidatedAzureResourceToUserAssignedMIQuery()},
 	}
 
-	// Execute each query individually for better error handling and reporting
+	// Execute each query individually for better error handling and reporting.
+	// Queries are wrapped with CALL { } IN TRANSACTIONS for defensive batching
+	// to prevent OOM on large tenants (e.g., 5 Global Admins × 190K users).
 	for _, eq := range validatedQueries {
-		result, err := session.Run(ctx, eq.query, map[string]interface{}{})
+		batchedQuery := l.wrapQueryWithBatching(eq.query, 10000)
+		result, err := session.Run(ctx, batchedQuery, map[string]interface{}{})
 		if err != nil {
 			l.Logger.Error("Failed to create CAN_ESCALATE edges", "query", eq.name, "error", err)
 			continue
@@ -3970,6 +4228,52 @@ func (l *Neo4jImporterLink) createValidatedEscalationEdges() bool {
 
 	message.Info("Completed validated CAN_ESCALATE edge creation", "total_created", totalCreated)
 	return totalCreated > 0
+}
+
+// wrapQueryWithBatching transforms a CAN_ESCALATE query to use CALL { } IN TRANSACTIONS
+// for defensive batching. All queries follow the pattern:
+//
+//	<match/filter logic>
+//	WITH DISTINCT <vars>
+//	MERGE (...)-[r:CAN_ESCALATE ...]->(...) ON CREATE SET ... RETURN count(r) as created
+//
+// This function splits at the last "WITH DISTINCT" and wraps the MERGE block in
+// CALL { WITH <vars> ... } IN TRANSACTIONS OF <batchSize> ROWS, aggregating with sum().
+func (l *Neo4jImporterLink) wrapQueryWithBatching(query string, batchSize int) string {
+	// Find the last "WITH DISTINCT" which precedes the MERGE block
+	lastWithIdx := strings.LastIndex(query, "WITH DISTINCT")
+	if lastWithIdx == -1 {
+		// No WITH DISTINCT found — return query unchanged (shouldn't happen)
+		return query
+	}
+
+	// Split: everything before the last WITH DISTINCT is the outer query
+	outerQuery := strings.TrimRight(query[:lastWithIdx], " \t\n")
+
+	// The WITH DISTINCT line and everything after (MERGE, ON CREATE SET, RETURN)
+	mergeBlock := query[lastWithIdx:]
+
+	// Extract variable names from "WITH DISTINCT var1, var2, var3"
+	// Find the end of the WITH DISTINCT line
+	withLine := mergeBlock
+	newlineIdx := strings.Index(mergeBlock, "\n")
+	if newlineIdx != -1 {
+		withLine = mergeBlock[:newlineIdx]
+	}
+	// Strip "WITH DISTINCT " prefix to get "var1, var2, var3"
+	varsStr := strings.TrimPrefix(strings.TrimSpace(withLine), "WITH DISTINCT ")
+
+	// Replace "RETURN count(r) as created" with "RETURN count(r) as c" inside the CALL block
+	innerBlock := strings.Replace(mergeBlock, "RETURN count(r) as created", "RETURN count(r) as c", 1)
+
+	return fmt.Sprintf(`%s
+	%s
+	CALL {
+		WITH %s
+		%s
+	} IN TRANSACTIONS OF %d ROWS
+	RETURN sum(c) as created
+	`, outerQuery, withLine, varsStr, innerBlock[newlineIdx+1:], batchSize)
 }
 
 // VALIDATED DIRECTORY ROLE FUNCTIONS (8 functions)

@@ -600,9 +600,11 @@ func (l *IAMComprehensiveCollectorLink) getAllRBACAssignmentsViaARG(accessToken 
 
 	// Group assignments by scope type
 	groupedAssignments := map[string][]interface{}{
-		"subscription":    []interface{}{},
-		"resourceGroup":   []interface{}{},
-		"resource":   []interface{}{},
+		"subscription":    {},
+		"resourceGroup":   {},
+		"resource":        {},
+		"managementGroup": {},
+		"tenant":          {},
 	}
 
 	for _, assignment := range result.Data {
@@ -612,17 +614,22 @@ func (l *IAMComprehensiveCollectorLink) getAllRBACAssignmentsViaARG(accessToken 
 				continue
 			}
 
-			scopeStr := fmt.Sprintf("%v", scope)
+			scopeStr := normalizeScope(fmt.Sprintf("%v", scope))
+			assignmentMap["scope"] = scopeStr
 
 			// Determine scope type based on scope path structure
-			if strings.Count(scopeStr, "/") == 2 {
+			if strings.HasPrefix(scopeStr, "/providers/microsoft.management/managementgroups/") {
+				groupedAssignments["managementGroup"] = append(groupedAssignments["managementGroup"], assignment)
+			} else if scopeStr == "/" || scopeStr == "" {
+				groupedAssignments["tenant"] = append(groupedAssignments["tenant"], assignment)
+			} else if strings.Count(scopeStr, "/") == 2 {
 				// /subscriptions/{subscription-id} = subscription level
 				groupedAssignments["subscription"] = append(groupedAssignments["subscription"], assignment)
-			} else if strings.Contains(scopeStr, "/resourceGroups/") && strings.Count(scopeStr, "/") == 4 {
-				// /subscriptions/{sub}/resourceGroups/{rg} = resource group level
+			} else if strings.Contains(scopeStr, "/resourcegroups/") && strings.Count(scopeStr, "/") == 4 {
+				// /subscriptions/{sub}/resourcegroups/{rg} = resource group level
 				groupedAssignments["resourceGroup"] = append(groupedAssignments["resourceGroup"], assignment)
-			} else if strings.Contains(scopeStr, "/resourceGroups/") && strings.Count(scopeStr, "/") > 4 {
-				// /subscriptions/{sub}/resourceGroups/{rg}/providers/... = resource level
+			} else if strings.Contains(scopeStr, "/resourcegroups/") && strings.Count(scopeStr, "/") > 4 {
+				// /subscriptions/{sub}/resourcegroups/{rg}/providers/... = resource level
 				groupedAssignments["resource"] = append(groupedAssignments["resource"], assignment)
 			} else {
 				// Default to subscription level if unsure
@@ -634,7 +641,9 @@ func (l *IAMComprehensiveCollectorLink) getAllRBACAssignmentsViaARG(accessToken 
 	l.Logger.Info("RBAC assignment breakdown",
 		"subscription_level", len(groupedAssignments["subscription"]),
 		"resource_group_level", len(groupedAssignments["resourceGroup"]),
-		"resource_level", len(groupedAssignments["resource"]))
+		"resource_level", len(groupedAssignments["resource"]),
+		"management_group_level", len(groupedAssignments["managementGroup"]),
+		"tenant_level", len(groupedAssignments["tenant"]))
 
 	return groupedAssignments, nil
 }
@@ -1002,15 +1011,19 @@ func (l *IAMComprehensiveCollectorLink) collectAllAzureRMData(accessToken, subsc
 			azurermData["subscriptionRoleAssignments"] = allRBACAssignments["subscription"]
 			azurermData["resourceGroupRoleAssignments"] = allRBACAssignments["resourceGroup"]
 			azurermData["resourceLevelRoleAssignments"] = allRBACAssignments["resource"]
+			azurermData["managementGroupRoleAssignments"] = allRBACAssignments["managementGroup"]
+			azurermData["tenantRoleAssignments"] = allRBACAssignments["tenant"]
 			mu.Unlock()
 
 			subCount := len(allRBACAssignments["subscription"])
 			rgCount := len(allRBACAssignments["resourceGroup"])
 			resCount := len(allRBACAssignments["resource"])
-			totalCount := subCount + rgCount + resCount
+			mgCount := len(allRBACAssignments["managementGroup"])
+			tenantCount := len(allRBACAssignments["tenant"])
+			totalCount := subCount + rgCount + resCount + mgCount + tenantCount
 
-			l.Logger.Info(fmt.Sprintf("Collected %d total RBAC assignments: %d subscription, %d resource group, %d resource-level",
-				totalCount, subCount, rgCount, resCount))
+			l.Logger.Info(fmt.Sprintf("Collected %d total RBAC assignments: %d subscription, %d resource group, %d resource-level, %d management group, %d tenant",
+				totalCount, subCount, rgCount, resCount, mgCount, tenantCount))
 		} else {
 			l.Logger.Error("Failed to collect RBAC assignments via ARG", "error", err)
 		}

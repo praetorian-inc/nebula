@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
 	"github.com/microsoftgraph/msgraph-sdk-go/rolemanagement"
+	"github.com/microsoftgraph/msgraph-sdk-go/users"
 	"github.com/praetorian-inc/janus-framework/pkg/chain"
 	"github.com/praetorian-inc/janus-framework/pkg/chain/cfg"
 	"github.com/praetorian-inc/nebula/internal/message"
@@ -92,6 +93,14 @@ func (l *SDKComprehensiveCollectorLink) writeCheckpoint(name string, data interf
 	}
 
 	l.Logger.Info("Checkpoint saved", "name", name, "items", countCheckpointItems(data), "bytes", len(jsonData))
+}
+
+// normalizeScope normalizes an Azure scope string for consistent comparison.
+// Azure scopes are case-insensitive but APIs return inconsistent casing
+// (e.g., "resourceGroups" vs "resourcegroups"). This lowercases the entire
+// scope and trims trailing slashes so all downstream comparisons work.
+func normalizeScope(scope string) string {
+	return strings.ToLower(strings.TrimRight(scope, "/"))
 }
 
 // countCheckpointItems returns the item count for checkpoint logging
@@ -188,6 +197,20 @@ func (l *SDKComprehensiveCollectorLink) Process(input interface{}) error {
 	message.Info("Management Groups SDK collector completed! Collected %d management groups", len(managementGroupsData))
 	l.writeCheckpoint("17-management-groups.json", managementGroupsData)
 
+	// STEP 3.5: Collect management group and tenant-scoped RBAC assignments (once per tenant)
+	l.Logger.Info("Collecting management group and tenant RBAC assignments via ARG")
+	message.Info("Collecting management group/tenant RBAC assignments...")
+
+	mgRBACData, err := l.collectManagementGroupAndTenantRBAC()
+	if err != nil {
+		l.Logger.Warn("Failed to collect MG/tenant RBAC, continuing without it", "error", err)
+		message.Info("Warning: Failed to collect MG/tenant RBAC: %v", err)
+		mgRBACData = []interface{}{}
+	}
+
+	message.Info("MG/tenant RBAC collection completed! Collected %d assignments", len(mgRBACData))
+	l.writeCheckpoint("17b-mg-tenant-rbac.json", mgRBACData)
+
 	// STEP 4: Process subscriptions using optimized batched SDK clients
 	l.Logger.Info("Processing %d subscriptions with optimized batched SDK clients", len(subscriptionIDs))
 	allSubscriptionData := l.processSubscriptionsOptimizedSDK(subscriptionIDs)
@@ -205,10 +228,11 @@ func (l *SDKComprehensiveCollectorLink) Process(input interface{}) error {
 				"azurerm_collector":   "sdk_completed",
 			},
 		},
-		"azure_ad":           azureADData,
-		"pim":                pimData,
-		"management_groups":  managementGroupsData,
-		"azure_resources":    allSubscriptionData,
+		"azure_ad":              azureADData,
+		"pim":                   pimData,
+		"management_groups":     managementGroupsData,
+		"management_group_rbac": mgRBACData,
+		"azure_resources":       allSubscriptionData,
 	}
 
 	// Calculate totals for summary (same logic as HTTP version)
@@ -238,14 +262,16 @@ func (l *SDKComprehensiveCollectorLink) Process(input interface{}) error {
 	}
 
 	managementGroupsTotal := len(managementGroupsData)
+	mgRBACTotal := len(mgRBACData)
 
 	// Add summary metadata
 	consolidatedData["collection_metadata"].(map[string]interface{})["data_summary"] = map[string]interface{}{
 		"total_azure_ad_objects":     adTotal,
 		"total_pim_objects":          pimTotal,
 		"total_management_groups":    managementGroupsTotal,
+		"total_mg_rbac_assignments":  mgRBACTotal,
 		"total_azurerm_objects":      azurermTotal,
-		"total_objects":              adTotal + pimTotal + managementGroupsTotal + azurermTotal,
+		"total_objects":              adTotal + pimTotal + managementGroupsTotal + mgRBACTotal + azurermTotal,
 	}
 
 	message.Info("=== Azure IAM Collection Summary (SDK) ====")
@@ -253,6 +279,7 @@ func (l *SDKComprehensiveCollectorLink) Process(input interface{}) error {
 	message.Info("Total Azure AD objects: %d", adTotal)
 	message.Info("Total PIM objects: %d", pimTotal)
 	message.Info("Total Management Groups: %d", managementGroupsTotal)
+	message.Info("Total MG/tenant RBAC assignments: %d", mgRBACTotal)
 	message.Info("Total AzureRM objects: %d", azurermTotal)
 	message.Info("🎉 Azure IAM SDK collection completed successfully!")
 
@@ -385,10 +412,9 @@ func (l *SDKComprehensiveCollectorLink) callGraphBatchAPI(ctx context.Context, a
 			time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond) // Exponential backoff
 			continue
 		}
-		defer resp.Body.Close()
-
 		// Handle rate limiting (429) and server errors (5xx) with retry
 		if resp.StatusCode == 429 || (resp.StatusCode >= 500 && resp.StatusCode < 600) {
+			resp.Body.Close()
 			if attempt == maxRetries-1 {
 				return nil, fmt.Errorf("batch API call failed with status %d after %d attempts", resp.StatusCode, maxRetries)
 			}
@@ -405,6 +431,7 @@ func (l *SDKComprehensiveCollectorLink) callGraphBatchAPI(ctx context.Context, a
 			time.Sleep(retryAfter)
 			continue
 		}
+		defer resp.Body.Close()
 
 		if resp.StatusCode != 200 {
 			return nil, fmt.Errorf("batch API call failed with status %d", resp.StatusCode)
@@ -677,6 +704,7 @@ func (l *SDKComprehensiveCollectorLink) listSubscriptionsWithSDK() ([]string, er
 // collectAllGraphDataSDK collects all Azure AD data using Microsoft Graph SDK
 func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]interface{}, error) {
 	azureADData := make(map[string]interface{})
+	collectionErrors := make(map[string]string)
 	ctx := l.Context()
 
 	overallStart := l.logCollectionStart("Azure AD Graph SDK Collection")
@@ -690,6 +718,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect users via paginated SDK", "error", err)
 		azureADData["users"] = []interface{}{} // Empty array on error
+		collectionErrors["users"] = err.Error()
 		l.logCollectionEnd("users", startTime, 0)
 	} else {
 		azureADData["users"] = users
@@ -705,6 +734,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect groups via paginated SDK", "error", err)
 		azureADData["groups"] = []interface{}{} // Empty array on error
+		collectionErrors["groups"] = err.Error()
 		l.logCollectionEnd("groups", startTime, 0)
 	} else {
 		azureADData["groups"] = groups
@@ -720,6 +750,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect service principals via paginated SDK", "error", err)
 		azureADData["servicePrincipals"] = []interface{}{} // Empty array on error
+		collectionErrors["servicePrincipals"] = err.Error()
 		l.logCollectionEnd("servicePrincipals", startTime, 0)
 	} else {
 		azureADData["servicePrincipals"] = servicePrincipals
@@ -735,6 +766,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect applications via paginated SDK", "error", err)
 		azureADData["applications"] = []interface{}{} // Empty array on error
+		collectionErrors["applications"] = err.Error()
 		l.logCollectionEnd("applications", startTime, 0)
 	} else {
 		azureADData["applications"] = applications
@@ -750,6 +782,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect devices via paginated SDK", "error", err)
 		azureADData["devices"] = []interface{}{} // Empty array on error
+		collectionErrors["devices"] = err.Error()
 		l.logCollectionEnd("devices", startTime, 0)
 	} else {
 		azureADData["devices"] = devices
@@ -765,6 +798,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect directory roles via paginated SDK", "error", err)
 		azureADData["directoryRoles"] = []interface{}{} // Empty array on error
+		collectionErrors["directoryRoles"] = err.Error()
 		l.logCollectionEnd("directoryRoles", startTime, 0)
 	} else {
 		azureADData["directoryRoles"] = directoryRoles
@@ -780,6 +814,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect role definitions via paginated SDK", "error", err)
 		azureADData["roleDefinitions"] = []interface{}{} // Empty array on error
+		collectionErrors["roleDefinitions"] = err.Error()
 		l.logCollectionEnd("roleDefinitions", startTime, 0)
 	} else {
 		azureADData["roleDefinitions"] = roleDefinitions
@@ -795,11 +830,42 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect conditional access policies via paginated SDK", "error", err)
 		azureADData["conditionalAccessPolicies"] = []interface{}{} // Empty array on error
+		collectionErrors["conditionalAccessPolicies"] = err.Error()
 		l.logCollectionEnd("conditionalAccessPolicies", startTime, 0)
 	} else {
 		azureADData["conditionalAccessPolicies"] = conditionalAccessPolicies
 		l.logCollectionEnd("conditionalAccessPolicies", startTime, len(conditionalAccessPolicies))
 		l.writeCheckpoint("08-conditional-access.json", conditionalAccessPolicies)
+	}
+
+	// Collection 8b: Named Locations (used by CA policies)
+	startTime = l.logCollectionStart("namedLocations")
+	message.Info("Collecting named locations from Graph SDK...")
+	namedLocations, err := l.collectAllNamedLocationsWithPagination(ctx)
+	if err != nil {
+		l.Logger.Error("Failed to collect named locations via paginated SDK", "error", err)
+		azureADData["namedLocations"] = []interface{}{} // Empty array on error
+		collectionErrors["namedLocations"] = err.Error()
+		l.logCollectionEnd("namedLocations", startTime, 0)
+	} else {
+		azureADData["namedLocations"] = namedLocations
+		l.logCollectionEnd("namedLocations", startTime, len(namedLocations))
+		l.writeCheckpoint("08b-named-locations.json", namedLocations)
+	}
+
+	// Collection 8c: Administrative Units
+	startTime = l.logCollectionStart("administrativeUnits")
+	message.Info("Collecting administrative units from Graph SDK...")
+	administrativeUnits, err := l.collectAllAdministrativeUnitsWithPagination(ctx)
+	if err != nil {
+		l.Logger.Error("Failed to collect administrative units via paginated SDK", "error", err)
+		azureADData["administrativeUnits"] = []interface{}{} // Empty array on error
+		collectionErrors["administrativeUnits"] = err.Error()
+		l.logCollectionEnd("administrativeUnits", startTime, 0)
+	} else {
+		azureADData["administrativeUnits"] = administrativeUnits
+		l.logCollectionEnd("administrativeUnits", startTime, len(administrativeUnits))
+		l.writeCheckpoint("08c-administrative-units.json", administrativeUnits)
 	}
 
 	// Collection 9: Directory Role Assignments (CRITICAL for iam-push compatibility)
@@ -809,6 +875,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect directory role assignments via paginated SDK", "error", err)
 		azureADData["directoryRoleAssignments"] = []interface{}{} // Empty array on error
+		collectionErrors["directoryRoleAssignments"] = err.Error()
 		l.logCollectionEnd("directoryRoleAssignments", startTime, 0)
 	} else {
 		azureADData["directoryRoleAssignments"] = directoryRoleAssignments
@@ -855,6 +922,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect group memberships via SDK", "error", err)
 		azureADData["groupMemberships"] = []interface{}{} // Empty array on error
+		collectionErrors["groupMemberships"] = err.Error()
 		l.logCollectionEnd("groupMemberships", startTime, 0)
 	} else {
 		azureADData["groupMemberships"] = groupMemberships
@@ -869,6 +937,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect OAuth2 permission grants via SDK", "error", err)
 		azureADData["oauth2PermissionGrants"] = []interface{}{} // Empty array on error
+		collectionErrors["oauth2PermissionGrants"] = err.Error()
 		l.logCollectionEnd("oauth2PermissionGrants", startTime, 0)
 	} else {
 		azureADData["oauth2PermissionGrants"] = oauth2Grants
@@ -883,6 +952,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect app role assignments via SDK", "error", err)
 		azureADData["appRoleAssignments"] = []interface{}{} // Empty array on error
+		collectionErrors["appRoleAssignments"] = err.Error()
 		l.logCollectionEnd("appRoleAssignments", startTime, 0)
 	} else {
 		azureADData["appRoleAssignments"] = appRoleAssignments
@@ -897,6 +967,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect group ownership via SDK", "error", err)
 		azureADData["groupOwnership"] = []interface{}{} // Empty array on error
+		collectionErrors["groupOwnership"] = err.Error()
 		l.logCollectionEnd("groupOwnership", startTime, 0)
 	} else {
 		azureADData["groupOwnership"] = groupOwnership
@@ -911,6 +982,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect service principal ownership via SDK", "error", err)
 		azureADData["servicePrincipalOwnership"] = []interface{}{} // Empty array on error
+		collectionErrors["servicePrincipalOwnership"] = err.Error()
 		l.logCollectionEnd("servicePrincipalOwnership", startTime, 0)
 	} else {
 		azureADData["servicePrincipalOwnership"] = servicePrincipalOwnership
@@ -925,6 +997,7 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	if err != nil {
 		l.Logger.Error("Failed to collect application ownership via SDK", "error", err)
 		azureADData["applicationOwnership"] = []interface{}{} // Empty array on error
+		collectionErrors["applicationOwnership"] = err.Error()
 		l.logCollectionEnd("applicationOwnership", startTime, 0)
 	} else {
 		azureADData["applicationOwnership"] = applicationOwnership
@@ -932,16 +1005,34 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 		l.writeCheckpoint("14c-app-ownership.json", applicationOwnership)
 	}
 
+	// Collection 16: User Manager Relationships
+	startTime = l.logCollectionStart("userManagers")
+	message.Info("Collecting user manager relationships from Graph SDK...")
+	l.enrichUsersWithManagerSDK(ctx, azureADData)
+	l.logCollectionEnd("userManagers", startTime, 0)
+
 	// Credential Enrichment (CRITICAL for iam-push compatibility)
 	l.Logger.Info("Enriching applications with credential metadata")
 	l.enrichApplicationsWithCredentialMetadataSDK(azureADData)
 	l.writeCheckpoint("14-credential-enrichment.json", azureADData["applications"])
+
+	l.Logger.Info("Enriching service principals with credential metadata")
+	l.enrichServicePrincipalsWithCredentialMetadataSDK(azureADData)
+	l.writeCheckpoint("14a-sp-credential-enrichment.json", azureADData["servicePrincipals"])
 
 	// Calculate total resource counts for final summary
 	totalItems := len(users) + len(groups) + len(servicePrincipals) + len(applications) + len(devices) +
 			len(directoryRoles) + len(roleDefinitions) + len(conditionalAccessPolicies) +
 			len(directoryRoleAssignments) + len(groupMemberships) + len(oauth2Grants) + len(appRoleAssignments) +
 			len(groupOwnership) + len(servicePrincipalOwnership) + len(applicationOwnership)
+
+	if len(collectionErrors) > 0 {
+		azureADData["_collectionErrors"] = collectionErrors
+		l.Logger.Warn("Some collections encountered errors", "failedCollections", len(collectionErrors))
+		for key, errMsg := range collectionErrors {
+			l.Logger.Warn("Collection error", "collection", key, "error", errMsg)
+		}
+	}
 
 	l.logCollectionEnd("Azure AD Graph SDK Collection", overallStart, totalItems)
 	return azureADData, nil
@@ -1394,16 +1485,17 @@ func (l *SDKComprehensiveCollectorLink) collectPaginatedGraphDataSDK(accessToken
 		if err != nil {
 			return nil, fmt.Errorf("failed to execute request: %v", err)
 		}
-		defer resp.Body.Close()
-
 		if resp.StatusCode != 200 {
+			resp.Body.Close()
 			return nil, fmt.Errorf("Graph API call failed with status %d", resp.StatusCode)
 		}
 
 		var result map[string]interface{}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
 			return nil, fmt.Errorf("failed to decode response: %v", err)
 		}
+		resp.Body.Close()
 
 		if value, ok := result["value"].([]interface{}); ok {
 			allResults = append(allResults, value...)
@@ -1462,6 +1554,46 @@ func (l *SDKComprehensiveCollectorLink) enrichApplicationsWithCredentialMetadata
 	}
 
 	l.Logger.Info("Enriched applications with credential metadata", "count", enrichedCount)
+}
+
+// enrichServicePrincipalsWithCredentialMetadataSDK processes SP data and embeds credential metadata
+func (l *SDKComprehensiveCollectorLink) enrichServicePrincipalsWithCredentialMetadataSDK(azureADData map[string]interface{}) {
+	spsData, ok := azureADData["servicePrincipals"]
+	if !ok {
+		l.Logger.Warn("No service principals data found for credential enrichment")
+		return
+	}
+
+	sps, ok := spsData.([]interface{})
+	if !ok {
+		l.Logger.Warn("Service principals data is not in expected format")
+		return
+	}
+
+	enrichedCount := 0
+	for _, spInterface := range sps {
+		sp, ok := spInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		keyCredentials := l.analyzeKeyCredentialsSDK(sp)
+		if len(keyCredentials) > 0 {
+			sp["credentialSummary_keyCredentials"] = keyCredentials
+			enrichedCount++
+		}
+
+		passwordCredentials := l.analyzePasswordCredentialsSDK(sp)
+		if len(passwordCredentials) > 0 {
+			sp["credentialSummary_passwordCredentials"] = passwordCredentials
+			enrichedCount++
+		}
+
+		sp["credentialSummary_totalCredentials"] = len(keyCredentials) + len(passwordCredentials)
+		sp["credentialSummary_hasCredentials"] = (len(keyCredentials) + len(passwordCredentials)) > 0
+	}
+
+	l.Logger.Info("Enriched service principals with credential metadata", "count", enrichedCount)
 }
 
 // analyzeKeyCredentialsSDK processes keyCredentials array and returns summary
@@ -2133,17 +2265,19 @@ func (l *SDKComprehensiveCollectorLink) collectAllRoleAssignmentsSDK(subscriptio
 		}
 
 		scope, _ := assignmentMap["scope"].(string)
+		scope = normalizeScope(scope)
+		assignmentMap["scope"] = scope
 
 		switch {
-		case strings.HasPrefix(scope, "/providers/Microsoft.Management/managementGroups/"):
+		case strings.HasPrefix(scope, "/providers/microsoft.management/managementgroups/"):
 			managementGroupRoleAssignments = append(managementGroupRoleAssignments, assignmentMap)
 		case scope == "/" || scope == "":
 			tenantRoleAssignments = append(tenantRoleAssignments, assignmentMap)
 		case strings.Count(scope, "/") == 2:
 			// /subscriptions/{subscription-id}
 			subscriptionRoleAssignments = append(subscriptionRoleAssignments, assignmentMap)
-		case strings.Contains(scope, "/resourceGroups/") && strings.Count(scope, "/") == 4:
-			// /subscriptions/{sub}/resourceGroups/{rg}
+		case strings.Contains(scope, "/resourcegroups/") && strings.Count(scope, "/") == 4:
+			// /subscriptions/{sub}/resourcegroups/{rg}
 			resourceGroupRoleAssignments = append(resourceGroupRoleAssignments, assignmentMap)
 		default:
 			// Resource-level or other
@@ -2161,6 +2295,62 @@ func (l *SDKComprehensiveCollectorLink) collectAllRoleAssignmentsSDK(subscriptio
 		"tenantLevel", len(tenantRoleAssignments))
 
 	return subscriptionRoleAssignments, resourceGroupRoleAssignments, resourceLevelRoleAssignments, managementGroupRoleAssignments, tenantRoleAssignments, nil
+}
+
+// collectManagementGroupAndTenantRBAC collects RBAC assignments scoped to management groups
+// and tenant root. These are NOT returned by per-subscription ARG queries because they have
+// no subscriptionId, so this must be called once per tenant.
+func (l *SDKComprehensiveCollectorLink) collectManagementGroupAndTenantRBAC() ([]interface{}, error) {
+	ctx := l.Context()
+
+	query := `
+		authorizationresources
+		| where type =~ 'microsoft.authorization/roleassignments'
+		| where isempty(subscriptionId)
+			or properties.scope startswith '/providers/Microsoft.Management/managementGroups/'
+			or properties.scope == '/'
+		| extend principalId = tostring(properties.principalId)
+		| extend roleDefinitionId = tostring(properties.roleDefinitionId)
+		| extend scope = tostring(properties.scope)
+		| extend principalType = tostring(properties.principalType)
+		| project id, name, subscriptionId, principalId, roleDefinitionId, scope, principalType, properties`
+
+	resultFormat := armresourcegraph.ResultFormatObjectArray
+	queryRequest := armresourcegraph.QueryRequest{
+		Query:   &query,
+		Options: &armresourcegraph.QueryRequestOptions{ResultFormat: &resultFormat},
+	}
+
+	var allAssignments []interface{}
+	for {
+		response, err := l.resourceGraphClient.Resources(ctx, queryRequest, nil)
+		if err != nil {
+			return nil, fmt.Errorf("Resource Graph MG/tenant RBAC query failed: %v", err)
+		}
+
+		if response.Data != nil {
+			decodeResourceGraphData(response.Data, &allAssignments)
+		}
+
+		if response.SkipToken == nil || len(*response.SkipToken) == 0 {
+			break
+		}
+		queryRequest.Options.SkipToken = response.SkipToken
+	}
+
+	// Normalize scopes on ingestion
+	for _, assignment := range allAssignments {
+		if assignmentMap, ok := assignment.(map[string]interface{}); ok {
+			if scope, ok := assignmentMap["scope"].(string); ok {
+				assignmentMap["scope"] = normalizeScope(scope)
+			}
+		}
+	}
+
+	l.Logger.Info("Collected management group and tenant RBAC assignments",
+		"total", len(allAssignments))
+
+	return allAssignments, nil
 }
 
 // deduplicateRBACAssignments removes duplicate RBAC assignments by ID across all scope levels
@@ -2390,10 +2580,32 @@ func (l *SDKComprehensiveCollectorLink) collectAllUsersWithPagination(ctx contex
 
 	l.Logger.Info("Starting paginated user collection")
 
-	// Get first page (SDK already uses optimized pagination internally)
-	response, err := l.graphClient.Users().Get(ctx, nil)
+	// Get first page with $select to include userType (not returned by default)
+	requestConfig := &users.UsersRequestBuilderGetRequestConfiguration{
+		QueryParameters: &users.UsersRequestBuilderGetQueryParameters{
+			Select: []string{
+				"id", "displayName", "userPrincipalName", "mail", "jobTitle",
+				"department", "accountEnabled", "userType", "createdDateTime",
+				"businessPhones", "givenName", "surname", "mobilePhone",
+				"officeLocation", "preferredLanguage", "onPremisesSyncEnabled",
+				"signInActivity", "riskState", "riskLevel", "riskLastUpdatedDateTime",
+			},
+		},
+	}
+	response, err := l.graphClient.Users().Get(ctx, requestConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get first page of users: %v", err)
+		// signInActivity and risk fields require Azure AD P1/P2 license; retry without them
+		l.Logger.Warn("User collection failed with extended fields, retrying without P2 fields", "error", err)
+		requestConfig.QueryParameters.Select = []string{
+			"id", "displayName", "userPrincipalName", "mail", "jobTitle",
+			"department", "accountEnabled", "userType", "createdDateTime",
+			"businessPhones", "givenName", "surname", "mobilePhone",
+			"officeLocation", "preferredLanguage", "onPremisesSyncEnabled",
+		}
+		response, err = l.graphClient.Users().Get(ctx, requestConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get first page of users: %v", err)
+		}
 	}
 
 	for {
@@ -2403,6 +2615,25 @@ func (l *SDKComprehensiveCollectorLink) collectAllUsersWithPagination(ctx contex
 
 		// Convert users from current page
 		for _, user := range users {
+			// GetUserType() may return nil even with $select due to SDK backing store behavior.
+			// Fall back to backing store and additional data.
+			var userType interface{}
+			if ut := user.GetUserType(); ut != nil {
+				userType = *ut
+			} else if bs := user.GetBackingStore(); bs != nil {
+				if val, err := bs.Get("userType"); err == nil && val != nil {
+					if s, ok := val.(*string); ok && s != nil {
+						userType = *s
+					}
+				}
+			}
+			if userType == nil {
+				if ad := user.GetAdditionalData(); ad != nil {
+					if val, ok := ad["userType"]; ok {
+						userType = val
+					}
+				}
+			}
 			userMap := map[string]interface{}{
 				"id":                *user.GetId(),
 				"displayName":       stringPtrToInterface(user.GetDisplayName()),
@@ -2411,15 +2642,33 @@ func (l *SDKComprehensiveCollectorLink) collectAllUsersWithPagination(ctx contex
 				"jobTitle":          stringPtrToInterface(user.GetJobTitle()),
 				"department":        stringPtrToInterface(user.GetDepartment()),
 				"accountEnabled":    boolPtrToInterface(user.GetAccountEnabled()),
-				"userType":          stringPtrToInterface(user.GetUserType()),
+				"userType":          userType,
 				"createdDateTime":   timeToInterface(user.GetCreatedDateTime()),
 				"businessPhones":    stringSliceToInterface(user.GetBusinessPhones()),
 				"givenName":         stringPtrToInterface(user.GetGivenName()),
 				"surname":           stringPtrToInterface(user.GetSurname()),
 				"mobilePhone":       stringPtrToInterface(user.GetMobilePhone()),
 				"officeLocation":    stringPtrToInterface(user.GetOfficeLocation()),
-				"preferredLanguage": stringPtrToInterface(user.GetPreferredLanguage()),
+				"preferredLanguage":    stringPtrToInterface(user.GetPreferredLanguage()),
+				"onPremisesSyncEnabled": boolPtrToInterface(user.GetOnPremisesSyncEnabled()),
 			}
+
+			// Extract risk and signIn fields (require Azure AD P1/P2 license, may be nil)
+			if ad := user.GetAdditionalData(); ad != nil {
+				if riskState, ok := ad["riskState"]; ok {
+					userMap["riskState"] = riskState
+				}
+				if riskLevel, ok := ad["riskLevel"]; ok {
+					userMap["riskLevel"] = riskLevel
+				}
+				if riskLastUpdated, ok := ad["riskLastUpdatedDateTime"]; ok {
+					userMap["riskLastUpdatedDateTime"] = riskLastUpdated
+				}
+				if signInActivity, ok := ad["signInActivity"]; ok {
+					userMap["signInActivity"] = signInActivity
+				}
+			}
+
 			allUsers = append(allUsers, userMap)
 		}
 
@@ -2465,14 +2714,17 @@ func (l *SDKComprehensiveCollectorLink) collectAllGroupsWithPagination(ctx conte
 		// Convert groups from current page (matching HTTP version fields exactly)
 		for _, group := range groups {
 			groupMap := map[string]interface{}{
-				"id":                    *group.GetId(),
-				"displayName":           stringPtrToInterface(group.GetDisplayName()),
-				"description":           stringPtrToInterface(group.GetDescription()),
-				"groupTypes":            stringSliceToInterface(group.GetGroupTypes()),
-				"membershipRule":        stringPtrToInterface(group.GetMembershipRule()),
-				"mailEnabled":           boolPtrToInterface(group.GetMailEnabled()),
-				"securityEnabled":       boolPtrToInterface(group.GetSecurityEnabled()),
-				"createdDateTime":       timeToInterface(group.GetCreatedDateTime()),
+				"id":                      *group.GetId(),
+				"displayName":             stringPtrToInterface(group.GetDisplayName()),
+				"description":             stringPtrToInterface(group.GetDescription()),
+				"groupTypes":              stringSliceToInterface(group.GetGroupTypes()),
+				"membershipRule":          stringPtrToInterface(group.GetMembershipRule()),
+				"mailEnabled":             boolPtrToInterface(group.GetMailEnabled()),
+				"securityEnabled":         boolPtrToInterface(group.GetSecurityEnabled()),
+				"createdDateTime":         timeToInterface(group.GetCreatedDateTime()),
+				"isAssignableToRole":      boolPtrToInterface(group.GetIsAssignableToRole()),
+				"visibility":              stringPtrToInterface(group.GetVisibility()),
+				"onPremisesSyncEnabled":   boolPtrToInterface(group.GetOnPremisesSyncEnabled()),
 			}
 			allGroups = append(allGroups, groupMap)
 		}
@@ -2535,7 +2787,54 @@ func (l *SDKComprehensiveCollectorLink) collectAllServicePrincipalsWithPaginatio
 				"createdDateTime":            createdDateTime,
 				"replyUrls":                  stringSliceToInterface(sp.GetReplyUrls()),
 				"signInAudience":             stringPtrToInterface(sp.GetSignInAudience()),
+				"appOwnerOrganizationId":     uuidPtrToInterface(sp.GetAppOwnerOrganizationId()),
 			}
+
+			// Extract keyCredentials (certificates)
+			if keyCreds := sp.GetKeyCredentials(); keyCreds != nil {
+				var keyCredsList []interface{}
+				for _, kc := range keyCreds {
+					if kc == nil {
+						continue
+					}
+					kcMap := map[string]interface{}{
+						"keyId":         uuidPtrToInterface(kc.GetKeyId()),
+						"displayName":   stringPtrToInterface(kc.GetDisplayName()),
+						"usage":         stringPtrToInterface(kc.GetUsage()),
+						"startDateTime": timeToInterface(kc.GetStartDateTime()),
+						"endDateTime":   timeToInterface(kc.GetEndDateTime()),
+					}
+					if kc.GetTypeEscaped() != nil {
+						kcMap["type"] = *kc.GetTypeEscaped()
+					}
+					keyCredsList = append(keyCredsList, kcMap)
+				}
+				spMap["keyCredentials"] = keyCredsList
+			} else {
+				spMap["keyCredentials"] = []interface{}{}
+			}
+
+			// Extract passwordCredentials (client secrets)
+			if pwdCreds := sp.GetPasswordCredentials(); pwdCreds != nil {
+				var pwdCredsList []interface{}
+				for _, pc := range pwdCreds {
+					if pc == nil {
+						continue
+					}
+					pcMap := map[string]interface{}{
+						"keyId":         uuidPtrToInterface(pc.GetKeyId()),
+						"displayName":   stringPtrToInterface(pc.GetDisplayName()),
+						"hint":          stringPtrToInterface(pc.GetHint()),
+						"startDateTime": timeToInterface(pc.GetStartDateTime()),
+						"endDateTime":   timeToInterface(pc.GetEndDateTime()),
+					}
+					pwdCredsList = append(pwdCredsList, pcMap)
+				}
+				spMap["passwordCredentials"] = pwdCredsList
+			} else {
+				spMap["passwordCredentials"] = []interface{}{}
+			}
+
 			allSPs = append(allSPs, spMap)
 		}
 
@@ -2640,6 +2939,39 @@ func (l *SDKComprehensiveCollectorLink) collectAllApplicationsWithPagination(ctx
 				appMap["passwordCredentials"] = []interface{}{}
 			}
 
+			// Extract requiredResourceAccess (API permissions the app requests)
+			if rra := app.GetRequiredResourceAccess(); rra != nil {
+				var rraList []interface{}
+				for _, ra := range rra {
+					if ra == nil {
+						continue
+					}
+					raMap := map[string]interface{}{
+						"resourceAppId": stringPtrToInterface(ra.GetResourceAppId()),
+					}
+					if accesses := ra.GetResourceAccess(); accesses != nil {
+						var accessList []interface{}
+						for _, access := range accesses {
+							if access == nil {
+								continue
+							}
+							accessMap := map[string]interface{}{
+								"id": uuidPtrToInterface(access.GetId()),
+							}
+							if access.GetTypeEscaped() != nil {
+								accessMap["type"] = *access.GetTypeEscaped()
+							}
+							accessList = append(accessList, accessMap)
+						}
+						raMap["resourceAccess"] = accessList
+					}
+					rraList = append(rraList, raMap)
+				}
+				appMap["requiredResourceAccess"] = rraList
+			} else {
+				appMap["requiredResourceAccess"] = []interface{}{}
+			}
+
 			allApps = append(allApps, appMap)
 		}
 
@@ -2715,6 +3047,23 @@ func (l *SDKComprehensiveCollectorLink) collectAllPIMEligibleWithPagination(ctx 
 			// Extract expanded role definition display name
 			if roleDef := schedule.GetRoleDefinition(); roleDef != nil {
 				scheduleMap["roleDefinitionDisplayName"] = stringPtrToInterface(roleDef.GetDisplayName())
+			}
+
+			// Extract scheduleInfo (start/end times for the assignment)
+			if scheduleInfo := schedule.GetScheduleInfo(); scheduleInfo != nil {
+				siMap := map[string]interface{}{
+					"startDateTime": timeToInterface(scheduleInfo.GetStartDateTime()),
+				}
+				if expiration := scheduleInfo.GetExpiration(); expiration != nil {
+					expMap := map[string]interface{}{
+						"endDateTime": timeToInterface(expiration.GetEndDateTime()),
+					}
+					if expiration.GetTypeEscaped() != nil {
+						expMap["type"] = expiration.GetTypeEscaped().String()
+					}
+					siMap["expiration"] = expMap
+				}
+				scheduleMap["scheduleInfo"] = siMap
 			}
 
 			allEligible = append(allEligible, scheduleMap)
@@ -2794,6 +3143,23 @@ func (l *SDKComprehensiveCollectorLink) collectAllPIMActiveWithPagination(ctx co
 				scheduleMap["roleDefinitionDisplayName"] = stringPtrToInterface(roleDef.GetDisplayName())
 			}
 
+			// Extract scheduleInfo (start/end times for the assignment)
+			if scheduleInfo := schedule.GetScheduleInfo(); scheduleInfo != nil {
+				siMap := map[string]interface{}{
+					"startDateTime": timeToInterface(scheduleInfo.GetStartDateTime()),
+				}
+				if expiration := scheduleInfo.GetExpiration(); expiration != nil {
+					expMap := map[string]interface{}{
+						"endDateTime": timeToInterface(expiration.GetEndDateTime()),
+					}
+					if expiration.GetTypeEscaped() != nil {
+						expMap["type"] = expiration.GetTypeEscaped().String()
+					}
+					siMap["expiration"] = expMap
+				}
+				scheduleMap["scheduleInfo"] = siMap
+			}
+
 			allActive = append(allActive, scheduleMap)
 		}
 
@@ -2851,15 +3217,17 @@ func (l *SDKComprehensiveCollectorLink) collectAllDevicesWithPagination(ctx cont
 			}
 
 			deviceMap := map[string]interface{}{
-				"id":                    *device.GetId(),
-				"displayName":           stringPtrToInterface(device.GetDisplayName()),
-				"deviceId":              stringPtrToInterface(device.GetDeviceId()),
-				"operatingSystem":       stringPtrToInterface(device.GetOperatingSystem()),
-				"operatingSystemVersion": stringPtrToInterface(device.GetOperatingSystemVersion()),
-				"isCompliant":           boolPtrToInterface(device.GetIsCompliant()),
-				"isManaged":             boolPtrToInterface(device.GetIsManaged()),
-				"accountEnabled":        boolPtrToInterface(device.GetAccountEnabled()),
-				"createdDateTime":       createdDateTime,
+				"id":                              *device.GetId(),
+				"displayName":                     stringPtrToInterface(device.GetDisplayName()),
+				"deviceId":                        stringPtrToInterface(device.GetDeviceId()),
+				"operatingSystem":                 stringPtrToInterface(device.GetOperatingSystem()),
+				"operatingSystemVersion":           stringPtrToInterface(device.GetOperatingSystemVersion()),
+				"isCompliant":                     boolPtrToInterface(device.GetIsCompliant()),
+				"isManaged":                       boolPtrToInterface(device.GetIsManaged()),
+				"accountEnabled":                  boolPtrToInterface(device.GetAccountEnabled()),
+				"createdDateTime":                 createdDateTime,
+				"trustType":                       stringPtrToInterface(device.GetTrustType()),
+				"approximateLastSignInDateTime":   timeToInterface(device.GetApproximateLastSignInDateTime()),
 			}
 			allDevices = append(allDevices, deviceMap)
 		}
@@ -3213,10 +3581,137 @@ func (l *SDKComprehensiveCollectorLink) collectAllConditionalAccessPoliciesWithP
 			policyMap := map[string]interface{}{
 				"id":               *policy.GetId(),
 				"displayName":      stringPtrToInterface(policy.GetDisplayName()),
+				"description":      stringPtrToInterface(policy.GetDescription()),
 				"state":            stateToInterface(policy.GetState()),
 				"createdDateTime":  timeToInterface(policy.GetCreatedDateTime()),
 				"modifiedDateTime": timeToInterface(policy.GetModifiedDateTime()),
 			}
+
+			// Extract conditions
+			if conditions := policy.GetConditions(); conditions != nil {
+				conditionsMap := map[string]interface{}{}
+
+				// User conditions
+				if users := conditions.GetUsers(); users != nil {
+					conditionsMap["users"] = map[string]interface{}{
+						"includeUsers":  stringSliceToInterface(users.GetIncludeUsers()),
+						"excludeUsers":  stringSliceToInterface(users.GetExcludeUsers()),
+						"includeGroups": stringSliceToInterface(users.GetIncludeGroups()),
+						"excludeGroups": stringSliceToInterface(users.GetExcludeGroups()),
+						"includeRoles":  stringSliceToInterface(users.GetIncludeRoles()),
+						"excludeRoles":  stringSliceToInterface(users.GetExcludeRoles()),
+					}
+				}
+
+				// Application conditions
+				if apps := conditions.GetApplications(); apps != nil {
+					conditionsMap["applications"] = map[string]interface{}{
+						"includeApplications": stringSliceToInterface(apps.GetIncludeApplications()),
+						"excludeApplications": stringSliceToInterface(apps.GetExcludeApplications()),
+						"includeUserActions":  stringSliceToInterface(apps.GetIncludeUserActions()),
+					}
+				}
+
+				// Location conditions
+				if locations := conditions.GetLocations(); locations != nil {
+					conditionsMap["locations"] = map[string]interface{}{
+						"includeLocations": stringSliceToInterface(locations.GetIncludeLocations()),
+						"excludeLocations": stringSliceToInterface(locations.GetExcludeLocations()),
+					}
+				}
+
+				// Platform conditions
+				if platforms := conditions.GetPlatforms(); platforms != nil {
+					includePlatforms := []interface{}{}
+					for _, p := range platforms.GetIncludePlatforms() {
+						includePlatforms = append(includePlatforms, p.String())
+					}
+					excludePlatforms := []interface{}{}
+					for _, p := range platforms.GetExcludePlatforms() {
+						excludePlatforms = append(excludePlatforms, p.String())
+					}
+					conditionsMap["platforms"] = map[string]interface{}{
+						"includePlatforms": includePlatforms,
+						"excludePlatforms": excludePlatforms,
+					}
+				}
+
+				// Client app types
+				if clientAppTypes := conditions.GetClientAppTypes(); clientAppTypes != nil {
+					types := []interface{}{}
+					for _, cat := range clientAppTypes {
+						types = append(types, cat.String())
+					}
+					conditionsMap["clientAppTypes"] = types
+				}
+
+				// Risk levels
+				if signInRiskLevels := conditions.GetSignInRiskLevels(); signInRiskLevels != nil {
+					levels := []interface{}{}
+					for _, rl := range signInRiskLevels {
+						levels = append(levels, rl.String())
+					}
+					conditionsMap["signInRiskLevels"] = levels
+				}
+				if userRiskLevels := conditions.GetUserRiskLevels(); userRiskLevels != nil {
+					levels := []interface{}{}
+					for _, rl := range userRiskLevels {
+						levels = append(levels, rl.String())
+					}
+					conditionsMap["userRiskLevels"] = levels
+				}
+
+				policyMap["conditions"] = conditionsMap
+			}
+
+			// Extract grant controls
+			if grantControls := policy.GetGrantControls(); grantControls != nil {
+				gcMap := map[string]interface{}{
+					"operator": stringPtrToInterface(grantControls.GetOperator()),
+				}
+				if builtInControls := grantControls.GetBuiltInControls(); builtInControls != nil {
+					controls := []interface{}{}
+					for _, c := range builtInControls {
+						controls = append(controls, c.String())
+					}
+					gcMap["builtInControls"] = controls
+				}
+				if termsOfUse := grantControls.GetTermsOfUse(); termsOfUse != nil {
+					gcMap["termsOfUse"] = stringSliceToInterface(termsOfUse)
+				}
+				policyMap["grantControls"] = gcMap
+			}
+
+			// Extract session controls
+			if sessionControls := policy.GetSessionControls(); sessionControls != nil {
+				scMap := map[string]interface{}{}
+				if signInFreq := sessionControls.GetSignInFrequency(); signInFreq != nil {
+					freqMap := map[string]interface{}{
+						"isEnabled": boolPtrToInterface(signInFreq.GetIsEnabled()),
+					}
+					if signInFreq.GetValue() != nil {
+						freqMap["value"] = *signInFreq.GetValue()
+					}
+					if signInFreq.GetTypeEscaped() != nil {
+						freqMap["type"] = signInFreq.GetTypeEscaped().String()
+					}
+					scMap["signInFrequency"] = freqMap
+				}
+				if persistentBrowser := sessionControls.GetPersistentBrowser(); persistentBrowser != nil {
+					pbMap := map[string]interface{}{
+						"isEnabled": boolPtrToInterface(persistentBrowser.GetIsEnabled()),
+					}
+					if persistentBrowser.GetMode() != nil {
+						pbMap["mode"] = persistentBrowser.GetMode().String()
+					}
+					scMap["persistentBrowser"] = pbMap
+				}
+				if disableResilience := sessionControls.GetDisableResilienceDefaults(); disableResilience != nil {
+					scMap["disableResilienceDefaults"] = *disableResilience
+				}
+				policyMap["sessionControls"] = scMap
+			}
+
 			allPolicies = append(allPolicies, policyMap)
 		}
 
@@ -3238,6 +3733,158 @@ func (l *SDKComprehensiveCollectorLink) collectAllConditionalAccessPoliciesWithP
 
 	l.Logger.Info("Completed paginated conditional access policy collection", "totalPages", pageCount, "totalObjects", totalObjects)
 	return allPolicies, nil
+}
+
+// enrichUsersWithManagerSDK adds managerId to each user by querying the manager relationship
+func (l *SDKComprehensiveCollectorLink) enrichUsersWithManagerSDK(ctx context.Context, azureADData map[string]interface{}) {
+	usersData, ok := azureADData["users"]
+	if !ok {
+		return
+	}
+	users, ok := usersData.([]interface{})
+	if !ok {
+		return
+	}
+
+	enrichedCount := 0
+	for _, userInterface := range users {
+		userMap, ok := userInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		userID, ok := userMap["id"].(string)
+		if !ok || userID == "" {
+			continue
+		}
+
+		manager, err := l.graphClient.Users().ByUserId(userID).Manager().Get(ctx, nil)
+		if err != nil {
+			continue // Not all users have managers (e.g., top-level accounts)
+		}
+		if manager != nil {
+			if ad := manager.GetAdditionalData(); ad != nil {
+				if id, ok := ad["id"]; ok {
+					userMap["managerId"] = id
+					enrichedCount++
+				}
+			}
+		}
+	}
+
+	l.Logger.Info("Enriched users with manager relationships", "count", enrichedCount)
+}
+
+// collectAllNamedLocationsWithPagination collects all named locations using proper pagination
+func (l *SDKComprehensiveCollectorLink) collectAllNamedLocationsWithPagination(ctx context.Context) ([]interface{}, error) {
+	var allLocations []interface{}
+	pageCount := 0
+	totalObjects := 0
+
+	l.Logger.Info("Starting paginated named location collection")
+
+	response, err := l.graphClient.Identity().ConditionalAccess().NamedLocations().Get(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get first page of named locations: %v", err)
+	}
+
+	for {
+		pageCount++
+		locations := response.GetValue()
+		l.Logger.Info("Processing named location page", "page", pageCount, "objects", len(locations))
+
+		for _, location := range locations {
+			locMap := map[string]interface{}{
+				"id":              location.GetId(),
+				"displayName":     stringPtrToInterface(location.GetDisplayName()),
+				"createdDateTime": timeToInterface(location.GetCreatedDateTime()),
+			}
+
+			if additionalData := location.GetAdditionalData(); additionalData != nil {
+				if isTrusted, ok := additionalData["isTrusted"]; ok {
+					locMap["isTrusted"] = isTrusted
+				}
+				if ipRanges, ok := additionalData["ipRanges"]; ok {
+					locMap["ipRanges"] = ipRanges
+				}
+				if countriesAndRegions, ok := additionalData["countriesAndRegions"]; ok {
+					locMap["countriesAndRegions"] = countriesAndRegions
+				}
+				if odataType, ok := additionalData["@odata.type"]; ok {
+					locMap["locationType"] = odataType
+				}
+			}
+
+			allLocations = append(allLocations, locMap)
+		}
+
+		totalObjects += len(locations)
+
+		odataNextLink := response.GetOdataNextLink()
+		if odataNextLink == nil || *odataNextLink == "" {
+			break
+		}
+
+		response, err = l.graphClient.Identity().ConditionalAccess().NamedLocations().WithUrl(*odataNextLink).Get(ctx, nil)
+		if err != nil {
+			l.Logger.Error("Failed to get next page of named locations", "error", err, "page", pageCount+1)
+			break
+		}
+	}
+
+	l.Logger.Info("Completed paginated named location collection", "totalPages", pageCount, "totalObjects", totalObjects)
+	return allLocations, nil
+}
+
+// collectAllAdministrativeUnitsWithPagination collects all administrative units using proper pagination
+func (l *SDKComprehensiveCollectorLink) collectAllAdministrativeUnitsWithPagination(ctx context.Context) ([]interface{}, error) {
+	var allUnits []interface{}
+	pageCount := 0
+	totalObjects := 0
+
+	l.Logger.Info("Starting paginated administrative unit collection")
+
+	response, err := l.graphClient.Directory().AdministrativeUnits().Get(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get first page of administrative units: %v", err)
+	}
+
+	for {
+		pageCount++
+		units := response.GetValue()
+		l.Logger.Info("Processing administrative unit page", "page", pageCount, "objects", len(units))
+
+		for _, unit := range units {
+			unitMap := map[string]interface{}{
+				"id":              *unit.GetId(),
+				"displayName":     stringPtrToInterface(unit.GetDisplayName()),
+				"description":     stringPtrToInterface(unit.GetDescription()),
+				"visibility":      stringPtrToInterface(unit.GetVisibility()),
+			}
+			if membershipType := unit.GetMembershipType(); membershipType != nil {
+				unitMap["membershipType"] = *membershipType
+			}
+			if membershipRule := unit.GetMembershipRule(); membershipRule != nil {
+				unitMap["membershipRule"] = *membershipRule
+			}
+			allUnits = append(allUnits, unitMap)
+		}
+
+		totalObjects += len(units)
+
+		odataNextLink := response.GetOdataNextLink()
+		if odataNextLink == nil || *odataNextLink == "" {
+			break
+		}
+
+		response, err = l.graphClient.Directory().AdministrativeUnits().WithUrl(*odataNextLink).Get(ctx, nil)
+		if err != nil {
+			l.Logger.Error("Failed to get next page of administrative units", "error", err, "page", pageCount+1)
+			break
+		}
+	}
+
+	l.Logger.Info("Completed paginated administrative unit collection", "totalPages", pageCount, "totalObjects", totalObjects)
+	return allUnits, nil
 }
 
 // decodeResourceGraphData extracts resource data from Resource Graph response and appends to resources slice

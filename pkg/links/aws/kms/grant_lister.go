@@ -81,9 +81,11 @@ func (l *KMSGrantLister) Process(resource types.EnrichedResourceDescription) err
 		keyID = kid
 	}
 
-	// Get key ARN
+	// Get key ARN — native fallback writes "Arn", CloudControl writes "KeyArn"
 	keyArn := ""
-	if ka, ok := propsMap["KeyArn"].(string); ok {
+	if ka, ok := propsMap["KeyArn"].(string); ok && ka != "" {
+		keyArn = ka
+	} else if ka, ok := propsMap["Arn"].(string); ok && ka != "" {
 		keyArn = ka
 	}
 
@@ -92,7 +94,7 @@ func (l *KMSGrantLister) Process(resource types.EnrichedResourceDescription) err
 	keyManager, hasKeyManager := propsMap["KeyManager"].(string)
 	keyStateStr, hasKeyState := propsMap["KeyState"].(string)
 
-	if hasKeyManager && hasKeyState {
+	if hasKeyManager && hasKeyState && keyArn != "" {
 		// Skip AWS managed keys (they cannot have custom grants)
 		if keyManager == string(kmstypes.KeyManagerTypeAws) {
 			slog.Debug("Skipping AWS managed key - cannot have custom grants",

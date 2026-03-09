@@ -199,32 +199,27 @@ func (a *AWSCloudControl) processError(resourceType, region string, err error) (
 // NativeAPIFallbackHandler defines a function that handles native API fallback for a resource type
 type NativeAPIFallbackHandler func(a *AWSCloudControl, resourceType, region string, config aws.Config, accountId string)
 
-// nativeAPIFallbackRegistry maps resource type prefixes to their fallback handlers
+// nativeAPIFallbackRegistry maps exact resource type names to their fallback handlers.
+// Only explicitly supported resource types are registered to avoid false-positive routing.
 var nativeAPIFallbackRegistry = map[string]NativeAPIFallbackHandler{
-	"AWS::KMS::": handleKMSFallback,
+	"AWS::KMS::Key":        handleKMSFallback,
+	"AWS::KMS::ReplicaKey": handleKMSFallback,
+	"AWS::KMS::Alias":      handleKMSFallback,
+	"AWS::KMS::Grant":      handleKMSFallback,
 	// Add more service fallbacks here as needed:
-	// "AWS::S3::": handleS3Fallback,
-	// "AWS::EC2::": handleEC2Fallback,
+	// "AWS::S3::Bucket": handleS3Fallback,
 }
 
 // hasNativeAPIFallback checks if a native API fallback exists for the resource type
 func hasNativeAPIFallback(resourceType string) bool {
-	for prefix := range nativeAPIFallbackRegistry {
-		if strings.HasPrefix(resourceType, prefix) {
-			return true
-		}
-	}
-	return false
+	_, ok := nativeAPIFallbackRegistry[resourceType]
+	return ok
 }
 
 // getNativeAPIFallbackHandler returns the fallback handler for a resource type, if one exists
 func getNativeAPIFallbackHandler(resourceType string) (NativeAPIFallbackHandler, bool) {
-	for prefix, handler := range nativeAPIFallbackRegistry {
-		if strings.HasPrefix(resourceType, prefix) {
-			return handler, true
-		}
-	}
-	return nil, false
+	handler, ok := nativeAPIFallbackRegistry[resourceType]
+	return handler, ok
 }
 
 // listResourcesWithNativeFallback uses a native API fallback when CloudControl fails

@@ -16,6 +16,9 @@ func ConvertGrantOperations(ops []kmstypes.GrantOperation) []string {
 // ConvertGrantConstraints converts grant constraints to a map
 func ConvertGrantConstraints(c *kmstypes.GrantConstraints) map[string]interface{} {
 	result := make(map[string]interface{})
+	if c == nil {
+		return result
+	}
 	if c.EncryptionContextEquals != nil {
 		result["EncryptionContextEquals"] = c.EncryptionContextEquals
 	}

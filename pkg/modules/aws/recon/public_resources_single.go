@@ -23,6 +23,7 @@ var AWSPublicResourcesSingle = chain.NewModule(
 ).WithLinks(
 	general.NewSingleResourcePreprocessor(),
 	aws.NewAwsPublicResources,
+	aws.NewAWSPublicResourcesProcessor,
 ).WithOutputters(
 	outputters.NewRuntimeJSONOutputter,
 	outputters.NewERDConsoleOutputter,

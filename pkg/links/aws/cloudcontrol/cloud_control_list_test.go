@@ -8,6 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	cctypes "github.com/aws/aws-sdk-go-v2/service/cloudcontrol/types"
 	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
+	kmslink "github.com/praetorian-inc/nebula/pkg/links/aws/kms"
 	"github.com/praetorian-inc/tabularium/pkg/model/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -648,7 +649,7 @@ func TestConvertKMSGrantOperations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := convertKMSGrantOperations(tt.input)
+			result := kmslink.ConvertGrantOperations(tt.input)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -716,10 +717,15 @@ func TestConvertKMSGrantConstraints(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := convertKMSGrantConstraints(tt.input)
+			result := kmslink.ConvertGrantConstraints(tt.input)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestConvertKMSGrantConstraintsNilInput(t *testing.T) {
+	result := kmslink.ConvertGrantConstraints(nil)
+	assert.Equal(t, map[string]interface{}{}, result)
 }
 
 // =============================================================================

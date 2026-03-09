@@ -87,52 +87,76 @@ func (l *KMSGrantLister) Process(resource types.EnrichedResourceDescription) err
 		keyArn = ka
 	}
 
-	// Describe the key to check if it's AWS managed (skip those)
-	describeOutput, err := client.DescribeKey(l.Context(), &kms.DescribeKeyInput{
-		KeyId: aws.String(keyID),
-	})
-	if err != nil {
-		if isKMSAccessDeniedError(err) {
-			message.Warning("Access denied describing KMS key %s in %s - skipping grant enumeration",
-				keyID, resource.Region)
-			slog.Warn("Access denied for DescribeKey - likely restricted key policy",
-				"keyId", keyID,
-				"region", resource.Region,
-				"error", err)
-		} else if isKMSKeyNotFoundError(err) {
-			slog.Debug("KMS key not found, may have been deleted",
+	// Try to use upstream metadata to avoid redundant DescribeKey API calls.
+	// The native KMS fallback path populates KeyManager, KeyState, and Arn in properties.
+	keyManager, hasKeyManager := propsMap["KeyManager"].(string)
+	keyStateStr, hasKeyState := propsMap["KeyState"].(string)
+
+	if hasKeyManager && hasKeyState {
+		// Skip AWS managed keys (they cannot have custom grants)
+		if keyManager == string(kmstypes.KeyManagerTypeAws) {
+			slog.Debug("Skipping AWS managed key - cannot have custom grants",
 				"keyId", keyID,
 				"region", resource.Region)
-		} else {
-			slog.Error("Failed to describe KMS key",
-				"keyId", keyID,
-				"region", resource.Region,
-				"error", err)
+			return nil
 		}
-		return nil
-	}
 
-	// Skip AWS managed keys (they cannot have custom grants)
-	if describeOutput.KeyMetadata.KeyManager == kmstypes.KeyManagerTypeAws {
-		slog.Debug("Skipping AWS managed key - cannot have custom grants",
-			"keyId", keyID,
-			"region", resource.Region)
-		return nil
-	}
+		// Skip disabled or pending deletion keys
+		if keyStateStr == string(kmstypes.KeyStateDisabled) || keyStateStr == string(kmstypes.KeyStatePendingDeletion) {
+			slog.Debug("Skipping key in non-active state",
+				"keyId", keyID,
+				"state", keyStateStr,
+				"region", resource.Region)
+			return nil
+		}
+	} else {
+		// Metadata not available upstream — call DescribeKey
+		describeOutput, err := client.DescribeKey(l.Context(), &kms.DescribeKeyInput{
+			KeyId: aws.String(keyID),
+		})
+		if err != nil {
+			if isKMSAccessDeniedError(err) {
+				message.Warning("Access denied describing KMS key %s in %s - skipping grant enumeration",
+					keyID, resource.Region)
+				slog.Warn("Access denied for DescribeKey - likely restricted key policy",
+					"keyId", keyID,
+					"region", resource.Region,
+					"error", err)
+			} else if isKMSKeyNotFoundError(err) {
+				slog.Debug("KMS key not found, may have been deleted",
+					"keyId", keyID,
+					"region", resource.Region)
+			} else {
+				slog.Error("Failed to describe KMS key",
+					"keyId", keyID,
+					"region", resource.Region,
+					"error", err)
+			}
+			return nil
+		}
 
-	// Skip disabled or pending deletion keys
-	keyState := describeOutput.KeyMetadata.KeyState
-	if keyState == kmstypes.KeyStateDisabled || keyState == kmstypes.KeyStatePendingDeletion {
-		slog.Debug("Skipping key in non-active state",
-			"keyId", keyID,
-			"state", keyState,
-			"region", resource.Region)
-		return nil
-	}
+		// Skip AWS managed keys (they cannot have custom grants)
+		if describeOutput.KeyMetadata.KeyManager == kmstypes.KeyManagerTypeAws {
+			slog.Debug("Skipping AWS managed key - cannot have custom grants",
+				"keyId", keyID,
+				"region", resource.Region)
+			return nil
+		}
 
-	// If we don't have the ARN yet, get it from describe output
-	if keyArn == "" {
-		keyArn = aws.ToString(describeOutput.KeyMetadata.Arn)
+		// Skip disabled or pending deletion keys
+		keyState := describeOutput.KeyMetadata.KeyState
+		if keyState == kmstypes.KeyStateDisabled || keyState == kmstypes.KeyStatePendingDeletion {
+			slog.Debug("Skipping key in non-active state",
+				"keyId", keyID,
+				"state", keyState,
+				"region", resource.Region)
+			return nil
+		}
+
+		// Get ARN from describe output if not available
+		if keyArn == "" {
+			keyArn = aws.ToString(describeOutput.KeyMetadata.Arn)
+		}
 	}
 
 	// message.Info("Listing grants for KMS key %s in %s", keyID, resource.Region)

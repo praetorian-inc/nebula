@@ -133,6 +133,11 @@ func TestConvertGrantConstraints(t *testing.T) {
 	}
 }
 
+func TestConvertGrantConstraintsNilInput(t *testing.T) {
+	result := ConvertGrantConstraints(nil)
+	assert.Equal(t, map[string]interface{}{}, result)
+}
+
 func TestExtractAccountFromArn(t *testing.T) {
 	tests := []struct {
 		name     string

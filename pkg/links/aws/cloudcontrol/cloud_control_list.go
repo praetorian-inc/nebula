@@ -18,6 +18,7 @@ import (
 	"github.com/praetorian-inc/nebula/internal/helpers"
 	"github.com/praetorian-inc/nebula/internal/message"
 	"github.com/praetorian-inc/nebula/pkg/links/aws/base"
+	kmslink "github.com/praetorian-inc/nebula/pkg/links/aws/kms"
 	"github.com/praetorian-inc/nebula/pkg/links/options"
 	"github.com/praetorian-inc/nebula/pkg/types"
 	"github.com/praetorian-inc/tabularium/pkg/model/model"
@@ -275,7 +276,7 @@ func handleKMSFallback(a *AWSCloudControl, resourceType, region string, config a
 // - AWS::KMS::ReplicaKey: emits only multi-region REPLICA keys
 // See LAB-1354 for known limitation with partial fallback coverage.
 func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, accountId string) {
-	keys, _, skippedKeys := a.collectEligibleKMSKeys(client, region)
+	keys, totalKeys, skippedKeys := a.collectEligibleKMSKeys(client, region)
 
 	var keyCount int
 
@@ -355,9 +356,10 @@ func (a *AWSCloudControl) listKMSKeys(client *kms.Client, resourceType, region, 
 	if skippedKeys > 0 {
 		slog.Info("Listed KMS keys via native API with partial access",
 			"region", region, "type", resourceType,
-			"totalKeys", keyCount, "describeKeyFailed", skippedKeys)
+			"totalKeys", totalKeys, "emittedKeys", keyCount, "describeKeyFailed", skippedKeys)
 	} else {
-		slog.Debug("Listed KMS keys via native API", "region", region, "type", resourceType, "count", keyCount)
+		slog.Debug("Listed KMS keys via native API", "region", region, "type", resourceType,
+			"totalKeys", totalKeys, "emittedKeys", keyCount)
 	}
 }
 
@@ -566,7 +568,7 @@ func (a *AWSCloudControl) listGrantsForKey(client *kms.Client, keyID, keyArn, re
 				"KeyId":            keyID,
 				"KeyArn":           keyArn,
 				"GranteePrincipal": aws.ToString(grant.GranteePrincipal),
-				"Operations":       convertKMSGrantOperations(grant.Operations),
+				"Operations":       kmslink.ConvertGrantOperations(grant.Operations),
 			}
 
 			if grant.RetiringPrincipal != nil {
@@ -582,7 +584,7 @@ func (a *AWSCloudControl) listGrantsForKey(client *kms.Client, keyID, keyArn, re
 				properties["CreationDate"] = grant.CreationDate.String()
 			}
 			if grant.Constraints != nil {
-				properties["Constraints"] = convertKMSGrantConstraints(grant.Constraints)
+				properties["Constraints"] = kmslink.ConvertGrantConstraints(grant.Constraints)
 			}
 
 			propsJSON, err := json.Marshal(properties)
@@ -605,27 +607,6 @@ func (a *AWSCloudControl) listGrantsForKey(client *kms.Client, keyID, keyArn, re
 	}
 
 	return grantCount
-}
-
-// convertKMSGrantOperations converts KMS grant operations to string slice
-func convertKMSGrantOperations(ops []kmstypes.GrantOperation) []string {
-	var result []string
-	for _, op := range ops {
-		result = append(result, string(op))
-	}
-	return result
-}
-
-// convertKMSGrantConstraints converts grant constraints to a map
-func convertKMSGrantConstraints(c *kmstypes.GrantConstraints) map[string]interface{} {
-	result := make(map[string]interface{})
-	if c.EncryptionContextEquals != nil {
-		result["EncryptionContextEquals"] = c.EncryptionContextEquals
-	}
-	if c.EncryptionContextSubset != nil {
-		result["EncryptionContextSubset"] = c.EncryptionContextSubset
-	}
-	return result
 }
 
 func (a *AWSCloudControl) resourceDescriptionToERD(resource cctypes.ResourceDescription, rType, accountId, region string) *types.EnrichedResourceDescription {

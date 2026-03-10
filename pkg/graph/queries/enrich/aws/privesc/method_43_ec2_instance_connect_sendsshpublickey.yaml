@@ -1,0 +1,35 @@
+name: Privesc Method 43 - EC2 Instance Connect SendSSHPublicKey
+description: Creates CAN_PRIVESC relationship when a principal can send SSH public keys to EC2 instances with roles
+impactedServices:
+  - EC2 Instance Connect
+  - EC2
+severity: High
+order: 140
+cypher: |
+  MATCH (principal)-[:`EC2-INSTANCE-CONNECT_SENDSSHPUBLICKEY`]->(instance:AWS_EC2_Instance)
+  WHERE principal.admin IS NULL
+    AND instance.IamInstanceProfile IS NOT NULL
+
+  // Match the actual IAM role using instanceProfileList
+  MATCH (instanceRole:AWS_IAM_Role)
+    WHERE instanceRole.instanceProfileList CONTAINS instance.IamInstanceProfile
+
+  // Create the privesc relationship to the instance's role
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(instanceRole)
+  ON CREATE SET
+    privesc.method = "Method-43-EC2-Instance-Connect-SendSSHPublicKey",
+    privesc.requires = ["ec2-instance-connect:SendSSHPublicKey"],
+    privesc.service = "EC2 Instance Connect",
+    privesc.targetType = "Role",
+    privesc.instanceId = instance.instanceId
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-43-EC2-Instance-Connect-SendSSHPublicKey"
+      THEN privesc.method + ",Method-43-EC2-Instance-Connect-SendSSHPublicKey"
+      ELSE privesc.method
+    END,
+    privesc.instanceId = CASE
+      WHEN privesc.instanceId IS NULL THEN instance.instanceId
+      WHEN NOT privesc.instanceId CONTAINS instance.instanceId THEN privesc.instanceId + "," + instance.instanceId
+      ELSE privesc.instanceId
+    END

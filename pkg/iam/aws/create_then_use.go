@@ -11,9 +11,9 @@ import (
 // a principal who can create a resource controls its name, enabling them
 // to always satisfy their own resource-scoped "use" permission.
 type createThenUsePair struct {
-	createAction    string // e.g. "codebuild:CreateProject"
+	createAction    string   // e.g. "codebuild:CreateProject"
 	useActions      []string // e.g. ["codebuild:StartBuild", "codebuild:StartBuildBatch"]
-	serviceResource string // e.g. "codebuild.amazonaws.com"
+	serviceResource string   // e.g. "codebuild.amazonaws.com"
 }
 
 // createThenUsePairs enumerates all known create-then-use attack patterns.
@@ -22,6 +22,11 @@ var createThenUsePairs = []createThenUsePair{
 		createAction:    "codebuild:CreateProject",
 		useActions:      []string{"codebuild:StartBuild", "codebuild:StartBuildBatch"},
 		serviceResource: "codebuild.amazonaws.com",
+	},
+	{
+		createAction:    "glue:CreateJob",
+		useActions:      []string{"glue:StartJobRun", "glue:CreateTrigger"},
+		serviceResource: "glue.amazonaws.com",
 	},
 }
 

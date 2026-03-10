@@ -13,16 +13,16 @@ import (
 
 // CDKRoleInfo represents a detected CDK role
 type CDKRoleInfo struct {
-	RoleName        string `json:"role_name"`
-	RoleArn         string `json:"role_arn"`
-	Qualifier       string `json:"qualifier"`
-	Region          string `json:"region"`
-	AccountID       string `json:"account_id"`
-	CreationDate    string `json:"creation_date"`
-	RoleType        string `json:"role_type"` // cfn-exec-role, file-publishing-role, etc.
-	BucketName      string `json:"expected_bucket_name"`
-	TrustPolicy     string `json:"trust_policy,omitempty"`
-	AssumeRoleDoc   string `json:"assume_role_policy_document,omitempty"`
+	RoleName      string `json:"role_name"`
+	RoleArn       string `json:"role_arn"`
+	Qualifier     string `json:"qualifier"`
+	Region        string `json:"region"`
+	AccountID     string `json:"account_id"`
+	CreationDate  string `json:"creation_date"`
+	RoleType      string `json:"role_type"` // cfn-exec-role, file-publishing-role, etc.
+	BucketName    string `json:"expected_bucket_name"`
+	TrustPolicy   string `json:"trust_policy,omitempty"`
+	AssumeRoleDoc string `json:"assume_role_policy_document,omitempty"`
 }
 
 type AwsCdkRoleDetector struct {
@@ -37,7 +37,7 @@ func NewAwsCdkRoleDetector(configs ...cfg.Config) chain.Link {
 }
 
 func (l *AwsCdkRoleDetector) Params() []cfg.Param {
-	return append(options.AwsCommonReconOptions(), 
+	return append(options.AwsCommonReconOptions(),
 		options.AwsCdkQualifiers(),
 	)
 }
@@ -93,15 +93,15 @@ func (l *AwsCdkRoleDetector) Process(input any) error {
 	if len(allRoles) == 0 {
 		l.Logger.Info("no CDK bootstrap roles found")
 		return l.Send(map[string]any{
-			"status": "no_cdk_roles_found",
-			"account_id": accountID,
+			"status":             "no_cdk_roles_found",
+			"account_id":         accountID,
 			"checked_qualifiers": qualifiers,
-			"checked_regions": regions,
+			"checked_regions":    regions,
 		})
 	}
 
 	l.Logger.Info("found CDK roles", "count", len(allRoles))
-	
+
 	// Send each role as separate output for the next link
 	for _, roleInfo := range allRoles {
 		if err := l.Send(roleInfo); err != nil {
@@ -138,30 +138,30 @@ func (l *AwsCdkRoleDetector) detectCDKRolesInRegion(accountID, region string, qu
 	}
 
 	client := iam.NewFromConfig(awsConfig)
-	
+
 	var roles []CDKRoleInfo
-	
+
 	// CDK role patterns to look for - focus on file-publishing-role as most vulnerable
 	cdkRoleTypes := map[string]string{
-		"file-publishing-role": "File Publishing Role", 
-		"cfn-exec-role":      "CloudFormation Execution Role",
+		"file-publishing-role":  "File Publishing Role",
+		"cfn-exec-role":         "CloudFormation Execution Role",
 		"image-publishing-role": "Image Publishing Role",
-		"lookup-role":        "Lookup Role",
-		"deploy-role":        "Deploy Role",
+		"lookup-role":           "Lookup Role",
+		"deploy-role":           "Deploy Role",
 	}
 
 	for _, qualifier := range qualifiers {
 		for roleType := range cdkRoleTypes {
 			roleName := fmt.Sprintf("cdk-%s-%s-%s-%s", qualifier, roleType, accountID, region)
-			
+
 			l.Logger.Debug("checking for CDK role", "role_name", roleName, "region", region)
-			
+
 			roleInfo, err := l.getCDKRoleInfo(client, roleName, qualifier, region, accountID, roleType)
 			if err != nil {
 				l.Logger.Debug("CDK role not found or error", "role_name", roleName, "error", err)
 				continue
 			}
-			
+
 			if roleInfo != nil {
 				l.Logger.Debug("found CDK role", "role_name", roleName, "type", roleType)
 				roles = append(roles, *roleInfo)
@@ -187,7 +187,7 @@ func (l *AwsCdkRoleDetector) getCDKRoleInfo(client *iam.Client, roleName, qualif
 	}
 
 	role := getRoleResult.Role
-	
+
 	// Extract creation date
 	createdDate := ""
 	if role.CreateDate != nil {
@@ -204,15 +204,15 @@ func (l *AwsCdkRoleDetector) getCDKRoleInfo(client *iam.Client, roleName, qualif
 	bucketName := fmt.Sprintf("cdk-%s-assets-%s-%s", qualifier, accountID, region)
 
 	roleInfo := &CDKRoleInfo{
-		RoleName:            roleName,
-		RoleArn:             *role.Arn,
-		Qualifier:           qualifier,
-		Region:              region,
-		AccountID:           accountID,
-		CreationDate:        createdDate,
-		RoleType:            roleType,
-		BucketName:          bucketName,
-		AssumeRoleDoc:       trustPolicy,
+		RoleName:      roleName,
+		RoleArn:       *role.Arn,
+		Qualifier:     qualifier,
+		Region:        region,
+		AccountID:     accountID,
+		CreationDate:  createdDate,
+		RoleType:      roleType,
+		BucketName:    bucketName,
+		AssumeRoleDoc: trustPolicy,
 	}
 
 	// Try to get inline policies for additional context

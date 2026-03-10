@@ -1,0 +1,27 @@
+name: Privesc Method 60 - CodeBuild CreateProject StartBuildBatch
+description: Creates CAN_PRIVESC relationship when a principal can create CodeBuild projects with privileged service roles and start batch builds
+impactedServices:
+  - IAM
+  - CodeBuild
+severity: High
+order: 157
+cypher: |
+  MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
+  WHERE principal.admin IS NULL
+    AND 'codebuild.amazonaws.com' IN targetRole.trustedServices
+    AND EXISTS((principal)-[:CODEBUILD_CREATEPROJECT]->())
+    AND EXISTS((principal)-[:CODEBUILD_STARTBUILDBATCH]->())
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-60-CodeBuild-CreateProject-StartBuildBatch",
+    privesc.requires = ["iam:PassRole", "codebuild:CreateProject", "codebuild:StartBuildBatch"],
+    privesc.service = "CodeBuild",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-60-CodeBuild-CreateProject-StartBuildBatch"
+      THEN privesc.method + ",Method-60-CodeBuild-CreateProject-StartBuildBatch"
+      ELSE privesc.method
+    END

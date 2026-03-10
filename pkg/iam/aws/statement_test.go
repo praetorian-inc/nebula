@@ -467,11 +467,11 @@ func TestEvaluateStatement(t *testing.T) {
 				},
 			},
 			expected: &StatementEvaluation{
-				ExplicitAllow:   false,
-				ExplicitDeny:    false,
-				ImplicitDeny:    true,
-				MatchedAction:   true,
-				MatchedResource: true,
+				ExplicitAllow:    false,
+				ExplicitDeny:     false,
+				ImplicitDeny:     true,
+				MatchedAction:    true,
+				MatchedResource:  true,
 				MatchedPrincipal: true,
 				ConditionEvaluation: &ConditionEval{
 					Result: ConditionFailed,
@@ -581,11 +581,11 @@ func TestEvaluateStatement(t *testing.T) {
 				},
 			},
 			expected: &StatementEvaluation{
-				ExplicitAllow:   false,
-				ExplicitDeny:    false,
-				ImplicitDeny:    true,
-				MatchedAction:   true,
-				MatchedResource: true,
+				ExplicitAllow:    false,
+				ExplicitDeny:     false,
+				ImplicitDeny:     true,
+				MatchedAction:    true,
+				MatchedResource:  true,
 				MatchedPrincipal: true,
 				ConditionEvaluation: &ConditionEval{
 					Result: ConditionFailed,

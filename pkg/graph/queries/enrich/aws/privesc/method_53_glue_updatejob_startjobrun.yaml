@@ -1,0 +1,30 @@
+name: Privesc Method 53 - Glue UpdateJob + StartJobRun
+description: Creates CAN_PRIVESC relationship when a principal can update existing Glue jobs with privileged service roles and start them
+impactedServices:
+  - IAM
+  - Glue
+severity: High
+order: 150
+cypher: |
+  MATCH (principal)-[:IAM_PASSROLE]->(targetRole:AWS_IAM_Role)
+  WHERE principal.admin IS NULL
+    AND 'glue.amazonaws.com' IN targetRole.trustedServices
+    AND EXISTS((principal)-[:GLUE_STARTJOBRUN]->())
+
+  // Scope through actual Glue jobs — UpdateJob requires an existing job
+  WITH principal, targetRole
+  WHERE EXISTS((principal)-[:GLUE_UPDATEJOB]->(:AWS_Glue_Job))
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-53-Glue-UpdateJob-StartJobRun",
+    privesc.requires = ["iam:PassRole", "glue:UpdateJob", "glue:StartJobRun"],
+    privesc.service = "Glue",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-53-Glue-UpdateJob-StartJobRun"
+      THEN privesc.method + ",Method-53-Glue-UpdateJob-StartJobRun"
+      ELSE privesc.method
+    END

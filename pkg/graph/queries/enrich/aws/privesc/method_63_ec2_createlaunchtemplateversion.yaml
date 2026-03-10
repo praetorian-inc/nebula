@@ -1,0 +1,27 @@
+name: Privesc Method 63 - EC2 CreateLaunchTemplateVersion ModifyLaunchTemplate
+description: Creates CAN_PRIVESC when principal can create new launch template versions and set them as default, hijacking instances launched from the template
+impactedServices:
+  - EC2
+severity: High
+order: 160
+cypher: |
+  MATCH (principal)-[:EC2_CREATELAUNCHTEMPLATEVERSION]->()
+  WHERE principal.admin IS NULL
+    AND EXISTS((principal)-[:EC2_MODIFYLAUNCHTEMPLATE]->())
+
+  // Scope through actual launch templates that have privileged instance profiles
+  MATCH (template:AWS_EC2_LaunchTemplate)-[:STS_ASSUMEROLE]->(targetRole:AWS_IAM_Role)
+
+  // Create the privesc relationship
+  MERGE (principal)-[privesc:CAN_PRIVESC]->(targetRole)
+  ON CREATE SET
+    privesc.method = "Method-63-EC2-CreateLaunchTemplateVersion",
+    privesc.requires = ["ec2:CreateLaunchTemplateVersion", "ec2:ModifyLaunchTemplate"],
+    privesc.service = "EC2",
+    privesc.targetType = "Role"
+  ON MATCH SET
+    privesc.method = CASE
+      WHEN NOT privesc.method CONTAINS "Method-63-EC2-CreateLaunchTemplateVersion"
+      THEN privesc.method + ",Method-63-EC2-CreateLaunchTemplateVersion"
+      ELSE privesc.method
+    END

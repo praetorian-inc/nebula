@@ -87,14 +87,16 @@ func getResourcePatternsFromAction(action Action) []*regexp.Regexp {
 var serviceResourceMaps = map[string]ServiceResourceMap{
 	"bedrock-agentcore": {
 		ResourcePatterns: map[string]*regexp.Regexp{
-			"service": regexp.MustCompile(`^bedrock-agentcore.amazonaws.com$`),
+			"service":                 regexp.MustCompile(`^bedrock-agentcore.amazonaws.com$`),
+			"code-interpreter":        regexp.MustCompile(`^arn:aws:bedrock-agentcore:[a-z0-9-]+:aws:code-interpreter/.*$`),
+			"code-interpreter-custom": regexp.MustCompile(`^arn:aws:bedrock-agentcore:[a-z0-9-]+:\d{12}:code-interpreter-custom/.*$`),
 		},
 		ActionResourceMap: map[string][]string{
-			"createcodeinterpreter":        {"service"},
-			"startcodeinterpretersession":  {"service"},
-			"invokecodeinterpreter":        {"service"},
-			"getcodeinterpreter":           {"service"},
-			"listcodeinterpreters":         {"service"},
+			"createcodeinterpreter":       {"service"},
+			"startcodeinterpretersession": {"code-interpreter", "code-interpreter-custom", "service"},
+			"invokecodeinterpreter":       {"code-interpreter", "code-interpreter-custom", "service"},
+			"getcodeinterpreter":          {"code-interpreter", "code-interpreter-custom"},
+			"listcodeinterpreters":        {"service"},
 		},
 	},
 	"iam": {
@@ -244,6 +246,14 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 			"uploadsigningcertificate":                {"user"},
 		},
 	},
+	"ec2-instance-connect": {
+		ResourcePatterns: map[string]*regexp.Regexp{
+			"instance": regexp.MustCompile(`^arn:aws:ec2:[a-z0-9-]+:\d{12}:instance/.*$`),
+		},
+		ActionResourceMap: map[string][]string{
+			"sendsshpublickey": {"instance"},
+		},
+	},
 	"ec2": {
 		ResourcePatterns: map[string]*regexp.Regexp{
 			"service":         regexp.MustCompile(`^ec2.amazonaws.com$`),
@@ -254,8 +264,14 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 			"launch-template": regexp.MustCompile(`^arn:aws:ec2:[a-z-0-9]+:\d{12}:launch-template/.*`),
 		},
 		ActionResourceMap: map[string][]string{
-			"runinstances":         {"service"},
-			"createlaunchtemplate": {"service"},
+			"createlaunchtemplate":        {"service"},
+			"createlaunchtemplateversion": {"launch-template", "service"},
+			"modifyinstanceattribute":     {"instance"},
+			"modifylaunchtemplate":        {"launch-template", "service"},
+			"requestspotinstances":        {"service"},
+			"runinstances":                {"service"},
+			"startinstances":              {"instance"},
+			"stopinstances":               {"instance"},
 		},
 	},
 	"cloudformation": {
@@ -265,13 +281,14 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 			"stackset": regexp.MustCompile(`^arn:aws:cloudformation:[a-z-0-9]+:\d{12}:stackset/.*`),
 		},
 		ActionResourceMap: map[string][]string{
-			"createstack":      {"service"},
-			"updatestack":      {"stack"},
-			"setstackpolicy":   {"stack"},
-			"createchangeset":  {"stack"},
-			"executechangeset": {"stack"},
-			"createstackset":   {"stackset"},
-			"updatestackset":   {"stackset"},
+			"createchangeset":      {"stack"},
+			"createstack":          {"service"},
+			"createstackinstances": {"stackset", "service"},
+			"createstackset":       {"service"},
+			"executechangeset":     {"stack"},
+			"setstackpolicy":       {"stack"},
+			"updatestack":          {"stack"},
+			"updatestackset":       {"stackset", "service"},
 		},
 	},
 	"sts": {
@@ -294,7 +311,7 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 		},
 		ActionResourceMap: map[string][]string{
 			"addlayerversionpermission":          {"layer"},
-			"addpermission":                      {"function"},
+			"addpermission":                      {"function", "service"},
 			"createalias":                        {"function"},
 			"createcodesigningconfig":            {"function"},
 			"createeventsourcemapping":           {"function", "eventconfig"},
@@ -360,8 +377,12 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 			"container-inst": regexp.MustCompile(`^arn:aws:ecs:[a-z0-9-]+:\d{12}:container-instance/.*$`),
 		},
 		ActionResourceMap: map[string][]string{
-			"runtask":                {"cluster", "task-def", "service"},
+			"createcluster":          {"service"},
+			"createservice":          {"cluster", "service"},
+			"describetasks":          {"cluster", "task", "service"},
+			"executecommand":         {"cluster", "task", "service"},
 			"registertaskdefinition": {"service"},
+			"runtask":                {"cluster", "task-def", "service"},
 			"starttask":              {"cluster", "task-def", "service"},
 			"updateservice":          {"service"},
 		},
@@ -375,20 +396,25 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 			"service":          regexp.MustCompile(`^ssm.amazonaws.com$`),
 		},
 		ActionResourceMap: map[string][]string{
-			"sendcommand":             {"instance", "managed-instance", "document"},
-			"startsession":            {"instance", "managed-instance"},
-			"resumesession":           {"instance", "managed-instance"},
+			"sendcommand":              {"instance", "managed-instance", "document"},
+			"startsession":             {"instance", "managed-instance"},
+			"resumesession":            {"instance", "managed-instance"},
 			"startautomationexecution": {"automation", "document"},
 		},
 	},
 	"glue": {
 		ResourcePatterns: map[string]*regexp.Regexp{
 			"devEndpoint": regexp.MustCompile(`^arn:aws:glue:[a-z0-9-]+:\d{12}:devEndpoint/.*$`),
+			"job":         regexp.MustCompile(`^arn:aws:glue:[a-z0-9-]+:\d{12}:job/.+$`),
 			"service":     regexp.MustCompile(`^glue.amazonaws.com$`),
 		},
 		ActionResourceMap: map[string][]string{
 			"createdevendpoint": {"service"},
+			"createjob":         {"service"},
+			"createtrigger":     {"service"},
+			"startjobrun":       {"job", "service"},
 			"updatedevendpoint": {"devEndpoint"},
+			"updatejob":         {"job", "service"},
 		},
 	},
 	"codebuild": {
@@ -405,17 +431,32 @@ var serviceResourceMaps = map[string]ServiceResourceMap{
 	},
 	"sagemaker": {
 		ResourcePatterns: map[string]*regexp.Regexp{
-			"notebook-instance": regexp.MustCompile(`^arn:aws:sagemaker:[a-z0-9-]+:\d{12}:notebook-instance/.*$`),
-			"training-job":      regexp.MustCompile(`^arn:aws:sagemaker:[a-z0-9-]+:\d{12}:training-job/.*$`),
-			"processing-job":    regexp.MustCompile(`^arn:aws:sagemaker:[a-z0-9-]+:\d{12}:processing-job/.*$`),
-			"service":           regexp.MustCompile(`^sagemaker.amazonaws.com$`),
+			"notebook-instance":                  regexp.MustCompile(`^arn:aws:sagemaker:[a-z0-9-]+:\d{12}:notebook-instance/.*$`),
+			"notebook-instance-lifecycle-config": regexp.MustCompile(`^arn:aws:sagemaker:[a-z0-9-]+:\d{12}:notebook-instance-lifecycle-config/.*$`),
+			"training-job":                       regexp.MustCompile(`^arn:aws:sagemaker:[a-z0-9-]+:\d{12}:training-job/.*$`),
+			"processing-job":                     regexp.MustCompile(`^arn:aws:sagemaker:[a-z0-9-]+:\d{12}:processing-job/.*$`),
+			"service":                            regexp.MustCompile(`^sagemaker.amazonaws.com$`),
 		},
 		ActionResourceMap: map[string][]string{
-			"createnotebookinstance":             {"service"},
-			"createpresignednotebookinstanceurl": {"notebook-instance", "service"},
-			"createtrainingjob":                  {"service"},
-			"createprocessingjob":                {"service"},
-			"createhyperparametertuningjob":      {"service"},
+			"createhyperparametertuningjob":         {"service"},
+			"createnotebookinstance":                {"service"},
+			"createnotebookinstancelifecycleconfig": {"service"},
+			"createpresignednotebookinstanceurl":    {"notebook-instance", "service"},
+			"createprocessingjob":                   {"service"},
+			"createtrainingjob":                     {"service"},
+			"startnotebookinstance":                 {"notebook-instance"},
+			"stopnotebookinstance":                  {"notebook-instance"},
+			"updatenotebookinstance":                {"notebook-instance"},
+		},
+	},
+	"apprunner": {
+		ResourcePatterns: map[string]*regexp.Regexp{
+			"service":          regexp.MustCompile(`^tasks.apprunner.amazonaws.com$`),
+			"service-instance": regexp.MustCompile(`^arn:aws:apprunner:[a-z0-9-]+:\d{12}:service/.*$`),
+		},
+		ActionResourceMap: map[string][]string{
+			"createservice": {"service"},
+			"updateservice": {"service-instance"},
 		},
 	},
 	"autoscaling": {

@@ -9,7 +9,7 @@ import (
 
 func TestCDKBucketValidator_RiskGeneration(t *testing.T) {
 	validator := &AwsCdkBucketValidator{}
-	
+
 	cdkRole := CDKRoleInfo{
 		RoleName:   "cdk-hnb659fds-cfn-exec-role-123456789012-us-east-1",
 		AccountID:  "123456789012",
@@ -54,7 +54,7 @@ func TestCDKBucketValidator_RiskGeneration(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			risk := validator.generateCDKBucketRisk(cdkRole, tt.bucketExists, tt.bucketOwnedByAccount)
-			
+
 			if tt.shouldGenerateRisk {
 				require.NotNil(t, risk, "should generate a risk")
 				assert.Equal(t, tt.expectedRiskName, risk.Name)
@@ -70,24 +70,24 @@ func TestCDKBucketValidator_RiskGeneration(t *testing.T) {
 
 func TestCDKBucketValidator_BucketNamePredictability(t *testing.T) {
 	tests := []struct {
-		name        string
-		accountID   string
-		qualifier   string
-		region      string
+		name           string
+		accountID      string
+		qualifier      string
+		region         string
 		expectedBucket string
 	}{
 		{
-			name:        "default qualifier us-east-1",
-			accountID:   "123456789012",
-			qualifier:   "hnb659fds",
-			region:      "us-east-1",
+			name:           "default qualifier us-east-1",
+			accountID:      "123456789012",
+			qualifier:      "hnb659fds",
+			region:         "us-east-1",
 			expectedBucket: "cdk-hnb659fds-assets-123456789012-us-east-1",
 		},
 		{
-			name:        "custom qualifier eu-west-1",
-			accountID:   "987654321098",
-			qualifier:   "custom123",
-			region:      "eu-west-1",
+			name:           "custom qualifier eu-west-1",
+			accountID:      "987654321098",
+			qualifier:      "custom123",
+			region:         "eu-west-1",
 			expectedBucket: "cdk-custom123-assets-987654321098-eu-west-1",
 		},
 	}
@@ -100,10 +100,10 @@ func TestCDKBucketValidator_BucketNamePredictability(t *testing.T) {
 				Region:     tt.region,
 				BucketName: tt.expectedBucket,
 			}
-			
+
 			// Verify the bucket naming convention matches expectations
 			assert.Equal(t, tt.expectedBucket, cdkRole.BucketName)
-			
+
 			// Verify bucket name contains predictable components
 			assert.Contains(t, cdkRole.BucketName, tt.qualifier)
 			assert.Contains(t, cdkRole.BucketName, tt.accountID)
@@ -157,7 +157,7 @@ func TestContainsAccountID(t *testing.T) {
 
 func TestCDKBucketValidator_RiskDefinitions(t *testing.T) {
 	validator := &AwsCdkBucketValidator{}
-	
+
 	cdkRole := CDKRoleInfo{
 		RoleName:   "cdk-hnb659fds-cfn-exec-role-123456789012-us-east-1",
 		AccountID:  "123456789012",
@@ -170,13 +170,13 @@ func TestCDKBucketValidator_RiskDefinitions(t *testing.T) {
 	// Test missing bucket risk
 	risk := validator.generateCDKBucketRisk(cdkRole, false, false)
 	require.NotNil(t, risk)
-	
+
 	// Verify risk has proper structure
 	assert.NotEmpty(t, risk.Name, "risk name should not be empty")
-	assert.NotEmpty(t, risk.DNS, "risk DNS should not be empty") 
+	assert.NotEmpty(t, risk.DNS, "risk DNS should not be empty")
 	assert.NotEmpty(t, risk.Status, "risk status should not be empty")
 	assert.NotEmpty(t, risk.Source, "risk source should not be empty")
-	
+
 	// Verify risk comment contains useful context
 	assert.Contains(t, risk.Comment, cdkRole.RoleName, "comment should contain role name")
 	assert.Contains(t, risk.Comment, cdkRole.BucketName, "comment should contain bucket name")
@@ -186,7 +186,7 @@ func TestCDKBucketValidator_RiskDefinitions(t *testing.T) {
 func TestCDKBucketValidator_Params(t *testing.T) {
 	validator := &AwsCdkBucketValidator{}
 	params := validator.Params()
-	
+
 	// Should inherit base AWS parameters
 	assert.NotEmpty(t, params, "should have parameters from base AWS link")
 }

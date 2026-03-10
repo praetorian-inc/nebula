@@ -42,8 +42,8 @@ func (c *CloudControlGet) Process(resource *types.EnrichedResourceDescription) e
 	if err != nil {
 		// Handle ResourceNotFoundException gracefully - resource may have been deleted between discovery and processing
 		if strings.Contains(err.Error(), "ResourceNotFoundException") || strings.Contains(err.Error(), "NotFound") {
-			slog.Debug("Resource not found, skipping", 
-				"resource_id", resource.Identifier, 
+			slog.Debug("Resource not found, skipping",
+				"resource_id", resource.Identifier,
 				"resource_type", resource.TypeName,
 				"arn", resource.Arn.String())
 			return nil

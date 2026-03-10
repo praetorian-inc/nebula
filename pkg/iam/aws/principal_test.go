@@ -584,7 +584,7 @@ func TestExtractGitHubActionsPrincipals(t *testing.T) {
 			name: "GitHub Actions single subject claim",
 			conditions: &types.Condition{
 				"StringEquals": {
-					GitHubActionsSubjectKey:   types.DynaString{"repo:praetorian-inc/nebula:ref:refs/heads/main"},
+					GitHubActionsSubjectKey:  types.DynaString{"repo:praetorian-inc/nebula:ref:refs/heads/main"},
 					GitHubActionsAudienceKey: types.DynaString{"sts.amazonaws.com"},
 				},
 			},
@@ -618,7 +618,7 @@ func TestExtractGitHubActionsPrincipals(t *testing.T) {
 			name: "GitHub Actions wildcard subject claim",
 			conditions: &types.Condition{
 				"StringLike": {
-					GitHubActionsSubjectKey:   types.DynaString{"repo:praetorian-inc/nebula:*"},
+					GitHubActionsSubjectKey:  types.DynaString{"repo:praetorian-inc/nebula:*"},
 					GitHubActionsAudienceKey: types.DynaString{"sts.amazonaws.com"},
 				},
 			},
@@ -629,7 +629,7 @@ func TestExtractGitHubActionsPrincipals(t *testing.T) {
 			},
 		},
 		{
-			name:       "No GitHub Actions conditions",
+			name: "No GitHub Actions conditions",
 			conditions: &types.Condition{
 				"StringEquals": {
 					"aws:PrincipalAccount": types.DynaString{"123456789012"},
@@ -658,11 +658,11 @@ func TestExtractGitHubActionsPrincipals(t *testing.T) {
 
 func TestParseGitHubSubjectClaim(t *testing.T) {
 	tests := []struct {
-		name              string
-		subject           string
-		want              *GitHubSubjectClaim
-		wantErr           bool
-		wantErrContains   string
+		name            string
+		subject         string
+		want            *GitHubSubjectClaim
+		wantErr         bool
+		wantErrContains string
 	}{
 		{
 			name:    "Branch reference",
@@ -829,7 +829,7 @@ func TestExtractRepositoriesFromConditions(t *testing.T) {
 			name: "Single repository with branch",
 			conditions: &types.Condition{
 				"StringEquals": {
-					GitHubActionsSubjectKey:   types.DynaString{"repo:praetorian-inc/nebula:ref:refs/heads/main"},
+					GitHubActionsSubjectKey:  types.DynaString{"repo:praetorian-inc/nebula:ref:refs/heads/main"},
 					GitHubActionsAudienceKey: types.DynaString{"sts.amazonaws.com"},
 				},
 			},

@@ -397,37 +397,38 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDKOptimized() (map[s
 		l.writeCheckpoint("12-app-role-assignments.json", appRoleAssignments)
 	}
 
-	// SP Directory Roles: Filter from existing directoryRoleAssignments (instant, replaces 9.5min scan)
-	startTime = l.logCollectionStart("spDirectoryRoles (filtered)")
-	if dirRoles, ok := azureADData["directoryRoleAssignments"].([]interface{}); ok {
-		if sps, ok := azureADData["servicePrincipals"].([]interface{}); ok {
-			spDirRoles := l.filterSPDirectoryRolesFromExisting(dirRoles, sps)
-			if len(spDirRoles) > 0 {
-				existing := azureADData["directoryRoleAssignments"].([]interface{})
-				seen := make(map[string]bool)
-				for _, a := range existing {
-					if m, ok := a.(map[string]interface{}); ok {
-						key := fmt.Sprintf("%v-%v", m["principalId"], m["roleId"])
-						seen[key] = true
-					}
+	// SP Directory Roles: Use memberOf workaround to discover SP role assignments
+	// that the /directoryRoles/{id}/members endpoint silently omits (known Graph API bug)
+	startTime = l.logCollectionStart("spDirectoryRoles (memberOf)")
+	if sps, ok := azureADData["servicePrincipals"].([]interface{}); ok {
+		spDirRoles, err := l.collectServicePrincipalDirectoryRolesSDK(sps)
+		if err != nil {
+			l.Logger.Error("Failed to collect SP directory roles via memberOf", "error", err)
+		} else if len(spDirRoles) > 0 {
+			existing := azureADData["directoryRoleAssignments"].([]interface{})
+			seen := make(map[string]bool)
+			for _, a := range existing {
+				if m, ok := a.(map[string]interface{}); ok {
+					key := fmt.Sprintf("%v-%v", m["principalId"], m["roleId"])
+					seen[key] = true
 				}
-				added := 0
-				for _, a := range spDirRoles {
-					if m, ok := a.(map[string]interface{}); ok {
-						key := fmt.Sprintf("%v-%v", m["principalId"], m["roleId"])
-						if !seen[key] {
-							existing = append(existing, a)
-							seen[key] = true
-							added++
-						}
-					}
-				}
-				azureADData["directoryRoleAssignments"] = existing
-				l.Logger.Info("Merged SP directory role assignments", "new_from_filter", added, "total", len(existing))
 			}
+			added := 0
+			for _, a := range spDirRoles {
+				if m, ok := a.(map[string]interface{}); ok {
+					key := fmt.Sprintf("%v-%v", m["principalId"], m["roleId"])
+					if !seen[key] {
+						existing = append(existing, a)
+						seen[key] = true
+						added++
+					}
+				}
+			}
+			azureADData["directoryRoleAssignments"] = existing
+			l.Logger.Info("Merged SP directory role assignments", "new_from_memberOf", added, "total", len(existing))
 		}
 	}
-	l.logCollectionEnd("spDirectoryRoles (filtered)", startTime, 0)
+	l.logCollectionEnd("spDirectoryRoles (memberOf)", startTime, 0)
 	l.writeCheckpoint("13-sp-directory-roles.json", azureADData["directoryRoleAssignments"])
 
 	// Group Ownership

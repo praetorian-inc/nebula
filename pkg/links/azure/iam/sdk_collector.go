@@ -884,10 +884,13 @@ func (l *SDKComprehensiveCollectorLink) collectAllGraphDataSDK() (map[string]int
 	}
 
 	// Collection 9b: Service Principal Directory Roles
-	// Filter existing directoryRoleAssignments for SP principals instead of rescanning all SPs
+	// Use memberOf workaround to discover SP role assignments that /directoryRoles/{id}/members silently omits
 	startTime = l.logCollectionStart("spDirectoryRoles")
-	message.Info("Filtering SP directory roles from existing assignments...")
-	spDirectoryRoles := l.filterSPDirectoryRolesFromExisting(directoryRoleAssignments, servicePrincipals)
+	message.Info("Collecting SP directory roles via memberOf workaround...")
+	spDirectoryRoles, spDirRolesErr := l.collectServicePrincipalDirectoryRolesSDK(servicePrincipals)
+	if spDirRolesErr != nil {
+		l.Logger.Error("Failed to collect SP directory roles via memberOf", "error", spDirRolesErr)
+	}
 	if len(spDirectoryRoles) > 0 {
 		// Merge into existing directoryRoleAssignments, deduplicating by principalId+roleId
 		existing := azureADData["directoryRoleAssignments"].([]interface{})
